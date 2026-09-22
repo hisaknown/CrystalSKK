@@ -104,14 +104,24 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
             } else {
                 "導入しました"
             };
-            report.say(&format!(
-                "CrystalSKK を{verb}: {}\n",
-                installed.dll.display()
-            ));
+            // どの DLL を入れたかは必ず示す。黙って選ぶと、古いものや
+            // debug ビルドが入っていても気づけない。
+            report.say(&format!("元: {}\n", installed.source.display()));
+            report.say(&format!("先: {}\n", installed.dll.display()));
+            report.say(&format!("CrystalSKK を{verb}。\n"));
+            if is_debug_build(&installed.source) {
+                report.say("\n");
+                report.say("これは debug ビルドです。動きはしますが遅い。\n");
+                report.say("cargo build -p crystalskk-tip --release を先に実行してください。\n");
+            }
+            if installed.cleared_per_user {
+                report.say("\n");
+                report.say("古い利用者ごとの登録を消しました。\n");
+                report.say("そちらが優先されるため、残っていると古い DLL が使われます。\n");
+            }
             report.say("\n");
             report.say("設定 → 時刻と言語 → 言語と地域 → 日本語 → 言語のオプション →\n");
             report.say("キーボード に CrystalSKK が現れます。\n");
-            report.say("まだ入力はできません。有効化して選べるところまでです。\n");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),
@@ -132,29 +142,55 @@ fn do_uninstall(purge: bool, report: &Report) -> ExitCode {
 }
 
 fn report_status() -> ExitCode {
-    match install::status() {
-        install::Status::NotInstalled => println!("導入されていません。"),
-        install::Status::Installed { dll, present } => {
-            println!("導入済み: {}", dll.display());
-            if !present {
-                println!();
-                println!("登録されている場所に DLL がありません。");
-                println!("uninstall してから install し直してください。");
-            }
-        }
+    let status = install::status();
+    if !status.is_installed() {
+        println!("導入されていません。");
+        return ExitCode::SUCCESS;
+    }
+
+    if let Some(machine) = &status.machine {
+        println!("機械全体:     {}", machine.display());
+    }
+    if let Some(per_user) = &status.per_user {
+        println!("利用者ごと:   {}", per_user.display());
+    }
+
+    let Some(effective) = status.effective() else {
+        return ExitCode::SUCCESS;
+    };
+    println!("実際に使う:   {}", effective.display());
+
+    if !effective.is_file() {
+        println!();
+        println!("登録されている場所に DLL がありません。");
+        println!("install し直してください。");
+    }
+    if status.per_user.is_some() && status.machine.is_some() {
+        println!();
+        println!("利用者ごとの登録が機械全体の登録より優先されています。");
+        println!("install し直すと、古いほうは消えます。");
     }
     ExitCode::SUCCESS
 }
 
+/// 見るからに debug ビルドの置き場所か。
+fn is_debug_build(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case("debug"))
+}
+
 /// 場所を指定されなかったときに探す先。
+///
+/// release を実行ファイルの隣より先に見る。`cargo run` で呼ばれると隣は
+/// `target/debug` になり、直前に release を作っていても debug が選ばれて
+/// しまうため。配って使うときは `target` が無いので、隣が選ばれる。
 fn default_source() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    let mut candidates = vec![PathBuf::from("target/release").join(install::DLL_NAME)];
     if let Ok(exe) = std::env::current_exe()
         && let Some(directory) = exe.parent()
     {
         candidates.push(directory.join(install::DLL_NAME));
     }
-    candidates.push(PathBuf::from("target/release").join(install::DLL_NAME));
     candidates.push(PathBuf::from("target/debug").join(install::DLL_NAME));
     candidates.into_iter().find(|path| path.is_file())
 }

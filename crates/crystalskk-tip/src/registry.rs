@@ -80,6 +80,26 @@ pub fn unregister_class() -> Result<()> {
     machine.or(per_user)
 }
 
+/// 利用者ごとのクラス登録だけを消す。
+///
+/// COM は `HKEY_CURRENT_USER` を `HKEY_LOCAL_MACHINE` より先に見る。
+/// 利用者ごとの登録が残っていると、機械全体へ入れ直しても古い DLL が
+/// 使われ続ける。導入のたびにこれを消しておく必要がある。
+pub fn unregister_per_user_class() -> Result<()> {
+    let key = HSTRING::from(class_key());
+    delete_tree(HKEY_CURRENT_USER, &key)
+}
+
+/// 利用者ごとに登録されている DLL の場所。
+pub fn per_user_dll_path() -> Option<String> {
+    read_dll_path(HKEY_CURRENT_USER)
+}
+
+/// 機械全体に登録されている DLL の場所。
+pub fn machine_dll_path() -> Option<String> {
+    read_dll_path(HKEY_LOCAL_MACHINE)
+}
+
 fn delete_tree(root: HKEY, key: &HSTRING) -> Result<()> {
     // SAFETY: 根のハンドルは定数で、キー名は有効な文字列。
     let status = unsafe { RegDeleteTreeW(root, key) };

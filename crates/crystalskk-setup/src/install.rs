@@ -20,23 +20,34 @@ use crystalskk_tip::{profile, registry};
 /// 導入した結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
+    /// 写した元の DLL。
+    pub source: PathBuf,
     /// 実際に登録した DLL の場所。
     pub dll: PathBuf,
     /// 入れ替えのために古い DLL を退けたか。
     pub replaced: bool,
+    /// 利用者ごとの古い登録を消したか。
+    pub cleared_per_user: bool,
 }
 
 /// 今の導入状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    /// 登録されていない。
-    NotInstalled,
-    /// 登録されている。
-    Installed {
-        dll: PathBuf,
-        /// 登録されている場所に DLL が実在するか。
-        present: bool,
-    },
+pub struct Status {
+    /// 機械全体に登録されている DLL。
+    pub machine: Option<PathBuf>,
+    /// 利用者ごとに登録されている DLL。これがあると機械全体の登録より優先される。
+    pub per_user: Option<PathBuf>,
+}
+
+impl Status {
+    /// 実際に使われる DLL。COM は利用者ごとの登録を先に見る。
+    pub fn effective(&self) -> Option<&PathBuf> {
+        self.per_user.as_ref().or(self.machine.as_ref())
+    }
+
+    pub fn is_installed(&self) -> bool {
+        self.effective().is_some()
+    }
 }
 
 /// 置き場所。`%ProgramFiles%\CrystalSKK\bin`。
@@ -84,13 +95,20 @@ pub fn install(source: &Path) -> io::Result<Installed> {
         })?;
     }
 
+    // 利用者ごとの登録が残っていると、そちらが優先されて古い DLL が
+    // 使われ続ける。入れ直すたびに必ず消す。
+    let cleared_per_user = registry::per_user_dll_path().is_some();
+    registry::unregister_per_user_class().map_err(|e| to_io("古い利用者ごとの登録の削除", e))?;
+
     let path = destination.to_string_lossy().into_owned();
     registry::register_class(&path).map_err(|e| to_io("COM のクラス登録", e))?;
     profile::register_profile(&path).map_err(|e| to_io("入力方式の登録", e))?;
 
     Ok(Installed {
+        source: source.to_path_buf(),
         dll: destination,
         replaced,
+        cleared_per_user,
     })
 }
 
@@ -125,13 +143,9 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
 
 /// 導入されているか調べる。
 pub fn status() -> Status {
-    match registry::registered_dll_path() {
-        Some(path) => {
-            let dll = PathBuf::from(path);
-            let present = dll.is_file();
-            Status::Installed { dll, present }
-        }
-        None => Status::NotInstalled,
+    Status {
+        machine: registry::machine_dll_path().map(PathBuf::from),
+        per_user: registry::per_user_dll_path().map(PathBuf::from),
     }
 }
 
