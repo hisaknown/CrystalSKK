@@ -29,3 +29,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0010](0010-publish-the-input-mode-through-compartments.md) | 入力モードは区画に書いて伝える | Accepted (一部を 0012 が覆す) | ADR-0009 |
 | [0011](0011-declare-every-capability-as-a-category.md) | 使える場面は分類として名乗る | Accepted | ADR-0010 |
 | [0012](0012-the-open-close-compartment-is-the-truth.md) | 入力方式の入切は向こうが決める | Accepted | ADR-0010 |
+| [0013](0013-on-is-the-resting-state.md) | 入が常態で、切は SKK に手を引かせるためにある | Accepted | ADR-0012 |
