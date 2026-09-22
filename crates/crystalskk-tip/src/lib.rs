@@ -23,9 +23,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_POINTER, HMODULE, S_FALSE, S_OK};
 use windows::Win32::System::Com::IClassFactory;
-use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows::core::{BOOL, GUID, HRESULT, Interface};
 
+pub mod candwin;
 pub mod com;
 pub mod compartment;
 pub mod dict;
@@ -52,14 +53,26 @@ pub(crate) fn module() -> HMODULE {
     HMODULE(MODULE.load(Ordering::Acquire) as *mut c_void)
 }
 
-/// DLL の出入り口。ハンドルを覚えるためだけに使う。
+/// DLL の出入り口。
 ///
-/// ここでは何もしない。`DllMain` の中でできることは強く制限されており、
-/// COM の呼び出しもロックの取得も行ってはならない。
+/// ここでできることは強く制限されている。COM の呼び出しもロックの取得も
+/// 行ってはならない。入るときはハンドルを覚えるだけにする。
+///
+/// # 降りるときに窓の種別を外す
+///
+/// 候補の窓の種別 ([`candwin`]) は、窓の手続きとして**この DLL の中の
+/// 関数を指している**。種別を残したまま DLL が降ろされると、その指し先が
+/// 消える。次に誰かが同じ名前の窓を作れば、無い関数へ飛ぶことになる。
+///
+/// 種別の登録は使うときまで遅らせているが、**外すのはここでしかできない**。
+/// CorvusSKK も同じ場所で外している。
 #[unsafe(no_mangle)]
 pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_void) -> BOOL {
     if reason == DLL_PROCESS_ATTACH {
         MODULE.store(module.0 as usize, Ordering::Release);
+    }
+    if reason == DLL_PROCESS_DETACH {
+        candwin::unregister_class();
     }
     true.into()
 }

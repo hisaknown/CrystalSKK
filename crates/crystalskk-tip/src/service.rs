@@ -27,6 +27,7 @@ use windows::core::{
 use crystalskk_core::engine::Event;
 use crystalskk_core::{Engine, InputMode};
 
+use crate::candwin::{CandidateWindow, Page};
 use crate::dict::SharedUserDict;
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
@@ -81,6 +82,8 @@ pub struct TextService {
     ///
     /// 打鍵をまたいで持ち越す。開いていなければ `None`。
     composition: RefCell<Option<(ITfContext, ITfComposition)>>,
+    /// 候補の一覧を出す小窓。出す段階になるまで作らない。
+    candidates: CandidateWindow,
 }
 
 impl Default for TextService {
@@ -97,6 +100,7 @@ impl TextService {
             engine: RefCell::new(engine),
             user_dictionary,
             composition: RefCell::new(None),
+            candidates: CandidateWindow::new(),
         }
     }
 
@@ -216,6 +220,38 @@ impl TextService {
         compartment::publish_mode(&thread_manager, client_id, mode);
     }
 
+    /// 候補の一覧を、いまの状態に合わせる。
+    ///
+    /// 出すかどうかはエンジンが決めている。ここは「出せと言われたら出す」
+    /// だけで、**何回目の変換かといった判断をこちらへ持ち込まない**。
+    ///
+    /// `anchor` は未確定の文字列の画面上の位置。取れなかったときは窓を
+    /// 出さない。**見当違いの場所に出すくらいなら、出さないほうがよい。**
+    fn show_candidates(&self, anchor: Option<windows::Win32::Foundation::RECT>) {
+        let view = self.engine.borrow().candidates();
+        let Some(view) = view.filter(|view| view.listing) else {
+            self.candidates.hide();
+            return;
+        };
+        let Some(anchor) = anchor else {
+            log::trace("未確定の位置が分からないので候補の窓を出さない");
+            self.candidates.hide();
+            return;
+        };
+
+        let okuri = view.okuri.as_deref().unwrap_or("");
+        let page = Page {
+            entries: view
+                .page()
+                .into_iter()
+                .map(|(label, candidate)| (label, format!("{}{okuri}", candidate.word)))
+                .collect(),
+            number: view.page_number() + 1,
+            count: view.page_count(),
+        };
+        self.candidates.show(&page, anchor);
+    }
+
     /// 入力方式が切であることを表示に出す。
     ///
     /// 切ったときに何もしないと、**前のモードの顔のまま残る**。打てないのに
@@ -232,7 +268,16 @@ impl TextService {
     }
 
     /// 開いたままの composition を片付ける。
+    ///
+    /// 候補の窓も一緒に畳む。**未確定の文字列が消えたのに一覧だけ残ると、
+    /// どこに対する候補なのか分からなくなる。**
     fn drop_composition(&self) {
+        self.candidates.hide();
+        self.drop_composition_only();
+    }
+
+    /// composition だけを片付ける。
+    fn drop_composition_only(&self) {
         let Some((context, composition)) = self.composition.borrow_mut().take() else {
             return;
         };
@@ -244,6 +289,7 @@ impl TextService {
 
     fn deactivate(&self) -> Result<()> {
         self.drop_composition();
+        self.candidates.close();
         self.user_dictionary.save();
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
@@ -376,11 +422,17 @@ impl TextService_Impl {
             &preedit,
             carried,
         ) {
-            Ok(next) => {
-                *self.this.composition.borrow_mut() = next.map(|c| (context.clone(), c));
+            Ok(applied) => {
+                *self.this.composition.borrow_mut() =
+                    applied.composition.map(|c| (context.clone(), c));
                 log::trace("文書へ反映した");
+                self.this.show_candidates(applied.extent);
             }
-            Err(e) => log::error(&format!("文書へ反映できなかった: {}", e.message())),
+            Err(e) => {
+                log::error(&format!("文書へ反映できなかった: {}", e.message()));
+                // 書けていない以上、窓だけ残しても嘘になる。
+                self.this.candidates.hide();
+            }
         }
         response.handled.into()
     }

@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 
-use windows::Win32::Foundation::E_FAIL;
+use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
     ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
@@ -43,6 +43,11 @@ pub struct Update {
     preedit: Vec<u16>,
     /// 入る前に開いていた composition。出るときに新しい状態を書き戻す。
     composition: RefCell<Option<ITfComposition>>,
+    /// 未確定の文字列が画面上で占める矩形。
+    ///
+    /// 候補の窓をどこへ置くかは、これを見て決める。**編集権のある間しか
+    /// 尋ねられない**ので、書き込みのついでにここで取っておく。
+    extent: RefCell<Option<RECT>>,
 }
 
 impl std::fmt::Debug for Update {
@@ -91,9 +96,31 @@ impl ITfEditSession_Impl for Update_Impl {
                 log::trace("未確定がなくなったので composition を閉じた");
             }
 
+            // 窓の置き場所を、composition が開いているうちに尋ねる。
+            *this.extent.borrow_mut() = composition
+                .as_ref()
+                .and_then(|opened| text_extent(&this.context, ec, opened));
+
             *this.composition.borrow_mut() = composition;
             Ok(())
         })
+    }
+}
+
+/// 未確定の文字列が画面のどこにあるかを尋ねる。
+///
+/// answer は画面座標。取れないことはあり、そのときは窓を出す位置が
+/// 決まらないだけなので、入力そのものは続ける。
+fn text_extent(context: &ITfContext, ec: u32, composition: &ITfComposition) -> Option<RECT> {
+    // SAFETY: 編集権はこの呼び出しのためのもので、範囲は composition のもの。
+    unsafe {
+        let view = context.GetActiveView().ok()?;
+        let range = composition.GetRange().ok()?;
+        let mut rect = RECT::default();
+        let mut clipped = windows::core::BOOL::default();
+        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
+        // 潰れた矩形は当てにならない。アプリがまだ描いていないことがある。
+        (rect.right > rect.left || rect.bottom > rect.top).then_some(rect)
     }
 }
 
@@ -213,10 +240,22 @@ unsafe fn set_selection(
     result
 }
 
+/// 一度の書き込みで分かったこと。
+#[derive(Debug, Default)]
+pub struct Applied {
+    /// 次に持ち越す composition。`None` なら開いていない。
+    pub composition: Option<ITfComposition>,
+    /// 未確定の文字列が画面上で占める矩形。候補の窓を置く目印。
+    pub extent: Option<RECT>,
+}
+
 /// 文書の見え方を、確定と未確定の組に合わせる。
 ///
-/// `composition` には前回から持ち越した composition を渡す。返るのは
-/// 次に持ち越すもの。`None` なら開いていない。
+/// `composition` には前回から持ち越した composition を渡す。
+///
+/// 未確定の文字列の画面上の位置も、**同じセッションの中で**尋ねて返す。
+/// 位置を訊くには編集権が要るので、別に取り直すと一打鍵あたり二度
+/// セッションを頼むことになる。
 ///
 /// 打鍵の処理中なので同期の編集セッションを求める。TSF が断ることも
 /// ありうるが、そのときは入力が届かないだけで、壊れはしない。
@@ -227,9 +266,9 @@ pub fn update(
     commit: &str,
     preedit: &str,
     composition: Option<ITfComposition>,
-) -> Result<Option<ITfComposition>> {
+) -> Result<Applied> {
     if commit.is_empty() && preedit.is_empty() && composition.is_none() {
-        return Ok(None);
+        return Ok(Applied::default());
     }
 
     let session = ComObject::new(Update {
@@ -238,6 +277,7 @@ pub fn update(
         commit: commit.encode_utf16().collect(),
         preedit: preedit.encode_utf16().collect(),
         composition: RefCell::new(composition),
+        extent: RefCell::new(None),
     });
     let requested: ITfEditSession = session.to_interface();
 
@@ -246,7 +286,10 @@ pub fn update(
         unsafe { context.RequestEditSession(client_id, &requested, TF_ES_SYNC | TF_ES_READWRITE)? };
     result.ok()?;
 
-    Ok(session.composition.borrow_mut().take())
+    Ok(Applied {
+        composition: session.composition.borrow_mut().take(),
+        extent: *session.extent.borrow(),
+    })
 }
 
 /// 開いたままの composition を、文書から取り除く。
