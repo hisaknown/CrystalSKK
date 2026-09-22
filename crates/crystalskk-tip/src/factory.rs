@@ -69,20 +69,22 @@ impl IClassFactory_Impl for ClassFactory_Impl {
         riid: *const windows::core::GUID,
         ppvobject: *mut *mut c_void,
     ) -> Result<()> {
-        if ppvobject.is_null() {
-            return Err(E_POINTER.into());
-        }
-        // SAFETY: null でないことを確かめた出力先を、まず空にする。
-        unsafe { *ppvobject = std::ptr::null_mut() };
+        crate::guard::guard("CreateInstance", || {
+            if ppvobject.is_null() {
+                return Err(E_POINTER.into());
+            }
+            // SAFETY: null でないことを確かめた出力先を、まず空にする。
+            unsafe { *ppvobject = std::ptr::null_mut() };
 
-        // 集約 (aggregation) は使わない。
-        if punkouter.is_some() {
-            return Err(CLASS_E_NOAGGREGATION.into());
-        }
+            // 集約 (aggregation) は使わない。
+            if punkouter.is_some() {
+                return Err(CLASS_E_NOAGGREGATION.into());
+            }
 
-        let service: IUnknown = TextService::new().into();
-        // SAFETY: `riid` と `ppvobject` は COM の約束どおり有効な場所を指す。
-        unsafe { service.query(riid, ppvobject).ok() }
+            let service: IUnknown = TextService::new().into();
+            // SAFETY: `riid` と `ppvobject` は COM の約束どおり有効な場所を指す。
+            unsafe { service.query(riid, ppvobject).ok() }
+        })
     }
 
     /// COM は DLL を保持したいときにこれを呼ぶ。生存数に足し引きする。

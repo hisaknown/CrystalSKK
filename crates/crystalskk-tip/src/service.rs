@@ -247,16 +247,16 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
     /// 離した打鍵は使わない。押した側だけで足りる。
     fn OnTestKeyUp(&self, _pic: Ref<ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        Ok(false.into())
+        guard("OnTestKeyUp", || Ok(false.into()))
     }
 
     fn OnKeyUp(&self, _pic: Ref<ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        Ok(false.into())
+        guard("OnKeyUp", || Ok(false.into()))
     }
 
     /// 横取りするキーはまだ登録していない。
     fn OnPreservedKey(&self, _pic: Ref<ITfContext>, _rguid: *const GUID) -> Result<BOOL> {
-        Ok(false.into())
+        guard("OnPreservedKey", || Ok(false.into()))
     }
 }
 

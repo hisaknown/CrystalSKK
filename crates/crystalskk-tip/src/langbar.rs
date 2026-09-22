@@ -102,32 +102,34 @@ impl ITfLangBarItem_Impl for ModeIndicator_Impl {
         reason = "COM の呼び出し規約が引数の有効性を保証する"
     )]
     fn GetInfo(&self, pinfo: *mut TF_LANGBARITEMINFO) -> Result<()> {
-        if pinfo.is_null() {
-            return Err(E_INVALIDARG.into());
-        }
+        guard("GetInfo", || {
+            if pinfo.is_null() {
+                return Err(E_INVALIDARG.into());
+            }
 
-        let mut info = TF_LANGBARITEMINFO {
-            clsidService: CLSID_CRYSTALSKK,
-            guidItem: GUID_CRYSTALSKK_LANGBAR,
-            // 押せる釦として、トレイにも出す。
-            dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
-            ulSort: SORT_ORDER,
-            szDescription: [0; 32],
-        };
-        write_fixed(&mut info.szDescription, "CrystalSKK");
+            let mut info = TF_LANGBARITEMINFO {
+                clsidService: CLSID_CRYSTALSKK,
+                guidItem: GUID_CRYSTALSKK_LANGBAR,
+                // 押せる釦として、トレイにも出す。
+                dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
+                ulSort: SORT_ORDER,
+                szDescription: [0; 32],
+            };
+            write_fixed(&mut info.szDescription, "CrystalSKK");
 
-        // SAFETY: null でないことを確かめた書き込み先へ、埋めた値を写す。
-        unsafe { *pinfo = info };
-        Ok(())
+            // SAFETY: null でないことを確かめた書き込み先へ、埋めた値を写す。
+            unsafe { *pinfo = info };
+            Ok(())
+        })
     }
 
     /// 隠す理由はないので、常に表示する。
     fn GetStatus(&self) -> Result<u32> {
-        Ok(0)
+        guard("GetStatus", || Ok(0))
     }
 
     fn Show(&self, _fshow: windows::core::BOOL) -> Result<()> {
-        Ok(())
+        guard("Show", || Ok(()))
     }
 
     fn GetTooltipString(&self) -> Result<BSTR> {
@@ -140,20 +142,20 @@ impl ITfLangBarItem_Impl for ModeIndicator_Impl {
 impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
     /// 押されたときの動きはまだ決めていない。
     fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        Ok(())
+        guard("OnClick", || Ok(()))
     }
 
     fn InitMenu(&self, _pmenu: Ref<ITfMenu>) -> Result<()> {
-        Ok(())
+        guard("InitMenu", || Ok(()))
     }
 
     fn OnMenuSelect(&self, _wid: u32) -> Result<()> {
-        Ok(())
+        guard("OnMenuSelect", || Ok(()))
     }
 
-    /// 絵は持たないので、文字で表す。
+    /// 絵はまだ持たない。文字だけで表す。
     fn GetIcon(&self) -> Result<HICON> {
-        Err(E_FAIL.into())
+        guard("GetIcon", || Err(E_FAIL.into()))
     }
 
     fn GetText(&self) -> Result<BSTR> {
@@ -167,32 +169,36 @@ impl ITfSource_Impl for ModeIndicator_Impl {
         reason = "COM の呼び出し規約が引数の有効性を保証する"
     )]
     fn AdviseSink(&self, riid: *const GUID, punk: Ref<IUnknown>) -> Result<u32> {
-        // SAFETY: 呼び出し側が有効な GUID を渡すことは COM の約束。
-        if riid.is_null() || unsafe { *riid } != ITfLangBarItemSink::IID {
-            return Err(E_INVALIDARG.into());
-        }
-        let Some(sink) = punk
-            .as_ref()
-            .and_then(|u| u.cast::<ITfLangBarItemSink>().ok())
-        else {
-            return Err(E_INVALIDARG.into());
-        };
+        guard("AdviseSink", || {
+            // SAFETY: 呼び出し側が有効な GUID を渡すことは COM の約束。
+            if riid.is_null() || unsafe { *riid } != ITfLangBarItemSink::IID {
+                return Err(E_INVALIDARG.into());
+            }
+            let Some(sink) = punk
+                .as_ref()
+                .and_then(|u| u.cast::<ITfLangBarItemSink>().ok())
+            else {
+                return Err(E_INVALIDARG.into());
+            };
 
-        log::write("言語バーが変化の通知を求めてきた");
-        let cookie = *self.this.next_cookie.borrow();
-        *self.this.next_cookie.borrow_mut() = cookie.wrapping_add(1);
-        self.this.sinks.borrow_mut().push((cookie, sink));
-        Ok(cookie)
+            log::write("言語バーが変化の通知を求めてきた");
+            let cookie = *self.this.next_cookie.borrow();
+            *self.this.next_cookie.borrow_mut() = cookie.wrapping_add(1);
+            self.this.sinks.borrow_mut().push((cookie, sink));
+            Ok(cookie)
+        })
     }
 
     fn UnadviseSink(&self, dwcookie: u32) -> Result<()> {
-        let mut sinks = self.this.sinks.borrow_mut();
-        let before = sinks.len();
-        sinks.retain(|(cookie, _)| *cookie != dwcookie);
-        if sinks.len() == before {
-            return Err(E_INVALIDARG.into());
-        }
-        Ok(())
+        guard("UnadviseSink", || {
+            let mut sinks = self.this.sinks.borrow_mut();
+            let before = sinks.len();
+            sinks.retain(|(cookie, _)| *cookie != dwcookie);
+            if sinks.len() == before {
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        })
     }
 }
 
