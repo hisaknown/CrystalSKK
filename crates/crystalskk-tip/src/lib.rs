@@ -27,8 +27,10 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::{BOOL, GUID, HRESULT, Interface};
 
 pub mod com;
+pub mod edit;
 pub mod factory;
 pub mod guids;
+pub mod keys;
 pub mod profile;
 pub mod registry;
 pub mod service;

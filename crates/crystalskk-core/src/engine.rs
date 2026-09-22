@@ -235,6 +235,48 @@ impl Engine {
         self.romaji.clear();
     }
 
+    /// このキーをエンジンが処理するか。状態を変えずに答える。
+    ///
+    /// TSF は「食べるか」を先に尋ねてから実際に渡してくる
+    /// (`OnTestKeyDown` → `OnKeyDown`)。二つの答えが食い違うと打鍵が
+    /// 消えたり二重に入ったりするので、[`Self::press`] が返す `handled` と
+    /// 必ず一致していなければならない。一致は試験で担保している。
+    pub fn would_handle(&self, key: Key) -> bool {
+        match &self.state {
+            State::Direct => self.would_handle_direct(key),
+            State::Composing(comp) => would_handle_composing(comp, key),
+            State::Selecting(_) => would_handle_selecting(key),
+        }
+    }
+
+    fn would_handle_direct(&self, key: Key) -> bool {
+        // ひらがなへ戻す操作だけは、どのモードでも受け取る。
+        if key == Key::Ctrl('j') {
+            return true;
+        }
+        if !self.mode.is_kana() {
+            return match key {
+                Key::Char(_) | Key::Space => self.mode == InputMode::FullAscii,
+                Key::Enter => !self.registrations.is_empty(),
+                _ => false,
+            };
+        }
+        match key {
+            Key::Char(_) | Key::Space | Key::Ctrl('g') | Key::Ctrl('q') => true,
+            Key::Ctrl(_) | Key::Escape | Key::Tab | Key::Up | Key::Down => false,
+            // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
+            Key::Enter => !self.registrations.is_empty() || self.romaji.pending_kana().is_some(),
+            // 消すものがあるときだけ受け取る。
+            Key::Backspace => {
+                !self.romaji.is_empty()
+                    || self
+                        .registrations
+                        .last()
+                        .is_some_and(|r| !r.buffer.is_empty())
+            }
+        }
+    }
+
     /// 一打鍵を処理する。
     pub fn press(&mut self, key: Key) -> Response {
         let mut out = Out {
@@ -720,6 +762,25 @@ impl Engine {
             word: reg.buffer,
         });
         self.state = State::Direct;
+    }
+}
+
+/// 見出し語入力中に受け取るキーか。[`Engine::would_handle`] の一部。
+fn would_handle_composing(comp: &Composing, key: Key) -> bool {
+    match key {
+        Key::Ctrl('g') | Key::Ctrl('j') => true,
+        Key::Ctrl('q') => !comp.abbrev,
+        Key::Ctrl(_) | Key::Tab | Key::Up | Key::Down => false,
+        _ => true,
+    }
+}
+
+/// 候補選択中に受け取るキーか。[`Engine::would_handle`] の一部。
+fn would_handle_selecting(key: Key) -> bool {
+    match key {
+        Key::Ctrl('j') | Key::Ctrl('g') | Key::Ctrl('q') => true,
+        Key::Ctrl(_) | Key::Tab => false,
+        _ => true,
     }
 }
 
