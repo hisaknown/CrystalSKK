@@ -14,20 +14,24 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfKeyEventSink,
-    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfTextInputProcessor,
-    ITfTextInputProcessor_Impl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfThreadMgr,
+    ITfCompartmentEventSink, ITfCompartmentEventSink_Impl, ITfComposition, ITfCompositionSink,
+    ITfCompositionSink_Impl, ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
+    ITfLangBarItem, ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
+    ITfTextInputProcessorEx_Impl, ITfThreadMgr,
 };
-use windows::core::{BOOL, ComObject, GUID, IUnknownImpl, Interface, Ref, Result, implement};
+use windows::Win32::UI::TextServices::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE;
+use windows::core::{
+    BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
+};
 
-use crystalskk_core::Engine;
 use crystalskk_core::engine::Event;
+use crystalskk_core::{Engine, InputMode};
 
 use crate::dict::SharedUserDict;
 use crate::guard::guard;
+use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
 use crate::langbar::ModeIndicator;
-use crate::{compartment, dict, edit, keys, langbar, log};
+use crate::{compartment, dict, edit, keys, langbar, log, preserved};
 
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
@@ -42,6 +46,8 @@ struct Activation {
     indicator: ITfLangBarItem,
     /// 表示を書き換えるための、実体への持ち手。
     indicator_object: ComObject<ModeIndicator>,
+    /// 入切の区画を見張るための受付番号。外すときに要る。
+    open_close_cookie: Option<u32>,
 }
 
 /// CrystalSKK の TIP。
@@ -49,7 +55,8 @@ struct Activation {
     ITfTextInputProcessorEx,
     ITfTextInputProcessor,
     ITfKeyEventSink,
-    ITfCompositionSink
+    ITfCompositionSink,
+    ITfCompartmentEventSink
 )]
 pub struct TextService {
     /// 有効化されている間だけ中身が入る。
@@ -91,6 +98,52 @@ impl TextService {
     /// 有効化されているときだけ、識別子を返す。
     fn client_id(&self) -> Option<u32> {
         self.activation.borrow().as_ref().map(|a| a.client_id)
+    }
+
+    /// 有効化されているときだけ、スレッドの持ち手を複製して返す。
+    ///
+    /// 借用を COM の呼び出しより長く持たないよう、必ず複製で渡す。
+    fn thread_manager(&self) -> Option<ITfThreadMgr> {
+        self.activation
+            .borrow()
+            .as_ref()
+            .map(|a| a.thread_manager.clone())
+    }
+
+    /// いま打鍵を受け取ってよいか。
+    ///
+    /// 入力方式が切なら受け取らない。入力先が文字を断っていても受け取らない。
+    /// **どちらも向こうが決めることで、こちらの入力モードとは関係がない。**
+    fn accepts_keys(&self) -> bool {
+        let Some(thread_manager) = self.thread_manager() else {
+            return false;
+        };
+        compartment::is_open(&thread_manager) && compartment::accepts_input(&thread_manager)
+    }
+
+    /// 入切の区画を読み直し、こちらの状態を合わせる。
+    ///
+    /// 入なら入力を受けられる状態にし、切なら途中経過を捨てる。
+    /// **区画が本当で、こちらが従う** (ADR-0012)。
+    fn sync_with_open_state(&self) {
+        let Some(thread_manager) = self.thread_manager() else {
+            return;
+        };
+        let open = compartment::is_open(&thread_manager);
+        log::write(&format!(
+            "入切を読んだ: {}",
+            if open { "入" } else { "切" }
+        ));
+
+        if open {
+            // 入にされた直後はひらがなから始める。日本語を打ちたくて
+            // 入にしたはずで、英数から始めても一手無駄になる。
+            self.engine.borrow_mut().restart_in(InputMode::Hiragana);
+            self.show_mode();
+        } else {
+            self.drop_composition();
+            self.engine.borrow_mut().reset();
+        }
     }
 
     /// 学習と辞書登録をユーザー辞書へ反映する。
@@ -156,6 +209,10 @@ impl TextService {
             return Ok(());
         };
         log::write("無効化された");
+        if let Some(cookie) = activation.open_close_cookie {
+            compartment::unadvise_open_close(&activation.thread_manager, cookie);
+        }
+        preserved::unregister(&activation.keystrokes, activation.client_id);
         langbar::remove(&activation.thread_manager, &activation.indicator);
         // 受け口を外す。外せなくても、保持していたものは落とす。
         // SAFETY: 有効化のときに受け取った識別子をそのまま返している。
@@ -204,16 +261,29 @@ impl TextService_Impl {
             log::write(&format!("言語バーに項目を出せなかった: {}", e.message()));
         }
 
+        // 入切の変化を知らせてもらう。**これを聞いていないと、利用者が
+        // 入力方式を入にしたことに気づけない** (ADR-0012)。
+        let sink: IUnknown = self.to_interface();
+        let open_close_cookie = compartment::advise_open_close(&thread_manager, &sink);
+        if open_close_cookie.is_none() {
+            log::write("入切の変化を知らせてもらえない");
+        }
+
+        // 入切のキーを横取りする。入にする手立てが無ければ、入力方式は
+        // 切られたまま二度と戻らない。
+        preserved::register(&keystrokes, client_id);
+
         *self.this.activation.borrow_mut() = Some(Activation {
             client_id,
             keystrokes,
             thread_manager,
             indicator,
             indicator_object,
+            open_close_cookie,
         });
 
-        // 最初のモードも掲示する。何も書かないと、表示が決まらない。
-        self.this.show_mode();
+        // 入っているなら、そのモードを掲示する。切なら何も言わない。
+        self.this.sync_with_open_state();
         Ok(())
     }
 
@@ -221,6 +291,9 @@ impl TextService_Impl {
     ///
     /// 戻り値は「この打鍵を食べたか」。食べなかった打鍵はアプリへ渡る。
     fn handle_key(&self, context: Ref<ITfContext>, wparam: WPARAM) -> BOOL {
+        if !self.this.accepts_keys() {
+            return false.into();
+        }
         let translated = keys::translate(wparam);
         keys::log_translation(wparam, translated);
         let Some(key) = translated else {
@@ -274,6 +347,9 @@ impl TextService_Impl {
 
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
     fn would_handle_key(&self, wparam: WPARAM) -> BOOL {
+        if !self.this.accepts_keys() {
+            return false.into();
+        }
         let translated = keys::translate(wparam);
         let Some(key) = translated else {
             // 食べないと答えた打鍵は `OnKeyDown` に来ないので、
@@ -326,6 +402,29 @@ impl ITfCompositionSink_Impl for TextService_Impl {
     }
 }
 
+impl ITfCompartmentEventSink_Impl for TextService_Impl {
+    /// 見張っている区画の値が変わった。
+    ///
+    /// 書いたのが誰かは分からない。利用者かもしれないし、アプリかもしれない。
+    /// **こちらが書いた値が戻ってくることもある。** どれであっても、読んで
+    /// 合わせるだけでよい。
+    // TSF が決めた形なので、生のポインタを受けるしかない。中では
+    // `as_ref` で確かめてから使う。
+    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "COM の口の形が決まっている")]
+    fn OnChange(&self, rguid: *const GUID) -> Result<()> {
+        guard("OnChange", || {
+            // SAFETY: TSF が渡す GUID への参照で、この呼び出しの間は有効。
+            let Some(guid) = (unsafe { rguid.as_ref() }) else {
+                return Ok(());
+            };
+            if *guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+                self.this.sync_with_open_state();
+            }
+            Ok(())
+        })
+    }
+}
+
 impl ITfKeyEventSink_Impl for TextService_Impl {
     /// 入力先が変わった。入力の途中経過は続けようがないので捨てる。
     fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
@@ -358,9 +457,44 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         guard("OnKeyUp", || Ok(false.into()))
     }
 
-    /// 横取りするキーはまだ登録していない。
-    fn OnPreservedKey(&self, _pic: Ref<ITfContext>, _rguid: *const GUID) -> Result<BOOL> {
-        guard("OnPreservedKey", || Ok(false.into()))
+    /// 入切のキーが押された。
+    ///
+    /// 押されたことをここで受け、区画を書き換える。こちらの状態はその
+    /// 変化の通知を聞いて合わせる。**二箇所で状態を持たないよう、書いた
+    /// ものを読み直す。**
+    // TSF が決めた形なので、生のポインタを受けるしかない。中では
+    // `as_ref` で確かめてから使う。
+    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "COM の口の形が決まっている")]
+    fn OnPreservedKey(&self, _pic: Ref<ITfContext>, rguid: *const GUID) -> Result<BOOL> {
+        guard("OnPreservedKey", || {
+            // SAFETY: TSF が渡す GUID への参照で、この呼び出しの間は有効。
+            let Some(guid) = (unsafe { rguid.as_ref() }) else {
+                return Ok(false.into());
+            };
+            let Some(thread_manager) = self.this.thread_manager() else {
+                return Ok(false.into());
+            };
+            let Some(client_id) = self.this.client_id() else {
+                return Ok(false.into());
+            };
+
+            let wanted = if *guid == GUID_PRESERVED_KEY_ON {
+                true
+            } else if *guid == GUID_PRESERVED_KEY_OFF {
+                false
+            } else {
+                return Ok(false.into());
+            };
+
+            if compartment::is_open(&thread_manager) != wanted {
+                log::write(&format!(
+                    "入切のキーで{}にする",
+                    if wanted { "入" } else { "切" }
+                ));
+                compartment::set_open(&thread_manager, client_id, wanted);
+            }
+            Ok(true.into())
+        })
     }
 }
 

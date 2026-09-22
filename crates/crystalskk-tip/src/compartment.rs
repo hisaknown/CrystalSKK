@@ -1,40 +1,101 @@
-//! 入力モードを Windows へ伝える。
+//! 入力方式の入切と入力モードを、Windows とやり取りする。
 //!
-//! 言語バーの項目に絵を返すだけでは、トレイの表示は出ない。**いまどの
-//! 入力モードにいるかは「区画」(compartment) に書いて伝える**のが TSF の
-//! 決まりで、Windows の表示はそちらを見ている。
+//! 区画 (compartment) は入力方式と外の世界が値を置き合う掲示板である。
+//! こちらの状態を知らせるためだけのものではない。**外が書いた値を読む**
+//! ためのものでもある。
 //!
-//! 区画は入力方式と外の世界が値をやり取りする掲示板のようなもので、
-//! `GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION` に書いた値が
-//! 「ひらがな」「全角カタカナ」…… として解釈される。
+//! # 入切は向こうが決める
 //!
-//! 値の組み合わせは日本語入力の慣例に従う。CrystalSKK の五つのモードを
-//! その語彙へ訳すのが [`conversion_mode`] である。
+//! `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` は入力方式が入か切かを表す。
+//! これを書くのは CrystalSKK だけではない。利用者が入切のキーを押せば
+//! Windows が、アプリが自分の都合で入力方式を切りたければアプリが書く。
 //!
-//! # 「IME がオンか」も伝える
+//! **どちらが本当かといえば、この区画のほうである。** こちらが「ひらがな
+//! のつもり」でも、区画が切なら打鍵は届かない。だから読む。書いた値が
+//! そのまま残っている前提で動いてはいけない (ADR-0012)。
 //!
-//! もう一つ `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` という区画があり、
-//! **入力方式がオンかオフか**を表す。オフだと Windows は変換モードを
-//! 見ない。モードを書いても表示が出ないのはこれが理由になりうる。
+//! # 入力モードは知らせるだけ
 //!
-//! SKK には「オン・オフ」という別の軸がない。そこで日本語入力の慣例に
-//! 合わせ、**半角英数を「オフ」、それ以外を「オン」**として伝える
-//! ([`is_open`])。利用者から見た意味も、そのほうが素直である。
+//! `..._INPUTMODE_CONVERSION` に書いた値が「ひらがな」「全角カタカナ」……
+//! として読まれる。トレイの表示はこれを見ている。値の組み合わせは日本語
+//! 入力の慣例に従い、[`conversion_mode`] が訳す。
+//!
+//! # 打鍵を食べてよい場面か
+//!
+//! 入力方式が入でも、いまの入力先が文字を受け取らないことがある。
+//! [`accepts_input`] は、いま焦点のある文脈がそれを断っていないかを見る。
 
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use windows::Win32::UI::TextServices::{
+    GUID_COMPARTMENT_EMPTYCONTEXT, GUID_COMPARTMENT_KEYBOARD_DISABLED,
     GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_SENTENCE,
-    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, ITfCompartmentMgr, ITfThreadMgr,
+    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, ITfCompartmentMgr, ITfSource, ITfThreadMgr,
     TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE, TF_CONVERSIONMODE_KATAKANA,
     TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN, TF_SENTENCEMODE_PHRASEPREDICT,
 };
-use windows::core::{GUID, Interface};
+use windows::core::{GUID, IUnknown, Interface};
 
 use crystalskk_core::InputMode;
 
 use crate::log;
 
+/// 入力方式が入になっているか。
+///
+/// 読めないときは切とみなす。**入っていると決めてかかって打鍵を食べると、
+/// 文字がどこにも出ないまま消える。** 分からないなら素通しするほうが害が
+/// 小さい。
+pub fn is_open(thread_manager: &ITfThreadMgr) -> bool {
+    read(thread_manager, &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE).is_some_and(|value| value != 0)
+}
+
+/// 入力方式の入切を書く。横取りキーで切り替えるときに使う。
+pub fn set_open(thread_manager: &ITfThreadMgr, client_id: u32, open: bool) {
+    let Ok(compartments) = thread_manager.cast::<ITfCompartmentMgr>() else {
+        return;
+    };
+    write(
+        &compartments,
+        client_id,
+        &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+        u32::from(open),
+    );
+}
+
+/// いまの入力先が打鍵を受け取るか。
+///
+/// 焦点のある文書の一番上の文脈に、二つの断りの印が立っていないかを見る。
+/// 文書も文脈も無いときは受け取らない。入力先が無いのだから、食べた文字は
+/// 行き場を失う。
+pub fn accepts_input(thread_manager: &ITfThreadMgr) -> bool {
+    // SAFETY: 焦点を尋ねて、返ったものをその場で使うだけ。
+    let context = unsafe {
+        let Ok(documents) = thread_manager.GetFocus() else {
+            return false;
+        };
+        match documents.GetTop() {
+            Ok(context) => context,
+            Err(_) => return false,
+        }
+    };
+
+    let Ok(compartments) = context.cast::<ITfCompartmentMgr>() else {
+        return false;
+    };
+    for guid in [
+        GUID_COMPARTMENT_KEYBOARD_DISABLED,
+        GUID_COMPARTMENT_EMPTYCONTEXT,
+    ] {
+        if read_from(&compartments, &guid).is_some_and(|value| value != 0) {
+            return false;
+        }
+    }
+    true
+}
+
 /// いまの入力モードを掲示する。
+///
+/// 入切には触れない。そちらは利用者とアプリのもので、こちらが勝手に
+/// 入れてよいものではない (ADR-0012)。
 ///
 /// 伝えられなくても入力そのものは続く。失敗しても記録するだけにする。
 pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMode) {
@@ -42,14 +103,6 @@ pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMo
         log::write("区画を扱えない");
         return;
     };
-
-    // まず「オンかオフか」。オフのまま変換モードを書いても読まれない。
-    write(
-        &compartments,
-        client_id,
-        &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
-        u32::from(is_open(mode)),
-    );
 
     // 文の変換の仕方。SKK は文法解析をしないが、掲示しないと
     // 「変換方式が決まっていない」扱いになる。
@@ -68,12 +121,36 @@ pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMo
     );
 }
 
-/// このモードは「入力方式がオン」か。
-///
-/// 半角英数だけをオフとする。日本語入力で「IME オフ」と言えば、
-/// 英字がそのまま入る状態を指すため。全角英数はオンのままにする。
-pub fn is_open(mode: InputMode) -> bool {
-    mode != InputMode::Ascii
+/// 入切の区画の変化を知らせてもらう。返るのは外すための受付番号。
+pub fn advise_open_close(thread_manager: &ITfThreadMgr, sink: &IUnknown) -> Option<u32> {
+    let compartments = thread_manager.cast::<ITfCompartmentMgr>().ok()?;
+    // SAFETY: GUID は定数、受け口はこちらが生かし続けるもの。
+    unsafe {
+        let compartment = compartments
+            .GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
+            .ok()?;
+        let source = compartment.cast::<ITfSource>().ok()?;
+        source
+            .AdviseSink(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, sink)
+            .ok()
+    }
+}
+
+/// 入切の区画の通知を止める。
+pub fn unadvise_open_close(thread_manager: &ITfThreadMgr, cookie: u32) {
+    let Ok(compartments) = thread_manager.cast::<ITfCompartmentMgr>() else {
+        return;
+    };
+    // SAFETY: 受付番号は [`advise_open_close`] が返したもの。
+    unsafe {
+        let Ok(compartment) = compartments.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
+        else {
+            return;
+        };
+        if let Ok(source) = compartment.cast::<ITfSource>() {
+            let _ = source.UnadviseSink(cookie);
+        }
+    }
 }
 
 /// 入力モードを、Windows が使う語彙に訳す。
@@ -98,6 +175,24 @@ pub fn conversion_mode(mode: InputMode) -> u32 {
         }
         InputMode::FullAscii => TF_CONVERSIONMODE_ALPHANUMERIC | TF_CONVERSIONMODE_FULLSHAPE,
         InputMode::Ascii => TF_CONVERSIONMODE_ALPHANUMERIC,
+    }
+}
+
+/// スレッドの区画から値を一つ読む。
+fn read(thread_manager: &ITfThreadMgr, guid: &GUID) -> Option<i32> {
+    let compartments = thread_manager.cast::<ITfCompartmentMgr>().ok()?;
+    read_from(&compartments, guid)
+}
+
+/// 区画から整数を読む。入っていなければ `None`。
+fn read_from(compartments: &ITfCompartmentMgr, guid: &GUID) -> Option<i32> {
+    // SAFETY: GUID は定数で、読んだ値はこの関数の中で使い切る。
+    unsafe {
+        let compartment = compartments.GetCompartment(guid).ok()?;
+        let variant = compartment.GetValue().ok()?;
+        let inner = &variant.Anonymous.Anonymous;
+        // 空の区画は「まだ誰も書いていない」。既定の値と混同しない。
+        (inner.vt == VT_I4).then(|| inner.Anonymous.lVal)
     }
 }
 
@@ -185,19 +280,6 @@ mod tests {
             conversion_mode(InputMode::FullAscii) & TF_CONVERSIONMODE_FULLSHAPE,
             0
         );
-    }
-
-    #[test]
-    fn only_half_width_ascii_counts_as_off() {
-        assert!(!is_open(InputMode::Ascii));
-        for mode in [
-            InputMode::Hiragana,
-            InputMode::Katakana,
-            InputMode::HalfKatakana,
-            InputMode::FullAscii,
-        ] {
-            assert!(is_open(mode), "{mode:?} はオン");
-        }
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod icon;
 pub mod keys;
 pub mod langbar;
 pub mod log;
+pub mod preserved;
 pub mod profile;
 pub mod registry;
 pub mod service;

@@ -26,5 +26,6 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0007](0007-installing-a-tip-requires-administrator.md) | TIP の導入には管理者権限が要る | Accepted | ADR-0006 |
 | [0008](0008-write-to-the-document-only-through-a-composition.md) | 文書への書き込みは必ず composition を通す | Accepted | PRD §3 |
 | [0009](0009-ship-the-profile-icon-as-an-ico-file.md) | 設定画面に出す絵は `.ico` ファイルとして置く | Accepted | PRD N-08 |
-| [0010](0010-publish-the-input-mode-through-compartments.md) | 入力モードは区画に書いて伝える | Accepted | ADR-0009 |
+| [0010](0010-publish-the-input-mode-through-compartments.md) | 入力モードは区画に書いて伝える | Accepted (一部を 0012 が覆す) | ADR-0009 |
 | [0011](0011-declare-every-capability-as-a-category.md) | 使える場面は分類として名乗る | Accepted | ADR-0010 |
+| [0012](0012-the-open-close-compartment-is-the-truth.md) | 入力方式の入切は向こうが決める | Accepted | ADR-0010 |
