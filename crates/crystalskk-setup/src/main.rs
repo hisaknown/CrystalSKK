@@ -118,6 +118,12 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
                 report.say("これは debug ビルドです。動きはしますが遅い。\n");
                 report.say("cargo build -p crystalskk-tip --release を先に実行してください。\n");
             }
+            if installed.retired {
+                report.say("\n");
+                report.say("古い DLL は使用中だったので、別名へ退けました。\n");
+                report.say("すでに開いているアプリは古いほうを使い続けます。\n");
+                report.say("入れ替えを反映するには、そのアプリを開き直してください。\n");
+            }
             if installed.cleared_per_user {
                 report.say("\n");
                 report.say("古い利用者ごとの登録を消しました。\n");

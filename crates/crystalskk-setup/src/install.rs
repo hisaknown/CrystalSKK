@@ -11,6 +11,16 @@
 //!
 //! ビルド成果物を直接登録しないのは、使用中の DLL がビルドに掴まれて
 //! 作り直せなくなるのを避けるため。
+//!
+//! # 使用中の DLL を入れ替える
+//!
+//! 読み込まれている DLL は上書きも削除もできない。だが**改名はできる**。
+//! 動いているプロセスはファイルの名前ではなく実体を掴んでいるため、
+//! 名前が変わっても困らない。
+//!
+//! そこで、古いものを退けてから新しいものを同じ名前で置く。登録した
+//! 場所は変わらず、サインインし直す必要もない。退けた残骸は次の導入の
+//! ついでに消す。そのときも使用中なら消せないが、いずれ消える。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -26,6 +36,10 @@ pub struct Installed {
     pub dll: PathBuf,
     /// 入れ替えのために古い DLL を退けたか。
     pub replaced: bool,
+    /// 使用中だったので、古い DLL を別名へ退けたか。
+    ///
+    /// 退けた場合、すでに動いているアプリは古いほうを使い続ける。
+    pub retired: bool,
     /// 利用者ごとの古い登録を消したか。
     pub cleared_per_user: bool,
 }
@@ -77,22 +91,37 @@ pub fn install(source: &Path) -> io::Result<Installed> {
     let destination = directory.join(DLL_NAME);
     let replaced = destination.exists();
 
+    // 前に退けたものを片付ける。使用中なら消せないが、それでよい。
+    sweep_retired(&directory);
+
     // 同じ場所を指しているなら写す必要はない。
     let same = std::fs::canonicalize(source)
         .ok()
         .zip(std::fs::canonicalize(&destination).ok())
         .is_some_and(|(a, b)| a == b);
+
+    let mut retired = false;
     if !same {
-        std::fs::copy(source, &destination).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "{} へ写せません: {e}。\
-                     すでに導入済みなら、この DLL を読み込んでいるアプリを閉じてから試してください。",
-                    destination.display()
-                ),
-            )
-        })?;
+        // まず上書きを試す。誰も読み込んでいなければこれで済む。
+        if let Err(busy) = std::fs::copy(source, &destination) {
+            // 読み込まれていて上書きできない。改名なら通るので、退ける。
+            retire(&destination).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{} を入れ替えられません。上書き: {busy} / 退避: {e}",
+                        destination.display()
+                    ),
+                )
+            })?;
+            retired = true;
+            std::fs::copy(source, &destination).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("{} へ写せません: {e}", destination.display()),
+                )
+            })?;
+        }
     }
 
     // 利用者ごとの登録が残っていると、そちらが優先されて古い DLL が
@@ -108,9 +137,42 @@ pub fn install(source: &Path) -> io::Result<Installed> {
         source: source.to_path_buf(),
         dll: destination,
         replaced,
+        retired,
         cleared_per_user,
     })
 }
+
+/// 使用中の DLL を別名へ退ける。
+///
+/// 読み込まれていても改名はできる。掴んでいるプロセスは実体を見ており、
+/// 名前を見ているわけではない。
+fn retire(destination: &Path) -> io::Result<()> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+
+    let mut retired = destination.as_os_str().to_owned();
+    retired.push(format!(".{RETIRED_SUFFIX}{stamp}"));
+    std::fs::rename(destination, PathBuf::from(retired))
+}
+
+/// 退けた残骸を消す。使用中なら消せないので、黙って見逃す。
+fn sweep_retired(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(DLL_NAME) && name.contains(RETIRED_SUFFIX) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 退けた DLL の名前に挟む印。
+const RETIRED_SUFFIX: &str = "old-";
 
 /// 削除する。`purge` が真なら写した DLL も消す。
 ///
@@ -134,6 +196,7 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
                 )
             })?;
         }
+        sweep_retired(&directory);
         // 空になったときだけ片付ける。他のものが入っていれば触らない。
         let _ = std::fs::remove_dir(&directory);
     }
@@ -180,6 +243,73 @@ mod tests {
     fn the_install_directory_sits_under_program_files() {
         let directory = install_dir().expect("ProgramFiles がある");
         assert!(directory.ends_with(Path::new("CrystalSKK").join("bin")));
+    }
+
+    /// 試験ごとに固有の作業ディレクトリ。
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("crystalskk-install-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("作業ディレクトリを作れる");
+        dir
+    }
+
+    /// 退けたファイルを数える。
+    fn retired_count(directory: &Path) -> usize {
+        std::fs::read_dir(directory)
+            .expect("読める")
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(DLL_NAME) && name.contains(RETIRED_SUFFIX)
+            })
+            .count()
+    }
+
+    #[test]
+    fn retiring_moves_the_dll_aside_under_a_new_name() {
+        let dir = scratch("retire");
+        let dll = dir.join(DLL_NAME);
+        std::fs::write(&dll, "古い中身").expect("置ける");
+
+        retire(&dll).expect("退けられる");
+
+        assert!(!dll.exists(), "元の名前は空く");
+        assert_eq!(retired_count(&dir), 1);
+    }
+
+    #[test]
+    fn the_freed_name_can_be_taken_by_the_new_dll() {
+        let dir = scratch("swap");
+        let dll = dir.join(DLL_NAME);
+        std::fs::write(&dll, "古い中身").expect("置ける");
+
+        retire(&dll).expect("退けられる");
+        std::fs::write(&dll, "新しい中身").expect("同じ名前で置ける");
+
+        assert_eq!(std::fs::read_to_string(&dll).expect("読める"), "新しい中身");
+    }
+
+    #[test]
+    fn sweeping_removes_what_was_retired_but_leaves_the_dll() {
+        let dir = scratch("sweep");
+        let dll = dir.join(DLL_NAME);
+        std::fs::write(&dll, "中身").expect("置ける");
+        retire(&dll).expect("退けられる");
+        std::fs::write(&dll, "新しい中身").expect("置ける");
+        assert_eq!(retired_count(&dir), 1);
+
+        sweep_retired(&dir);
+
+        assert_eq!(retired_count(&dir), 0);
+        assert!(dll.exists(), "使っているものは消さない");
+    }
+
+    #[test]
+    fn sweeping_an_empty_directory_does_nothing() {
+        let dir = scratch("sweep-empty");
+        sweep_retired(&dir);
+        assert_eq!(retired_count(&dir), 0);
     }
 
     #[test]
