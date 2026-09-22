@@ -4,100 +4,123 @@
 //! 触りたい側がセッションを実装して渡し、TSF が都合のよい時点で
 //! 呼び返す。打鍵の処理中は同期的に呼び返してもらえる。
 //!
-//! # なぜ composition を通すのか
+//! # composition を通す
 //!
-//! 確定した文字列を入れるだけなら、選択範囲に直接書けばよさそうに見える。
-//! だが実際にそれをすると、アプリによっては呼んだ先で落ちる。
+//! 文書へ書く手段は composition しかない (ADR-0008)。確定した文字列も
+//! 未確定の文字列も、同じ composition の中へ書く。違うのは、書いたあとに
+//! 閉じるかどうかだけである。
 //!
-//! CorvusSKK をはじめ動いている実装は、**確定した文字列であっても必ず
-//! composition を開いてその中に書き、書き終えてから閉じている**。TSF に
-//! とって、入力方式が文書へ書く手段はそれしかないのだと考えるのが正しい。
-//! ここでも同じ手順を踏む。
+//! - 確定した文字列 … 書いて、閉じる。閉じた時点で普通の文字になる
+//! - 未確定の文字列 … 書いて、開いたままにする。次の打鍵で書き換える
 //!
-//! 手順は次のとおり。
-//!
-//! 1. `TF_IAS_QUERYONLY` で、書き込む場所を表す範囲だけを受け取る
-//! 2. その範囲に composition を開く
-//! 3. composition の範囲へ文字列を書く
-//! 4. 選択を composition の末尾へ動かす
-//! 5. composition を閉じる
+//! 開いたままの composition は打鍵をまたいで持ち越す必要があるため、
+//! 呼ぶ側が預かる。このモジュールは受け取って、新しい状態を返す。
 
+use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
     ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
-    TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_READWRITE, TF_ES_SYNC, TF_IAS_QUERYONLY,
-    TF_SELECTION, TF_SELECTIONSTYLE,
+    TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READWRITE, TF_ES_SYNC,
+    TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
-use windows::core::{Interface, Result, implement};
+use windows::core::{ComObject, Interface, Result, implement};
 
 use crate::guard::guard;
 use crate::log;
 
-/// 確定した文字列を、いまのカーソル位置へ入れるセッション。
+/// 文書の見え方を、確定と未確定の組に合わせるセッション。
 #[implement(ITfEditSession)]
-pub struct InsertText {
+pub struct Update {
     context: ITfContext,
     /// composition の終了を受け取る相手。
     sink: ITfCompositionSink,
-    /// 入れる文字列。UTF-16 に直してある。
-    text: Vec<u16>,
+    /// 今回確定する文字列。
+    commit: Vec<u16>,
+    /// 今回見せる未確定の文字列。
+    preedit: Vec<u16>,
+    /// 入る前に開いていた composition。出るときに新しい状態を書き戻す。
+    composition: RefCell<Option<ITfComposition>>,
 }
 
-impl std::fmt::Debug for InsertText {
+impl std::fmt::Debug for Update {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InsertText")
-            .field("length", &self.text.len())
+        f.debug_struct("Update")
+            .field("commit", &self.commit.len())
+            .field("preedit", &self.preedit.len())
             .finish_non_exhaustive()
     }
 }
 
-impl ITfEditSession_Impl for InsertText_Impl {
+impl ITfEditSession_Impl for Update_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
         guard("DoEditSession", || {
-            log::write("編集セッションに入った");
-            let context = &self.this.context;
+            let this = &self.this;
+            let mut composition = this.composition.borrow_mut().take();
 
-            let composition = start_composition(context, ec, &self.this.sink)?;
-            log::write("composition を開いた");
-
-            // SAFETY: 編集権 `ec` は TSF がこの呼び出しのために渡したもので、
-            // composition は直前にこの文脈へ開いたもの。
-            let result = unsafe { write_into(context, ec, &composition, &self.this.text) };
-
-            // 書けても書けなくても閉じる。開いたままにすると、文書が
-            // 変換中の見た目のまま取り残される。
-            // SAFETY: 同上。
-            unsafe {
-                let _ = composition.EndComposition(ec);
+            // 確定した文字列は、書いてから閉じる。閉じた時点で、その文字は
+            // 文書の一部になり、こちらの手を離れる。
+            if !this.commit.is_empty() {
+                let opened = open_if_needed(&this.context, ec, &this.sink, composition.take())?;
+                // SAFETY: 編集権と composition はこの呼び出しのためのもの。
+                unsafe {
+                    write_into(&this.context, ec, &opened, &this.commit)?;
+                    opened.EndComposition(ec)?;
+                }
+                log::write("確定した文字列を書いて composition を閉じた");
             }
-            log::write("composition を閉じた");
-            result
+
+            // 未確定の文字列は、書いて開いたままにする。
+            if !this.preedit.is_empty() {
+                let opened = open_if_needed(&this.context, ec, &this.sink, composition.take())?;
+                // SAFETY: 同上。
+                unsafe {
+                    write_into(&this.context, ec, &opened, &this.preedit)?;
+                }
+                log::write("未確定の文字列を書いた");
+                composition = Some(opened);
+            } else if let Some(opened) = composition.take() {
+                // 見せるものがなくなったので、跡を消して閉じる。
+                // SAFETY: 同上。
+                unsafe {
+                    let _ = write_into(&this.context, ec, &opened, &[]);
+                    let _ = opened.EndComposition(ec);
+                }
+                log::write("未確定がなくなったので composition を閉じた");
+            }
+
+            *this.composition.borrow_mut() = composition;
+            Ok(())
         })
     }
 }
 
-/// 書き込む場所に composition を開く。
-fn start_composition(
+/// composition がなければ開く。あればそのまま使う。
+fn open_if_needed(
     context: &ITfContext,
     ec: u32,
     sink: &ITfCompositionSink,
+    existing: Option<ITfComposition>,
 ) -> Result<ITfComposition> {
-    let insert: ITfInsertAtSelection = context.cast()?;
+    if let Some(composition) = existing {
+        return Ok(composition);
+    }
 
+    let insert: ITfInsertAtSelection = context.cast()?;
     // SAFETY: `TF_IAS_QUERYONLY` は文字を入れず、入れるべき場所だけを返す。
     // 文字列を渡さないことを長さ 0 で示す。
     let range = unsafe { insert.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])? };
-    log::write("書き込む場所を受け取った");
 
     let compositions: ITfContextComposition = context.cast()?;
     // SAFETY: 範囲は直前に受け取ったもの、受け口はこちらが持つもの。
-    unsafe { compositions.StartComposition(ec, &range, sink) }
+    let composition = unsafe { compositions.StartComposition(ec, &range, sink) }?;
+    log::write("composition を開いた");
+    Ok(composition)
 }
 
-/// composition の中へ文字列を書き、選択をその末尾へ動かす。
+/// composition の中身を入れ替え、選択をその末尾へ動かす。
 ///
 /// # Safety
 ///
@@ -135,7 +158,6 @@ unsafe fn write_into(
         }
 
         range.SetText(ec, 0, text)?;
-        log::write("文字列を書いた");
 
         // 書いた分の後ろへカーソルを送る。
         selection_range.ShiftEndToRange(ec, &range, TF_ANCHOR_END)?;
@@ -143,7 +165,6 @@ unsafe fn write_into(
         selection_range.Collapse(ec, TF_ANCHOR_START)?;
 
         set_selection(context, ec, &selection_range, style)?;
-        log::write("カーソルを移した");
     }
     Ok(())
 }
@@ -192,31 +213,86 @@ unsafe fn set_selection(
     result
 }
 
-/// 文字列を文書へ入れる。
+/// 文書の見え方を、確定と未確定の組に合わせる。
+///
+/// `composition` には前回から持ち越した composition を渡す。返るのは
+/// 次に持ち越すもの。`None` なら開いていない。
 ///
 /// 打鍵の処理中なので同期の編集セッションを求める。TSF が断ることも
 /// ありうるが、そのときは入力が届かないだけで、壊れはしない。
-pub fn insert_text(
+pub fn update(
     context: &ITfContext,
     client_id: u32,
     sink: &ITfCompositionSink,
-    text: &str,
-) -> Result<()> {
-    if text.is_empty() {
-        return Ok(());
+    commit: &str,
+    preedit: &str,
+    composition: Option<ITfComposition>,
+) -> Result<Option<ITfComposition>> {
+    if commit.is_empty() && preedit.is_empty() && composition.is_none() {
+        return Ok(None);
     }
 
-    let session: ITfEditSession = InsertText {
+    let session = ComObject::new(Update {
         context: context.clone(),
         sink: sink.clone(),
-        text: text.encode_utf16().collect(),
+        commit: commit.encode_utf16().collect(),
+        preedit: preedit.encode_utf16().collect(),
+        composition: RefCell::new(composition),
+    });
+    let requested: ITfEditSession = session.to_interface();
+
+    // SAFETY: 文脈と識別子は TSF から受け取ったもの。
+    let result =
+        unsafe { context.RequestEditSession(client_id, &requested, TF_ES_SYNC | TF_ES_READWRITE)? };
+    result.ok()?;
+
+    Ok(session.composition.borrow_mut().take())
+}
+
+/// 開いたままの composition を、文書から取り除く。
+///
+/// 入力先が変わったときなど、続きを入力しようがない場面で呼ぶ。打鍵の
+/// 途中ではないので、同期でなくてよい。
+pub fn terminate(context: &ITfContext, client_id: u32, composition: ITfComposition) {
+    let session: ITfEditSession = Terminate {
+        composition: RefCell::new(Some(composition)),
     }
     .into();
 
-    log::write("編集セッションを頼む");
     // SAFETY: 文脈と識別子は TSF から受け取ったもの。
-    let result =
-        unsafe { context.RequestEditSession(client_id, &session, TF_ES_SYNC | TF_ES_READWRITE)? };
-    log::write(&format!("編集セッションが終わった ({result:?})"));
-    result.ok()
+    unsafe {
+        let _ =
+            context.RequestEditSession(client_id, &session, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE);
+    }
+}
+
+/// 開いたままの composition を閉じるだけのセッション。
+#[implement(ITfEditSession)]
+struct Terminate {
+    composition: RefCell<Option<ITfComposition>>,
+}
+
+impl std::fmt::Debug for Terminate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Terminate").finish_non_exhaustive()
+    }
+}
+
+impl ITfEditSession_Impl for Terminate_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        guard("DoEditSession(Terminate)", || {
+            let Some(composition) = self.this.composition.borrow_mut().take() else {
+                return Ok(());
+            };
+            // SAFETY: 編集権はこの呼び出しのために渡されたもの。
+            unsafe {
+                if let Ok(range) = composition.GetRange() {
+                    let _ = range.SetText(ec, 0, &[]);
+                }
+                let _ = composition.EndComposition(ec);
+            }
+            log::write("composition を片付けた");
+            Ok(())
+        })
+    }
 }

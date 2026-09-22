@@ -67,7 +67,7 @@ cargo run -p crystalskk-cli -- -i --dict ./SKK-JISYO.L
 
 ### IME を導入する
 
-まだ入力はできない。入力方式として選べるところまで。
+かな入力と変換の未確定表示まで動く。辞書はまだ繋いでいないので、変換はすべて辞書登録になる。
 
 ```bash
 cargo build -p crystalskk-tip --release

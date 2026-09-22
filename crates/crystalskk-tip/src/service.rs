@@ -7,8 +7,8 @@
 //! COM から呼ばれる入口はすべて [`crate::guard::guard`] を通す。パニックを
 //! そのまま外へ出すと、入力先アプリごと落ちる。
 //!
-//! いまは確定した文字列を文書へ入れるところまで。未確定の表示 (`▽` や
-//! `▼`) はまだ出ない。
+//! 確定した文字列も未確定の表示 (`▽` `▼`) も、composition を通して
+//! 文書へ書く (ADR-0008)。開いたままの composition はここで預かる。
 
 use std::cell::RefCell;
 
@@ -59,6 +59,10 @@ pub struct TextService {
     ///
     /// 辞書はまだ繋いでいないので、変換はすべて辞書登録になる。
     engine: RefCell<Engine>,
+    /// 未確定の文字列を見せている composition と、その文書。
+    ///
+    /// 打鍵をまたいで持ち越す。開いていなければ `None`。
+    composition: RefCell<Option<(ITfContext, ITfComposition)>>,
 }
 
 impl Default for TextService {
@@ -72,6 +76,7 @@ impl TextService {
         Self {
             activation: RefCell::new(None),
             engine: RefCell::new(Engine::new(Box::new(EmptyDict))),
+            composition: RefCell::new(None),
         }
     }
 
@@ -105,7 +110,19 @@ impl TextService {
         }
     }
 
+    /// 開いたままの composition を片付ける。
+    fn drop_composition(&self) {
+        let Some((context, composition)) = self.composition.borrow_mut().take() else {
+            return;
+        };
+        let Some(client_id) = self.client_id() else {
+            return;
+        };
+        edit::terminate(&context, client_id, composition);
+    }
+
     fn deactivate(&self) -> Result<()> {
+        self.drop_composition();
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
         };
@@ -192,14 +209,28 @@ impl TextService_Impl {
         self.this.show_mode();
         log::write("モードを映した");
 
-        if !response.commit.is_empty() {
-            // 入れられなくても、エンジンの状態はもう進んでいる。ここで
-            // 慌てても直せないので、食べたことだけは正しく伝える。
-            let sink: ITfCompositionSink = self.to_interface();
-            match edit::insert_text(context, client_id, &sink, &response.commit) {
-                Ok(()) => log::write("文書へ入れた"),
-                Err(e) => log::write(&format!("文書へ入れられなかった: {}", e.message())),
+        // 見え方を今の状態に合わせる。書けなくても、エンジンの状態は
+        // もう進んでいる。ここで慌てても直せないので、食べたことだけは
+        // 正しく伝える。
+        let preedit = response.preedit.display();
+        let sink: ITfCompositionSink = self.to_interface();
+        // 借用を編集セッションより長く持たない。呼んだ先から戻って
+        // こられると、借用が重なってパニックになる。
+        let carried = self.this.composition.borrow_mut().take().map(|(_, c)| c);
+
+        match edit::update(
+            context,
+            client_id,
+            &sink,
+            &response.commit,
+            &preedit,
+            carried,
+        ) {
+            Ok(next) => {
+                *self.this.composition.borrow_mut() = next.map(|c| (context.clone(), c));
+                log::write("文書へ反映した");
             }
+            Err(e) => log::write(&format!("文書へ反映できなかった: {}", e.message())),
         }
         response.handled.into()
     }
@@ -242,6 +273,8 @@ impl ITfCompositionSink_Impl for TextService_Impl {
     ) -> Result<()> {
         guard("OnCompositionTerminated", || {
             log::write("composition が外から終わらされた");
+            // もう閉じられているので、こちらで片付ける必要はない。
+            self.this.composition.borrow_mut().take();
             self.this.engine.borrow_mut().reset();
             Ok(())
         })
@@ -252,6 +285,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     /// 入力先が変わった。入力の途中経過は続けようがないので捨てる。
     fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
         guard("OnSetFocus", || {
+            self.this.drop_composition();
             self.this.engine.borrow_mut().reset();
             Ok(())
         })
