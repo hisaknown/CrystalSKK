@@ -84,8 +84,10 @@ fn execute(session: &mut Session, command: &str, out: &mut impl Write) -> io::Re
         "q" | "quit" => return Ok(Flow::Quit),
         "h" | "help" => write!(out, "{HELP}")?,
         "clear" => {
+            // 入力の途中で呼ばれることがあるので、変換の状態も戻す。
+            session.reset_input();
             session.clear_document();
-            writeln!(out, "  文書を空にしました")?;
+            writeln!(out, "  文書と入力状態を空にしました")?;
         }
         "state" => report(session, out)?,
         "save" => match session.save_user_dictionary() {

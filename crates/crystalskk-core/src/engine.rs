@@ -222,6 +222,19 @@ impl Engine {
         self.registrations.len()
     }
 
+    /// 入力の途中経過をすべて捨て、直接入力に戻す。
+    ///
+    /// 入力先が変わったときのように、続きを入力しようがない場面で呼ぶ。
+    /// 未確定の文字列は失われる。
+    ///
+    /// 入力モードは保たれる。モードは利用者が選んだ設定であり、入力の
+    /// 途中経過ではないため。
+    pub fn reset(&mut self) {
+        self.state = State::Direct;
+        self.registrations.clear();
+        self.romaji.clear();
+    }
+
     /// 一打鍵を処理する。
     pub fn press(&mut self, key: Key) -> Response {
         let mut out = Out {
@@ -354,7 +367,7 @@ impl Engine {
                 });
             }
             Key::Char(c) if c.is_ascii_uppercase() => {
-                self.flush_romaji(out);
+                self.settle_before_shift(out);
                 let mut comp = Composing::default();
                 let kana = self.romaji.feed(c.to_ascii_lowercase());
                 comp.midashi.push_str(&kana);
@@ -416,6 +429,24 @@ impl Engine {
         }
     }
 
+    /// シフト付きの打鍵が来たとき、その前の未確定打鍵を始末する。
+    ///
+    /// 単独でかなになる打鍵 (`n` → `ん`) はここで確定させる。ならない打鍵
+    /// (`k` など) は**残す**。残せば続く打鍵と組み合わさり、見出し語の
+    /// 一文字目になる。
+    ///
+    /// これは打ち間違いの救済である。`KayoU` と打つべきところを `kAyoU` と
+    /// 打ってしまっても、`k` が捨てられずに `か` となり `▽かよ` から続けられる。
+    /// 正しく打たれた入力では、シフトの時点で未確定打鍵は空か `n` しかないので、
+    /// 挙動は変わらない。
+    fn settle_before_shift(&mut self, out: &mut Out) {
+        let Some(kana) = self.romaji.take_pending_kana() else {
+            return;
+        };
+        let rendered = self.mode.render_kana(&kana);
+        self.emit(&rendered, out);
+    }
+
     fn flush_romaji(&mut self, out: &mut Out) {
         let rest = self.romaji.flush();
         if rest.is_empty() {
@@ -473,13 +504,21 @@ impl Engine {
             }
             Key::Char(c) if c.is_ascii_uppercase() && !self.is_midashi_empty(&comp) => {
                 // シフト付きの打鍵は送り仮名の開始を示す。
-                self.absorb_pending(&mut comp);
-                let head = c.to_ascii_lowercase();
+                self.absorb_settled_pending(&mut comp);
+                // 単独では成立しない打鍵が残っているなら、それも送り仮名の一部。
+                // `TabekU` のように子音を打ってからシフトした場合、送り仮名は
+                // `く` であり、辞書キーの末尾はその子音になる。
+                let head = self
+                    .romaji
+                    .pending()
+                    .chars()
+                    .next()
+                    .unwrap_or_else(|| c.to_ascii_lowercase());
                 comp.okuri = Some(Okuri {
                     head,
                     kana: String::new(),
                 });
-                let kana = self.romaji.feed(head);
+                let kana = self.romaji.feed(c.to_ascii_lowercase());
                 if let Some(okuri) = comp.okuri.as_mut() {
                     okuri.kana.push_str(&kana);
                 }
@@ -512,6 +551,20 @@ impl Engine {
     /// 見出し語がまだ一文字も入っていないか。
     fn is_midashi_empty(&self, comp: &Composing) -> bool {
         comp.midashi.is_empty() && self.romaji.is_empty()
+    }
+
+    /// 送り仮名の開始時に、その前の未確定打鍵を始末する。
+    ///
+    /// [`Self::settle_before_shift`] と同じ考え方で、単独で成立する打鍵だけを
+    /// 取り込み、成立しないものは残して次の打鍵と組み合わせる。
+    fn absorb_settled_pending(&mut self, comp: &mut Composing) {
+        let Some(kana) = self.romaji.take_pending_kana() else {
+            return;
+        };
+        match comp.okuri.as_mut() {
+            Some(okuri) => okuri.kana.push_str(&kana),
+            None => comp.midashi.push_str(&kana),
+        }
     }
 
     /// 未確定のローマ字を見出し語または送り仮名に取り込む。

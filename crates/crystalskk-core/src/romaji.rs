@@ -188,12 +188,34 @@ impl RomajiConverter {
     /// 確定操作やモード切り替えの直前に呼ぶ。`n` は `ん` になり、
     /// それ以外の未確定打鍵は捨てられる。
     pub fn flush(&mut self) -> String {
-        let pending = std::mem::take(&mut self.pending);
-        if pending == "n" {
-            "ん".to_owned()
-        } else {
-            String::new()
+        let kana = self.take_pending_kana().unwrap_or_default();
+        self.pending.clear();
+        kana
+    }
+
+    /// 未確定の打鍵列が、それだけでかなになるなら、そのかな。
+    ///
+    /// 判定は規則表に委ねる。SKK の配列は撥音を明示する `n'` のような
+    /// 終端付きの規則を持つので、打鍵列に終端を足した規則があるかどうかで
+    /// 「単独で成立するか」が決まる。`n` は `ん` になり、`k` は何にもならない。
+    pub fn pending_kana(&self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
         }
+        let terminated = format!("{}{TERMINATOR}", self.pending);
+        self.table
+            .exact(&terminated)
+            .map(|rule| rule.output.clone())
+    }
+
+    /// 単独でかなになる未確定打鍵を取り出す。ならないときは何も変えない。
+    ///
+    /// 「シフトを押す直前までの打鍵をどう扱うか」を決めるのに使う。
+    /// 取り出せなければ打鍵列は残るので、続く打鍵と組み合わせられる。
+    pub fn take_pending_kana(&mut self) -> Option<String> {
+        let kana = self.pending_kana()?;
+        self.pending.clear();
+        Some(kana)
     }
 }
 
@@ -202,6 +224,9 @@ impl Default for RomajiConverter {
         Self::new(RomajiTable::default_skk())
     }
 }
+
+/// 打鍵列がそこで終わることを示す文字。規則表の `n'` などに使われている。
+const TERMINATOR: char = '\'';
 
 fn is_consonant(c: char) -> bool {
     c.is_ascii_alphabetic() && !matches!(c, 'a' | 'i' | 'u' | 'e' | 'o')
@@ -342,6 +367,41 @@ mod tests {
         assert_eq!(typed_with_pending("kk"), ("っ".to_owned(), "k".to_owned()));
         // `n` 単独は撥音か `な行` か決まらないので保留。
         assert_eq!(typed_with_pending("n"), (String::new(), "n".to_owned()));
+    }
+
+    #[test]
+    fn pending_kana_tells_what_can_stand_alone() {
+        let mut c = RomajiConverter::default();
+        assert_eq!(c.pending_kana(), None, "未確定がなければ何もない");
+
+        c.feed('n');
+        assert_eq!(c.pending_kana().as_deref(), Some("ん"));
+        // 覗くだけでは打鍵列は消えない。
+        assert_eq!(c.pending(), "n");
+
+        c.clear();
+        c.feed('k');
+        assert_eq!(c.pending_kana(), None, "`k` は単独では成立しない");
+
+        c.clear();
+        c.feed('k');
+        c.feed('y');
+        assert_eq!(c.pending_kana(), None);
+    }
+
+    #[test]
+    fn take_pending_kana_leaves_unresolvable_input_alone() {
+        let mut c = RomajiConverter::default();
+        c.feed('k');
+        assert_eq!(c.take_pending_kana(), None);
+        assert_eq!(c.pending(), "k", "取り出せないなら残す");
+        // 残っているので続きと組み合わせられる。
+        assert_eq!(c.feed('a'), "か");
+
+        let mut c = RomajiConverter::default();
+        c.feed('n');
+        assert_eq!(c.take_pending_kana().as_deref(), Some("ん"));
+        assert!(c.is_empty());
     }
 
     #[test]

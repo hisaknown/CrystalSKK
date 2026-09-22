@@ -47,6 +47,8 @@ impl Session {
             ("かんじ", &["漢字", "感じ", "幹事"][..]),
             ("おくr", &["送"][..]),
             ("たべr", &["食べ"][..]),
+            ("かよu", &["通"][..]),
+            ("ほん", &["本"][..]),
             ("skk", &["SKK"][..]),
             ("ことば", &["言葉"][..]),
         ]);
@@ -187,6 +189,74 @@ fn okuri_shows_the_separator_while_incomplete() {
     assert_eq!(s.preedit(), "▽たべ*r");
     s.type_keys("u");
     assert_eq!(s.preedit(), "▼食べる");
+}
+
+/// シフトの押し遅れを救う。
+///
+/// `KayoU` と打つべきところを `kAyoU` と打ってしまう取り違えは起きやすい。
+/// 単独ではかなにならない `k` を捨てずに残し、続く `a` と組み合わせる。
+#[test]
+fn a_late_shift_does_not_lose_the_consonant() {
+    let mut correct = Session::new();
+    correct.type_keys("KayoU");
+    assert_eq!(correct.preedit(), "▼通う");
+
+    let mut mistyped = Session::new();
+    mistyped.type_keys("kAyoU");
+    assert_eq!(mistyped.preedit(), "▼通う", "打ち間違いでも同じ結果になる");
+    assert_eq!(mistyped.committed, "", "取りこぼした打鍵が確定されない");
+}
+
+#[test]
+fn a_late_shift_is_rescued_mid_word_too() {
+    let mut s = Session::new();
+    // `Kanji` のつもりで `kAnji` と打つ。
+    s.type_keys("kAnji");
+    assert_eq!(s.preedit(), "▽かんじ");
+    assert_eq!(s.committed, "");
+}
+
+/// 単独でかなになる打鍵は、シフトの前に確定させる。
+///
+/// `honYa` (本屋) では `n` は `ん` として確定すべきであり、続く `ya` と
+/// 組み合わせて `にゃ` にしてはいけない。
+#[test]
+fn a_standalone_kana_before_the_shift_is_committed() {
+    let mut s = Session::new();
+    s.type_keys("honYa");
+    assert_eq!(s.committed, "ほん");
+    assert_eq!(s.preedit(), "▽や");
+}
+
+/// 送り仮名の前でも同じ救済が効く。
+///
+/// 送り仮名は子音から始まるので、その子音を打ってからシフトすると
+/// 辞書キーの末尾もその子音になる。
+#[test]
+fn a_late_shift_before_okuri_keeps_the_consonant() {
+    let mut correct = Session::new();
+    correct.type_keys("OkuRi");
+    assert_eq!(correct.preedit(), "▼送り");
+
+    let mut mistyped = Session::new();
+    mistyped.type_keys("OkurI");
+    assert_eq!(
+        mistyped.preedit(),
+        "▼送り",
+        "送り仮名の子音を打ってからシフトしても同じ"
+    );
+}
+
+#[test]
+fn a_standalone_kana_before_okuri_joins_the_midashi() {
+    let mut s = Session::new();
+    // `ん` は単独で成立するので見出し語に入り、送り仮名は `じ` から始まる。
+    s.type_keys("HonJ");
+    assert_eq!(s.preedit(), "▽ほん*j");
+
+    // 送り仮名が確定すると、辞書キーは見出し語 + 送り仮名の子音になる。
+    s.type_keys("i");
+    assert_eq!(s.engine.preedit().registering.as_deref(), Some("ほんj"));
 }
 
 #[test]
@@ -370,6 +440,24 @@ fn okuri_registration_keeps_the_okuri_out_of_the_registered_word() {
             query: Query::okuri_ari("はし", 'r', "る"),
             word: "かける".into()
         }]
+    );
+}
+
+#[test]
+fn reset_discards_everything_but_the_mode() {
+    let mut s = Session::new();
+    s.type_keys("q");
+    s.type_keys("Mikoto ");
+    assert_eq!(s.engine.registration_depth(), 1);
+
+    s.engine.reset();
+    assert_eq!(s.preedit(), "");
+    assert_eq!(s.engine.registration_depth(), 0);
+    assert!(s.engine.preedit().registering.is_none());
+    assert_eq!(
+        s.engine.mode(),
+        InputMode::Katakana,
+        "モードは利用者の設定なので残す"
     );
 }
 

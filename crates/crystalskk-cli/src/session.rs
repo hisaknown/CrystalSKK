@@ -154,6 +154,12 @@ impl Session {
         self.document.clear();
     }
 
+    /// 入力の途中経過を捨てる。文書は消さない。
+    pub fn reset_input(&mut self) {
+        self.engine.reset();
+        self.last_unhandled = None;
+    }
+
     pub fn mode(&self) -> InputMode {
         self.engine.mode()
     }
