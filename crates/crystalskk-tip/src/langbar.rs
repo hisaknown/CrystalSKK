@@ -270,11 +270,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn it_starts_off() {
+        // 有効化されるまで、どのモードでもない。入力方式が入かどうかは
+        // 区画を読むまで分からないので、勝手に「あ」を出さない。
+        assert_eq!(ModeIndicator::new().label(), OFF_LABEL);
+    }
+
+    #[test]
     fn the_label_follows_the_mode() {
         let indicator = ModeIndicator::new();
+        indicator.set_mode(InputMode::Hiragana);
         assert_eq!(indicator.label(), "あ");
         indicator.set_mode(InputMode::Ascii);
         assert_eq!(indicator.label(), "A");
+    }
+
+    #[test]
+    fn off_is_not_any_mode() {
+        let indicator = ModeIndicator::new();
+        indicator.set_mode(InputMode::Ascii);
+        indicator.set_off();
+        // 切と半角英数を同じ顔にしてはいけない。どちらも「英字が入る」
+        // ように見えて、片方は何も入らない。
+        assert_ne!(indicator.label(), InputMode::Ascii.label());
+        assert_eq!(indicator.label(), OFF_LABEL);
     }
 
     #[test]
