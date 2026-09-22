@@ -17,8 +17,5 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 
 | # | タイトル | ステータス | 関連 |
 |---|---|---|---|
-| — | まだ記録なし | | |
-
-<!-- 例:
-| [0001](0001-tsf-tip-architecture.md) | TSF TIP として実装する | Accepted | PRD §7 |
--->
+| [0001](0001-separate-candidate-sources-from-ranking.md) | 候補の生成と並び替えを別のトレイトに分ける | Accepted | PRD §7 |
+| [0002](0002-registration-as-a-stack-of-frames.md) | 辞書登録を第四の状態ではなく枠のスタックとして表現する | Accepted | PRD §5.1 |

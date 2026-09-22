@@ -8,9 +8,15 @@
 //! 並び替え (`Ranker`) は分離しておき、将来の補完・予測変換を後から
 //! 差し込めるようにする。
 
+pub mod dict;
+pub mod engine;
 pub mod kana;
+pub mod key;
 pub mod mode;
 pub mod romaji;
 
+pub use dict::{Candidate, CandidateSource, Context, Query, Ranker};
+pub use engine::{Engine, Event, Marker, Preedit, Response};
+pub use key::Key;
 pub use mode::InputMode;
 pub use romaji::{RomajiConverter, RomajiTable, Rule};

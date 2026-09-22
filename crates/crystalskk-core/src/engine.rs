@@ -1,0 +1,663 @@
+//! SKK の変換状態機械。
+//!
+//! キーを一つ受け取り、[`Response`] を一つ返す。応答には「アプリへ確定する
+//! 文字列」「未確定の表示」「候補ウィンドウの内容」「外部へ伝える副作用」が
+//! 含まれる。エンジン自身は I/O を行わない。
+//!
+//! 状態は三つしかない。辞書登録はこれらと並ぶ第四の状態ではなく、直接入力の
+//! 上に積まれた枠として表現している。詳しくは ADR-0002 を参照。
+
+use crate::dict::{Candidate, CandidateSource, Context, EmptyDict, NoopRanker, Query, Ranker};
+use crate::kana;
+use crate::key::Key;
+use crate::mode::InputMode;
+use crate::romaji::{RomajiConverter, RomajiTable};
+
+/// 未確定文字列に付く印。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Marker {
+    /// 印なし。
+    #[default]
+    None,
+    /// 見出し語入力中 (`▽`)。
+    Composing,
+    /// 候補選択中 (`▼`)。
+    Selecting,
+}
+
+impl Marker {
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Composing => "▽",
+            Self::Selecting => "▼",
+        }
+    }
+}
+
+/// 未確定の表示状態。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preedit {
+    pub marker: Marker,
+    /// 印を含まない本体。
+    pub text: String,
+    /// 辞書登録中なら、登録しようとしている辞書キー。
+    pub registering: Option<String>,
+}
+
+impl Preedit {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.marker == Marker::None && self.registering.is_none()
+    }
+
+    /// 印を含めた表示文字列。
+    pub fn display(&self) -> String {
+        format!("{}{}", self.marker.prefix(), self.text)
+    }
+}
+
+/// 候補ウィンドウに出す内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateView {
+    pub candidates: Vec<Candidate>,
+    /// 選択中の候補の位置。
+    pub index: usize,
+    /// 送り仮名。表示に付ける。
+    pub okuri: Option<String>,
+}
+
+/// エンジンの外側へ伝える副作用。
+///
+/// ユーザー辞書への書き込みはサーバープロセスの仕事なので、エンジンは
+/// 「何が起きたか」を伝えるだけで、自分では永続化しない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// 候補を確定した。出現順の学習に使う。
+    Learn { query: Query, word: String },
+    /// 新しい語を辞書に登録した。
+    Register { query: Query, word: String },
+}
+
+/// 一打鍵に対する応答。
+#[derive(Debug, Clone, Default)]
+pub struct Response {
+    /// エンジンがこのキーを処理したか。`false` ならアプリへ素通しする。
+    pub handled: bool,
+    /// アプリへ確定入力する文字列。
+    pub commit: String,
+    /// 未確定の表示状態。
+    pub preedit: Preedit,
+    /// 候補選択中なら候補ウィンドウの内容。
+    pub candidates: Option<CandidateView>,
+    /// 外部へ伝える副作用。
+    pub events: Vec<Event>,
+}
+
+/// 見出し語入力中の状態。
+#[derive(Debug, Clone, Default)]
+struct Composing {
+    /// 見出し語。かなモードではひらがなで保持する。
+    midashi: String,
+    /// 送り仮名。入力が始まっていなければ `None`。
+    okuri: Option<Okuri>,
+    /// abbrev (`/`) で始まった入力か。この間はローマ字変換を通さない。
+    abbrev: bool,
+}
+
+/// 送り仮名の入力状態。
+#[derive(Debug, Clone)]
+struct Okuri {
+    /// 送り仮名の最初のローマ字。辞書キーの末尾になる。
+    head: char,
+    /// これまでに確定した送り仮名のかな。
+    kana: String,
+}
+
+/// 候補選択中の状態。
+#[derive(Debug, Clone)]
+struct Selecting {
+    query: Query,
+    candidates: Vec<Candidate>,
+    index: usize,
+    /// 候補選択を取りやめたときに戻る先。
+    origin: Composing,
+}
+
+/// 辞書登録の枠。
+///
+/// 登録中の入力は通常の直接入力とまったく同じに振る舞い、確定した文字列だけが
+/// アプリではなくこの枠に溜まる。枠は積めるので、登録中にさらに登録が起きても
+/// そのまま入れ子になる。
+#[derive(Debug, Clone)]
+struct Registration {
+    query: Query,
+    /// 登録を取りやめたときに戻る先。
+    origin: Composing,
+    /// 登録語として溜まった文字列。
+    buffer: String,
+}
+
+/// 入力状態。
+#[derive(Debug, Clone, Default)]
+enum State {
+    /// 直接入力 (`■`)。
+    #[default]
+    Direct,
+    /// 見出し語入力 (`▽`)。
+    Composing(Composing),
+    /// 候補選択 (`▼`)。
+    Selecting(Selecting),
+}
+
+/// 一打鍵の処理中に溜めていく出力。
+#[derive(Default)]
+struct Out {
+    handled: bool,
+    commit: String,
+    events: Vec<Event>,
+}
+
+/// SKK 変換エンジン。
+pub struct Engine {
+    mode: InputMode,
+    romaji: RomajiConverter,
+    state: State,
+    registrations: Vec<Registration>,
+    dict: Box<dyn CandidateSource>,
+    ranker: Box<dyn Ranker>,
+    context: Context,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("mode", &self.mode)
+            .field("state", &self.state)
+            .field("registrations", &self.registrations.len())
+            .field("pending", &self.romaji.pending())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new(Box::new(EmptyDict))
+    }
+}
+
+impl Engine {
+    pub fn new(dict: Box<dyn CandidateSource>) -> Self {
+        Self {
+            mode: InputMode::Hiragana,
+            romaji: RomajiConverter::default(),
+            state: State::Direct,
+            registrations: Vec::new(),
+            dict,
+            ranker: Box::new(NoopRanker),
+            context: Context::default(),
+        }
+    }
+
+    pub fn with_ranker(mut self, ranker: Box<dyn Ranker>) -> Self {
+        self.ranker = ranker;
+        self
+    }
+
+    pub fn with_romaji_table(mut self, table: RomajiTable) -> Self {
+        self.romaji = RomajiConverter::new(table);
+        self
+    }
+
+    pub fn mode(&self) -> InputMode {
+        self.mode
+    }
+
+    /// 変換時に参照される周辺情報を差し替える。TSF 側が毎打鍵の前に更新する。
+    pub fn set_context(&mut self, context: Context) {
+        self.context = context;
+    }
+
+    /// 辞書登録の入れ子の深さ。0 なら登録中ではない。
+    pub fn registration_depth(&self) -> usize {
+        self.registrations.len()
+    }
+
+    /// 一打鍵を処理する。
+    pub fn press(&mut self, key: Key) -> Response {
+        let mut out = Out {
+            handled: true,
+            ..Out::default()
+        };
+        let state = std::mem::take(&mut self.state);
+        match state {
+            State::Direct => self.on_direct(key, &mut out),
+            State::Composing(c) => self.on_composing(c, key, &mut out),
+            State::Selecting(s) => self.on_selecting(s, key, &mut out),
+        }
+        self.context.mode = self.mode;
+
+        Response {
+            handled: out.handled,
+            commit: out.commit,
+            preedit: self.preedit(),
+            candidates: self.candidate_view(),
+            events: out.events,
+        }
+    }
+
+    /// 現在の未確定表示。
+    pub fn preedit(&self) -> Preedit {
+        let registering = self.registrations.last().map(|r| r.query.key.clone());
+        match &self.state {
+            State::Direct => Preedit {
+                marker: Marker::None,
+                text: self.romaji.pending().to_owned(),
+                registering,
+            },
+            State::Composing(c) => {
+                let mut text = c.midashi.clone();
+                if let Some(okuri) = &c.okuri {
+                    text.push('*');
+                    text.push_str(&okuri.kana);
+                }
+                text.push_str(self.romaji.pending());
+                Preedit {
+                    marker: Marker::Composing,
+                    text,
+                    registering,
+                }
+            }
+            State::Selecting(s) => {
+                let text = s.candidates[s.index].to_text(s.query.okuri.as_deref());
+                Preedit {
+                    marker: Marker::Selecting,
+                    text,
+                    registering,
+                }
+            }
+        }
+    }
+
+    fn candidate_view(&self) -> Option<CandidateView> {
+        match &self.state {
+            State::Selecting(s) => Some(CandidateView {
+                candidates: s.candidates.clone(),
+                index: s.index,
+                okuri: s.query.okuri.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// 確定した文字列を送り出す。
+    ///
+    /// 辞書登録中なら、アプリではなく登録の枠に溜まる。
+    fn emit(&mut self, text: &str, out: &mut Out) {
+        if text.is_empty() {
+            return;
+        }
+        match self.registrations.last_mut() {
+            Some(reg) => reg.buffer.push_str(text),
+            None => out.commit.push_str(text),
+        }
+        self.context.recent_commits.insert(0, text.to_owned());
+        self.context.recent_commits.truncate(RECENT_COMMITS);
+    }
+
+    // --- 直接入力 ------------------------------------------------------
+
+    fn on_direct(&mut self, key: Key, out: &mut Out) {
+        self.state = State::Direct;
+
+        if let Key::Ctrl('j') = key {
+            let rest = self.romaji.flush();
+            self.emit(&self.mode.render_kana(&rest).clone(), out);
+            self.mode = InputMode::Hiragana;
+            return;
+        }
+
+        if !self.mode.is_kana() {
+            self.on_direct_ascii(key, out);
+            return;
+        }
+
+        match key {
+            Key::Ctrl('g') => self.romaji.clear(),
+            Key::Ctrl('q') => {
+                self.flush_romaji(out);
+                self.mode = match self.mode {
+                    InputMode::HalfKatakana => InputMode::Hiragana,
+                    _ => InputMode::HalfKatakana,
+                };
+            }
+            Key::Char('l') => {
+                self.flush_romaji(out);
+                self.mode = InputMode::Ascii;
+            }
+            Key::Char('L') => {
+                self.flush_romaji(out);
+                self.mode = InputMode::FullAscii;
+            }
+            Key::Char('q') => {
+                self.flush_romaji(out);
+                self.mode = match self.mode {
+                    InputMode::Katakana => InputMode::Hiragana,
+                    _ => InputMode::Katakana,
+                };
+            }
+            Key::Char('/') => {
+                self.romaji.clear();
+                self.state = State::Composing(Composing {
+                    abbrev: true,
+                    ..Composing::default()
+                });
+            }
+            Key::Char(c) if c.is_ascii_uppercase() => {
+                self.flush_romaji(out);
+                let mut comp = Composing::default();
+                let kana = self.romaji.feed(c.to_ascii_lowercase());
+                comp.midashi.push_str(&kana);
+                self.state = State::Composing(comp);
+            }
+            Key::Char(c) => {
+                let kana = self.romaji.feed(c);
+                let rendered = self.mode.render_kana(&kana);
+                self.emit(&rendered, out);
+            }
+            Key::Space => {
+                self.flush_romaji(out);
+                self.emit(" ", out);
+            }
+            Key::Enter => {
+                if self.registrations.is_empty() {
+                    let before = out.commit.len();
+                    self.flush_romaji(out);
+                    // 未確定を確定させただけなら改行は送らない。何もなければ
+                    // 改行はアプリの仕事なので素通しする。
+                    out.handled = out.commit.len() != before;
+                } else {
+                    self.flush_romaji(out);
+                    self.finish_registration(out);
+                }
+            }
+            Key::Backspace => {
+                if self.romaji.backspace() {
+                    return;
+                }
+                match self.registrations.last_mut() {
+                    Some(reg) => {
+                        if reg.buffer.pop().is_none() {
+                            out.handled = false;
+                        }
+                    }
+                    None => out.handled = false,
+                }
+            }
+            Key::Escape | Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => out.handled = false,
+        }
+    }
+
+    /// 英数モードの直接入力。かな変換を通さない。
+    fn on_direct_ascii(&mut self, key: Key, out: &mut Out) {
+        match (self.mode, key) {
+            (InputMode::FullAscii, Key::Char(c)) => {
+                let text = kana::to_fullwidth_ascii(&c.to_string());
+                self.emit(&text, out);
+            }
+            (InputMode::FullAscii, Key::Space) => self.emit("　", out),
+            (InputMode::Ascii, Key::Enter) if !self.registrations.is_empty() => {
+                self.finish_registration(out);
+            }
+            (InputMode::FullAscii, Key::Enter) if !self.registrations.is_empty() => {
+                self.finish_registration(out);
+            }
+            _ => out.handled = false,
+        }
+    }
+
+    fn flush_romaji(&mut self, out: &mut Out) {
+        let rest = self.romaji.flush();
+        if rest.is_empty() {
+            return;
+        }
+        let rendered = self.mode.render_kana(&rest);
+        self.emit(&rendered, out);
+    }
+
+    // --- 見出し語入力 --------------------------------------------------
+
+    fn on_composing(&mut self, mut comp: Composing, key: Key, out: &mut Out) {
+        match key {
+            Key::Ctrl('g') => {
+                self.romaji.clear();
+                self.state = State::Direct;
+            }
+            Key::Ctrl('j') | Key::Enter => {
+                self.absorb_pending(&mut comp);
+                let text = self.commit_text_of(&comp);
+                self.emit(&text, out);
+                self.state = State::Direct;
+            }
+            Key::Char('q') if !comp.abbrev => {
+                self.absorb_pending(&mut comp);
+                let text = kana::to_katakana(&self.midashi_with_okuri(&comp));
+                self.emit(&text, out);
+                self.state = State::Direct;
+            }
+            Key::Space => self.convert(comp),
+            Key::Backspace => {
+                if self.romaji.backspace() {
+                    self.state = State::Composing(comp);
+                    return;
+                }
+                match comp.okuri.as_mut() {
+                    Some(okuri) => {
+                        if okuri.kana.pop().is_none() {
+                            comp.okuri = None;
+                        }
+                    }
+                    None => {
+                        comp.midashi.pop();
+                    }
+                }
+                if comp.midashi.is_empty() && comp.okuri.is_none() && !comp.abbrev {
+                    self.state = State::Direct;
+                } else {
+                    self.state = State::Composing(comp);
+                }
+            }
+            Key::Char(c) if comp.abbrev => {
+                comp.midashi.push(c);
+                self.state = State::Composing(comp);
+            }
+            Key::Char(c) if c.is_ascii_uppercase() && !self.is_midashi_empty(&comp) => {
+                // シフト付きの打鍵は送り仮名の開始を示す。
+                self.absorb_pending(&mut comp);
+                let head = c.to_ascii_lowercase();
+                comp.okuri = Some(Okuri {
+                    head,
+                    kana: String::new(),
+                });
+                let kana = self.romaji.feed(head);
+                if let Some(okuri) = comp.okuri.as_mut() {
+                    okuri.kana.push_str(&kana);
+                }
+                self.convert_if_okuri_complete(comp);
+            }
+            Key::Char(c) => {
+                let c = if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c
+                };
+                let kana = self.romaji.feed(c);
+                match comp.okuri.as_mut() {
+                    Some(okuri) => okuri.kana.push_str(&kana),
+                    None => comp.midashi.push_str(&kana),
+                }
+                self.convert_if_okuri_complete(comp);
+            }
+            Key::Escape => {
+                self.romaji.clear();
+                self.state = State::Direct;
+            }
+            Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => {
+                out.handled = false;
+                self.state = State::Composing(comp);
+            }
+        }
+    }
+
+    /// 見出し語がまだ一文字も入っていないか。
+    fn is_midashi_empty(&self, comp: &Composing) -> bool {
+        comp.midashi.is_empty() && self.romaji.is_empty()
+    }
+
+    /// 未確定のローマ字を見出し語または送り仮名に取り込む。
+    fn absorb_pending(&mut self, comp: &mut Composing) {
+        let rest = self.romaji.flush();
+        if rest.is_empty() {
+            return;
+        }
+        match comp.okuri.as_mut() {
+            Some(okuri) => okuri.kana.push_str(&rest),
+            None => comp.midashi.push_str(&rest),
+        }
+    }
+
+    /// 送り仮名が一文字確定したら変換に進む。そうでなければ入力を続ける。
+    fn convert_if_okuri_complete(&mut self, comp: Composing) {
+        let ready = comp.okuri.as_ref().is_some_and(|o| !o.kana.is_empty());
+        if ready && self.romaji.is_empty() {
+            self.convert(comp);
+        } else {
+            self.state = State::Composing(comp);
+        }
+    }
+
+    fn midashi_with_okuri(&self, comp: &Composing) -> String {
+        match &comp.okuri {
+            Some(okuri) => format!("{}{}", comp.midashi, okuri.kana),
+            None => comp.midashi.clone(),
+        }
+    }
+
+    /// 見出し語をそのまま確定するときの文字列。
+    fn commit_text_of(&self, comp: &Composing) -> String {
+        let text = self.midashi_with_okuri(comp);
+        if comp.abbrev {
+            text
+        } else {
+            self.mode.render_kana(&text)
+        }
+    }
+
+    /// 辞書を引き、候補があれば選択へ、なければ登録へ進む。
+    fn convert(&mut self, mut comp: Composing) {
+        self.absorb_pending(&mut comp);
+        self.romaji.clear();
+
+        let query = match &comp.okuri {
+            Some(okuri) => Query::okuri_ari(&comp.midashi, okuri.head, okuri.kana.clone()),
+            None => Query::okuri_nashi(comp.midashi.clone()),
+        };
+
+        let mut candidates = self.dict.lookup(&query);
+        self.ranker.rank(&self.context, &query, &mut candidates);
+
+        if candidates.is_empty() {
+            self.start_registration(query, comp);
+        } else {
+            self.state = State::Selecting(Selecting {
+                query,
+                candidates,
+                index: 0,
+                origin: comp,
+            });
+        }
+    }
+
+    // --- 候補選択 ------------------------------------------------------
+
+    fn on_selecting(&mut self, mut sel: Selecting, key: Key, out: &mut Out) {
+        match key {
+            Key::Space | Key::Down => {
+                if sel.index + 1 < sel.candidates.len() {
+                    sel.index += 1;
+                    self.state = State::Selecting(sel);
+                } else {
+                    // 候補を出し切ったら辞書登録へ。
+                    self.start_registration(sel.query, sel.origin);
+                }
+            }
+            Key::Char('x') | Key::Up => {
+                if sel.index > 0 {
+                    sel.index -= 1;
+                    self.state = State::Selecting(sel);
+                } else {
+                    self.state = State::Composing(sel.origin);
+                }
+            }
+            Key::Enter | Key::Ctrl('j') => self.commit_selection(sel, out),
+            Key::Ctrl('g') | Key::Backspace | Key::Escape => {
+                self.state = State::Composing(sel.origin);
+            }
+            Key::Char(_) => {
+                // 暗黙の確定。確定させた上で、このキーを直接入力として解釈し直す。
+                self.commit_selection(sel, out);
+                self.on_direct(key, out);
+            }
+            Key::Tab | Key::Ctrl(_) => {
+                out.handled = false;
+                self.state = State::Selecting(sel);
+            }
+        }
+    }
+
+    fn commit_selection(&mut self, sel: Selecting, out: &mut Out) {
+        let candidate = sel.candidates[sel.index].clone();
+        let text = candidate.to_text(sel.query.okuri.as_deref());
+        self.emit(&text, out);
+        out.events.push(Event::Learn {
+            query: sel.query,
+            word: candidate.word,
+        });
+        self.state = State::Direct;
+    }
+
+    // --- 辞書登録 ------------------------------------------------------
+
+    fn start_registration(&mut self, query: Query, origin: Composing) {
+        self.romaji.clear();
+        self.registrations.push(Registration {
+            query,
+            origin,
+            buffer: String::new(),
+        });
+        self.state = State::Direct;
+    }
+
+    /// 登録を終える。入力が空なら登録せず、見出し語入力に戻る。
+    fn finish_registration(&mut self, out: &mut Out) {
+        let Some(reg) = self.registrations.pop() else {
+            return;
+        };
+        if reg.buffer.is_empty() {
+            self.state = State::Composing(reg.origin);
+            return;
+        }
+        let text = match &reg.query.okuri {
+            Some(okuri) => format!("{}{okuri}", reg.buffer),
+            None => reg.buffer.clone(),
+        };
+        self.emit(&text, out);
+        out.events.push(Event::Register {
+            query: reg.query,
+            word: reg.buffer,
+        });
+        self.state = State::Direct;
+    }
+}
+
+/// 文脈として保持する直近の確定文字列の数。
+const RECENT_COMMITS: usize = 8;

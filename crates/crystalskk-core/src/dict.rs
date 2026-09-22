@@ -1,0 +1,214 @@
+//! 候補の供給と並び替え。
+//!
+//! 辞書の実体 (ファイル、ネットワーク、ユーザー辞書) はこのクレートには
+//! 存在しない。エンジンは [`CandidateSource`] と [`Ranker`] という二つの
+//! 差し込み口だけを知っている。
+//!
+//! この二つを分けてあるのは、「候補を増やす」拡張と「候補の順を変える」
+//! 拡張が別物だからである。補完や予測変換は前者、学習や文脈スコアリングは
+//! 後者として、互いに影響せず足していける。
+
+use crate::InputMode;
+
+/// 辞書を引くための問い合わせ。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Query {
+    /// 辞書キー。送りありなら末尾に送り仮名の子音を含む (`おくr`)。
+    pub key: String,
+    /// 送り仮名。送りなしなら `None`。
+    pub okuri: Option<String>,
+}
+
+impl Query {
+    /// 送りなしの問い合わせ。
+    pub fn okuri_nashi(midashi: impl Into<String>) -> Self {
+        Self {
+            key: midashi.into(),
+            okuri: None,
+        }
+    }
+
+    /// 送りありの問い合わせ。`okuri_head` は送り仮名の最初のローマ字。
+    pub fn okuri_ari(midashi: &str, okuri_head: char, okuri: impl Into<String>) -> Self {
+        Self {
+            key: format!("{midashi}{okuri_head}"),
+            okuri: Some(okuri.into()),
+        }
+    }
+
+    pub fn is_okuri_ari(&self) -> bool {
+        self.okuri.is_some()
+    }
+}
+
+/// 辞書が返す候補一件。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Candidate {
+    /// 変換結果。送り仮名は含まない。
+    pub word: String,
+    /// 注釈。辞書上で `;` に続く部分。
+    pub annotation: Option<String>,
+}
+
+impl Candidate {
+    pub fn new(word: impl Into<String>) -> Self {
+        Self {
+            word: word.into(),
+            annotation: None,
+        }
+    }
+
+    pub fn with_annotation(word: impl Into<String>, annotation: impl Into<String>) -> Self {
+        Self {
+            word: word.into(),
+            annotation: Some(annotation.into()),
+        }
+    }
+
+    /// 送り仮名を付けた、実際に確定される文字列。
+    pub fn to_text(&self, okuri: Option<&str>) -> String {
+        match okuri {
+            Some(o) => format!("{}{o}", self.word),
+            None => self.word.clone(),
+        }
+    }
+}
+
+/// 候補を供給するもの。静的辞書、ユーザー辞書、補完、予測などが実装する。
+pub trait CandidateSource {
+    /// 問い合わせに対する候補を、そのソースにとって自然な順で返す。
+    ///
+    /// 並び順の最終決定は [`Ranker`] が行うので、ここでは順位付けに悩まなくてよい。
+    fn lookup(&self, query: &Query) -> Vec<Candidate>;
+}
+
+/// 変換時に参照できる周辺情報。
+///
+/// 取得できない項目があることを前提とする。TSF はアプリケーションによっては
+/// 周辺テキストを返さないため、[`Self::preceding_text`] は常に `None`
+/// でありうる。ランカーは欠損しても機能を落とすだけで済むように書くこと。
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    /// 現在の入力モード。
+    pub mode: InputMode,
+    /// 直近に確定した文字列。新しいものが先頭。
+    pub recent_commits: Vec<String>,
+    /// カーソル前のテキスト。取得できなければ `None`。
+    pub preceding_text: Option<String>,
+    /// 入力先アプリケーションの識別子。取得できなければ `None`。
+    pub application: Option<String>,
+}
+
+/// 候補の提示順を決めるもの。
+pub trait Ranker {
+    /// 候補列をその場で並び替える。候補の増減は行わない。
+    fn rank(&self, context: &Context, query: &Query, candidates: &mut Vec<Candidate>);
+}
+
+/// 何もしないランカー。辞書が返した順をそのまま使う。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopRanker;
+
+impl Ranker for NoopRanker {
+    fn rank(&self, _context: &Context, _query: &Query, _candidates: &mut Vec<Candidate>) {}
+}
+
+/// 候補を持たない辞書。テストや、辞書の準備ができていない状態で使う。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EmptyDict;
+
+impl CandidateSource for EmptyDict {
+    fn lookup(&self, _query: &Query) -> Vec<Candidate> {
+        Vec::new()
+    }
+}
+
+/// 複数の候補ソースを順に引き、重複を除いて連結するソース。
+///
+/// 先に登録したソースの候補が先に並ぶ。ユーザー辞書を静的辞書より前に
+/// 置く、といった使い方をする。
+pub struct ChainedSource {
+    sources: Vec<Box<dyn CandidateSource>>,
+}
+
+impl ChainedSource {
+    pub fn new(sources: Vec<Box<dyn CandidateSource>>) -> Self {
+        Self { sources }
+    }
+}
+
+impl std::fmt::Debug for ChainedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChainedSource")
+            .field("sources", &self.sources.len())
+            .finish()
+    }
+}
+
+impl CandidateSource for ChainedSource {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        let mut out: Vec<Candidate> = Vec::new();
+        for source in &self.sources {
+            for candidate in source.lookup(query) {
+                if !out.iter().any(|c| c.word == candidate.word) {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    struct Fixed(HashMap<String, Vec<Candidate>>);
+
+    impl CandidateSource for Fixed {
+        fn lookup(&self, query: &Query) -> Vec<Candidate> {
+            self.0.get(&query.key).cloned().unwrap_or_default()
+        }
+    }
+
+    fn fixed(entries: &[(&str, &[&str])]) -> Fixed {
+        Fixed(
+            entries
+                .iter()
+                .map(|(k, words)| {
+                    (
+                        (*k).to_owned(),
+                        words.iter().map(|w| Candidate::new(*w)).collect(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn okuri_ari_key_includes_the_okuri_head() {
+        let q = Query::okuri_ari("おく", 'r', "り");
+        assert_eq!(q.key, "おくr");
+        assert_eq!(q.okuri.as_deref(), Some("り"));
+        assert!(q.is_okuri_ari());
+    }
+
+    #[test]
+    fn candidate_text_appends_okuri() {
+        let c = Candidate::new("送");
+        assert_eq!(c.to_text(Some("り")), "送り");
+        assert_eq!(c.to_text(None), "送");
+    }
+
+    #[test]
+    fn chained_source_keeps_first_occurrence() {
+        let user = fixed(&[("かんじ", &["感じ"])]);
+        let system = fixed(&[("かんじ", &["漢字", "感じ", "幹事"])]);
+        let chained = ChainedSource::new(vec![Box::new(user), Box::new(system)]);
+
+        let got = chained.lookup(&Query::okuri_nashi("かんじ"));
+        let words: Vec<&str> = got.iter().map(|c| c.word.as_str()).collect();
+        assert_eq!(words, ["感じ", "漢字", "幹事"]);
+    }
+}

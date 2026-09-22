@@ -6,9 +6,10 @@
 use crate::kana;
 
 /// 入力モード。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum InputMode {
-    /// ひらがな (`C-j`)。
+    /// ひらがな (`C-j`)。SKK の既定。
+    #[default]
     Hiragana,
     /// カタカナ (`q`)。
     Katakana,
