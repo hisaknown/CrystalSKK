@@ -25,14 +25,20 @@ use crate::guids::CLSID_CRYSTALSKK;
 use crate::icon;
 use crate::log;
 
+/// 入力方式が切のときに出す文字。
+///
+/// どのモードでもないことを示す。モードの文字 (「あ」「A」…) を使うと、
+/// 切れているのか英数なのかが見分けられなくなる。
+const OFF_LABEL: &str = "－";
+
 /// 並び順。小さいほど手前に出る。
 const SORT_ORDER: u32 = 1;
 
 /// 言語バーに出す入力モードの表示。
 #[implement(ITfLangBarItemButton, ITfLangBarItem, ITfSource)]
 pub struct ModeIndicator {
-    /// いま示しているモード。
-    mode: RefCell<InputMode>,
+    /// いま出している表示。`None` は入力方式が切。
+    shown: RefCell<Option<InputMode>>,
     /// 変化を知らせる相手。
     sinks: RefCell<Vec<(u32, ITfLangBarItemSink)>>,
     /// 次に配る受付番号。
@@ -42,7 +48,7 @@ pub struct ModeIndicator {
 impl std::fmt::Debug for ModeIndicator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModeIndicator")
-            .field("mode", &self.mode.borrow())
+            .field("shown", &self.shown.borrow())
             .finish_non_exhaustive()
     }
 }
@@ -56,18 +62,31 @@ impl Default for ModeIndicator {
 impl ModeIndicator {
     pub fn new() -> Self {
         Self {
-            mode: RefCell::new(InputMode::Hiragana),
+            shown: RefCell::new(None),
             sinks: RefCell::new(Vec::new()),
             next_cookie: RefCell::new(1),
         }
     }
 
-    /// 表示するモードを差し替え、言語バーに描き直させる。
+    /// 入力モードを表示する。入力方式が入のときに使う。
     pub fn set_mode(&self, mode: InputMode) {
-        if *self.mode.borrow() == mode {
+        self.show(Some(mode));
+    }
+
+    /// 入力方式が切であることを表示する。
+    ///
+    /// **切もまた一つの状態であり、黙って前の表示を残してよいものではない。**
+    /// 「あ」のまま切れていたら、打てないのに打てるように見える。
+    pub fn set_off(&self) {
+        self.show(None);
+    }
+
+    /// 表示を差し替え、言語バーに描き直させる。
+    fn show(&self, shown: Option<InputMode>) {
+        if *self.shown.borrow() == shown {
             return;
         }
-        *self.mode.borrow_mut() = mode;
+        *self.shown.borrow_mut() = shown;
 
         // 知らせる相手を複製してから呼ぶ。借用したまま外へ出ると、
         // 呼んだ先から戻ってきたときに借用が重なってパニックになる。
@@ -87,8 +106,14 @@ impl ModeIndicator {
         }
     }
 
+    /// いま出す文字。
+    ///
+    /// 切のときは、どのモードでもない印を出す。
     fn label(&self) -> &'static str {
-        self.mode.borrow().label()
+        match *self.shown.borrow() {
+            Some(mode) => mode.label(),
+            None => OFF_LABEL,
+        }
     }
 }
 

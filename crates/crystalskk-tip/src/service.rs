@@ -156,6 +156,7 @@ impl TextService {
         } else {
             self.drop_composition();
             self.engine.borrow_mut().reset();
+            self.show_off();
         }
     }
 
@@ -202,6 +203,21 @@ impl TextService {
         };
         indicator.set_mode(mode);
         compartment::publish_mode(&thread_manager, client_id, mode);
+    }
+
+    /// 入力方式が切であることを表示に出す。
+    ///
+    /// 切ったときに何もしないと、**前のモードの顔のまま残る**。打てないのに
+    /// 打てるように見えるので、状態の表示としては最悪の部類になる。
+    fn show_off(&self) {
+        let indicator = self
+            .activation
+            .borrow()
+            .as_ref()
+            .map(|a| a.indicator_object.clone());
+        if let Some(indicator) = indicator {
+            indicator.set_off();
+        }
     }
 
     /// 開いたままの composition を片付ける。
