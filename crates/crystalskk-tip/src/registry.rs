@@ -7,8 +7,8 @@
 use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::{Error, GUID, HSTRING, PCWSTR, Result};
 
@@ -38,16 +38,20 @@ pub fn module_path(module: HMODULE) -> Result<String> {
     Ok(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
-/// COM のクラスとしてこの DLL を登録する。
-pub fn register_class(module: HMODULE) -> Result<()> {
-    let path = module_path(module)?;
+/// COM のクラスとして、指定した場所の DLL を登録する。
+///
+/// 場所を引数で受け取るのは、セットアップツールが**自分ではない DLL** を
+/// 登録できるようにするため。DLL が自分を登録するときは
+/// [`module_path()`] で自分の場所を調べて渡す。
+pub fn register_class(dll_path: &str) -> Result<()> {
+    let path = dll_path;
     let clsid = guid_to_string(&CLSID_CRYSTALSKK);
 
     let key = format!(r"Software\Classes\CLSID\{clsid}");
     write_string(&key, None, CLASS_DESCRIPTION)?;
 
     let server = format!(r"{key}\InprocServer32");
-    write_string(&server, None, &path)?;
+    write_string(&server, None, path)?;
     // TSF の TIP は常にアパートメントスレッドで動く。
     write_string(&server, Some("ThreadingModel"), "Apartment")?;
     Ok(())
@@ -111,6 +115,45 @@ fn write_string(key: &str, name: Option<&str>, value: &str) -> Result<()> {
     } else {
         Err(Error::from_hresult(status.to_hresult()))
     }
+}
+
+/// 登録されている DLL の場所。登録されていなければ `None`。
+pub fn registered_dll_path() -> Option<String> {
+    let clsid = guid_to_string(&CLSID_CRYSTALSKK);
+    let key = HSTRING::from(format!(r"Software\Classes\CLSID\{clsid}\InprocServer32"));
+    let mut handle = HKEY::default();
+
+    // SAFETY: 出力先のハンドルは有効な場所を指す。
+    let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &key, None, KEY_READ, &mut handle) };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let mut buffer = [0u16; 512];
+    let mut size = u32::try_from(std::mem::size_of_val(&buffer)).ok()?;
+    // SAFETY: 長さを渡して書き込ませ、書かれた長さだけを読む。
+    let status = unsafe {
+        RegQueryValueExW(
+            handle,
+            PCWSTR::null(),
+            None,
+            None,
+            Some(buffer.as_mut_ptr().cast::<u8>()),
+            Some(&mut size),
+        )
+    };
+    // SAFETY: 直前に開いたハンドルを閉じる。
+    unsafe {
+        let _ = RegCloseKey(handle);
+    }
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let chars = (size as usize) / std::mem::size_of::<u16>();
+    let text = String::from_utf16_lossy(&buffer[..chars]);
+    let text = text.trim_end_matches('\0').to_owned();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 #[cfg(test)]

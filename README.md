@@ -26,6 +26,7 @@ CrystalSKK がそれらと違うところは次の3点。
 | `crystalskk-cli` | ターミナルから変換を動かす確認用ツール | 着手 |
 | `crystalskk-server` | 変換サーバー。IPC、設定、スクリプト実行 | 未着手 |
 | `crystalskk-tip` | TSF TIP (cdylib) | 着手 |
+| `crystalskk-setup` | この環境への導入と削除 | 着手 |
 | `crystalskk-config` | 設定 GUI | 未着手 |
 
 ## 開発
@@ -64,21 +65,31 @@ cargo run -p crystalskk-cli -- --dict ./SKK-JISYO.L
 cargo run -p crystalskk-cli -- -i --dict ./SKK-JISYO.L
 ```
 
-### TIP を登録する
+### IME を導入する
 
-まだ入力はできない。言語バーに現れるところまで。
+まだ入力はできない。入力方式として選べるところまで。
 
 ```bash
 cargo build -p crystalskk-tip --release
 ```
 
 ```bash
-regsvr32 target/release/crystalskk_tip.dll
+cargo run -p crystalskk-setup -- install
 ```
 
-解除は `regsvr32 /u` で行う。登録先は `HKEY_CURRENT_USER` なので管理者権限は要らない ([ADR-0006](docs/adr/0006-register-the-tip-per-user-during-development.md))。登録したあと、設定の「言語と地域」→ 日本語 → キーボードに CrystalSKK が現れる。
+DLL は `%LOCALAPPDATA%\CrystalSKK\bin` に写してから登録される。`target` の中身を直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
 
-DLL を作り直す前に、登録を解除しておくこと。読み込まれたままだと上書きできない。
+```bash
+cargo run -p crystalskk-setup -- status
+```
+
+```bash
+cargo run -p crystalskk-setup -- uninstall
+```
+
+管理者権限は要らない。登録は利用者ごとに行われる ([ADR-0006](docs/adr/0006-register-the-tip-per-user-during-development.md))。導入後、設定 → 言語と地域 → 日本語 → 言語のオプション → キーボード に CrystalSKK が現れる。
+
+`regsvr32` でも登録できるが、その場合は `target` の中の DLL がそのまま登録される。
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 

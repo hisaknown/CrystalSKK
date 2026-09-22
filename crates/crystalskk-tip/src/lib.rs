@@ -22,12 +22,11 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_POINTER, HMODULE, S_FALSE, S_OK};
-use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, IClassFactory,
-};
+use windows::Win32::System::Com::IClassFactory;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::{BOOL, GUID, HRESULT, Interface};
 
+pub mod com;
 pub mod factory;
 pub mod guids;
 pub mod profile;
@@ -94,8 +93,8 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 #[unsafe(no_mangle)]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
     with_com(|| {
-        registry::register_class(module())?;
         let path = registry::module_path(module())?;
+        registry::register_class(&path)?;
         profile::register_profile(&path)
     })
 }
@@ -111,19 +110,12 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
     })
 }
 
-/// COM を用意してから処理を行い、後始末する。
+/// COM を用意してから処理を行う。
 ///
-/// `regsvr32` が COM を初期化しているとは限らないので自分で行う。既に
-/// 別の方式で初期化されていた場合 (`RPC_E_CHANGED_MODE`) は、そのまま使う。
+/// `regsvr32` が COM を初期化しているとは限らないので自分で行う。
 fn with_com(body: impl FnOnce() -> windows::core::Result<()>) -> HRESULT {
-    // SAFETY: 初期化と後始末を対にしている。
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-    let result = body();
-    if initialized {
-        // SAFETY: このスレッドで初期化したときだけ後始末する。
-        unsafe { CoUninitialize() };
-    }
-    match result {
+    let _apartment = com::Apartment::enter();
+    match body() {
         Ok(()) => S_OK,
         Err(e) => e.code(),
     }
