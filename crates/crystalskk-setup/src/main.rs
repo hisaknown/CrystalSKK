@@ -49,6 +49,15 @@ fn run(arguments: Vec<String>) -> ExitCode {
         _ => {}
     }
 
+    // 利用者ごとの登録は、**昇格する前に**消す。昇格した側の
+    // `HKEY_CURRENT_USER` は、この利用者のものとは限らない。別の管理者の
+    // 資格情報で昇格すれば、そちらの利用者の登録を消して終わってしまう。
+    //
+    // ここは必ずログオンしている本人として動く。消すならここである。
+    if matches!(parsed.command, Command::Install | Command::Uninstall) {
+        clear_per_user_registration();
+    }
+
     // 権限が要る操作。足りなければ昇格して同じことをやり直す。
     if !parsed.no_elevate && !elevate::is_elevated() {
         return elevated_pass(&arguments);
@@ -61,6 +70,21 @@ fn run(arguments: Vec<String>) -> ExitCode {
         Command::LogOn => do_log(true, &report),
         Command::LogOff => do_log(false, &report),
         Command::Status | Command::Dict => unreachable!("上で処理済み"),
+    }
+}
+
+/// 利用者ごとの COM 登録を消す。
+///
+/// 残っていると**そちらが機械全体の登録より優先される**ので、入れ直しても
+/// 古い DLL が使われ続ける。しかも症状はアプリによって出たり出なかったり
+/// するので、原因として疑いにくい。
+fn clear_per_user_registration() {
+    let Some(stale) = crystalskk_tip::registry::per_user_dll_path() else {
+        return;
+    };
+    match crystalskk_tip::registry::unregister_per_user_class() {
+        Ok(()) => println!("古い利用者ごとの登録を消しました: {stale}"),
+        Err(e) => eprintln!("crystalskk-setup: 古い登録を消せません: {}", e.message()),
     }
 }
 
