@@ -11,16 +11,17 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::TextServices::{
-    ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessor,
-    ITfTextInputProcessor_Impl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfThreadMgr,
+    ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
+    ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
+    ITfTextInputProcessorEx_Impl, ITfThreadMgr,
 };
 use windows::core::{BOOL, GUID, IUnknownImpl, Interface, Ref, Result, implement};
 
 use crystalskk_core::Engine;
 use crystalskk_core::dict::EmptyDict;
 
-use crate::{edit, keys};
+use crate::langbar::ModeIndicator;
+use crate::{edit, keys, langbar, log};
 
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
@@ -29,6 +30,12 @@ struct Activation {
     client_id: u32,
     /// キーイベントの受け口を外すために持っておく。
     keystrokes: ITfKeystrokeMgr,
+    /// 言語バーから項目を外すために持っておく。
+    thread_manager: ITfThreadMgr,
+    /// 言語バーに出している入力モードの表示。
+    indicator: ITfLangBarItem,
+    /// 表示を書き換えるための、実体への持ち手。
+    indicator_object: windows::core::ComObject<ModeIndicator>,
 }
 
 /// CrystalSKK の TIP。
@@ -68,10 +75,20 @@ impl TextService {
         self.activation.borrow().as_ref().map(|a| a.client_id)
     }
 
+    /// いまのモードを言語バーへ映す。
+    fn show_mode(&self) {
+        let mode = self.engine.borrow().mode();
+        if let Some(activation) = self.activation.borrow().as_ref() {
+            activation.indicator_object.set_mode(mode);
+        }
+    }
+
     fn deactivate(&self) -> Result<()> {
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
         };
+        log::write("無効化された");
+        langbar::remove(&activation.thread_manager, &activation.indicator);
         // 受け口を外す。外せなくても、保持していたものは落とす。
         // SAFETY: 有効化のときに受け取った識別子をそのまま返している。
         unsafe {
@@ -101,6 +118,8 @@ impl TextService_Impl {
         let Some(thread_manager) = thread_manager.cloned() else {
             return Ok(());
         };
+        log::write(&format!("有効化された (識別子 {client_id})"));
+
         let keystrokes: ITfKeystrokeMgr = thread_manager.cast()?;
         let sink: ITfKeyEventSink = self.to_interface();
 
@@ -108,10 +127,21 @@ impl TextService_Impl {
         unsafe {
             keystrokes.AdviseKeyEventSink(client_id, &sink, true)?;
         }
+        log::write("キーイベントの受け口を登録した");
+
+        // 言語バーの項目は、出せなくても入力そのものは続けられる。
+        let indicator_object = windows::core::ComObject::new(ModeIndicator::new());
+        let indicator: ITfLangBarItem = indicator_object.to_interface();
+        if let Err(e) = langbar::add(&thread_manager, &indicator) {
+            log::write(&format!("言語バーに項目を出せなかった: {}", e.message()));
+        }
 
         *self.this.activation.borrow_mut() = Some(Activation {
             client_id,
             keystrokes,
+            thread_manager,
+            indicator,
+            indicator_object,
         });
         Ok(())
     }
@@ -131,6 +161,11 @@ impl TextService_Impl {
         };
 
         let response = self.this.engine.borrow_mut().press(key);
+        log::write(&format!(
+            "打鍵 {key:?} → 食べた:{} 確定:{:?}",
+            response.handled, response.commit
+        ));
+        self.this.show_mode();
         if !response.commit.is_empty() {
             // 入れられなくても、エンジンの状態はもう進んでいる。ここで
             // 慌てても直せないので、食べたことだけは正しく伝える。

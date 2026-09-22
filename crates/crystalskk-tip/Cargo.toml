@@ -30,6 +30,7 @@ features = [
     "Win32_System_SystemServices",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_TextServices",
+    "Win32_UI_WindowsAndMessaging",
 ]
 
 # COM サーバーを書くため、このクレートは unsafe を許す。

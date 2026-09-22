@@ -1,0 +1,231 @@
+//! 言語バーの項目。
+//!
+//! 入力モードを示す小さな表示で、いわゆる「あ / A」のあれである。
+//! CrystalSKK にとっては利用者への案内であると同時に、**TIP が生きて
+//! いるかどうかを外から見る唯一の窓**でもある。これが出ないなら
+//! 有効化そのものが起きていない。
+
+use std::cell::RefCell;
+
+use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::UI::TextServices::{
+    ITfLangBarItem, ITfLangBarItem_Impl, ITfLangBarItemButton, ITfLangBarItemButton_Impl,
+    ITfLangBarItemMgr, ITfLangBarItemSink, ITfMenu, ITfSource, ITfSource_Impl, ITfThreadMgr,
+    TF_LANGBARITEMINFO, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY, TfLBIClick,
+};
+use windows::Win32::UI::WindowsAndMessaging::HICON;
+use windows::core::{BSTR, GUID, IUnknown, Interface, Ref, Result, implement};
+
+use crystalskk_core::InputMode;
+
+use crate::guids::{CLSID_CRYSTALSKK, GUID_CRYSTALSKK_LANGBAR};
+use crate::log;
+
+/// 並び順。小さいほど手前に出る。
+const SORT_ORDER: u32 = 0;
+
+/// 言語バーに出す入力モードの表示。
+#[implement(ITfLangBarItemButton, ITfLangBarItem, ITfSource)]
+pub struct ModeIndicator {
+    /// いま示しているモード。
+    mode: RefCell<InputMode>,
+    /// 変化を知らせる相手。
+    sinks: RefCell<Vec<(u32, ITfLangBarItemSink)>>,
+    /// 次に配る受付番号。
+    next_cookie: RefCell<u32>,
+}
+
+impl std::fmt::Debug for ModeIndicator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModeIndicator")
+            .field("mode", &self.mode.borrow())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ModeIndicator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModeIndicator {
+    pub fn new() -> Self {
+        Self {
+            mode: RefCell::new(InputMode::Hiragana),
+            sinks: RefCell::new(Vec::new()),
+            next_cookie: RefCell::new(1),
+        }
+    }
+
+    /// 表示するモードを差し替え、言語バーに描き直させる。
+    pub fn set_mode(&self, mode: InputMode) {
+        if *self.mode.borrow() == mode {
+            return;
+        }
+        *self.mode.borrow_mut() = mode;
+
+        // 変化を知らせないと、言語バーは古い表示のままになる。
+        for (_, sink) in self.sinks.borrow().iter() {
+            // SAFETY: 相手から預かった受け口をそのまま呼ぶ。
+            unsafe {
+                let _ = sink.OnUpdate(TF_LBI_STATUS | TF_LBI_TEXT | TF_LBI_ICON);
+            }
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        self.mode.borrow().label()
+    }
+}
+
+/// 変化の種類。`OnUpdate` に渡す。
+const TF_LBI_STATUS: u32 = 0x0001;
+const TF_LBI_ICON: u32 = 0x0002;
+const TF_LBI_TEXT: u32 = 0x0004;
+
+impl ITfLangBarItem_Impl for ModeIndicator_Impl {
+    // 署名は COM が決めており、生ポインタを受け取る安全な関数にせざるを得ない。
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の呼び出し規約が引数の有効性を保証する"
+    )]
+    fn GetInfo(&self, pinfo: *mut TF_LANGBARITEMINFO) -> Result<()> {
+        if pinfo.is_null() {
+            return Err(E_INVALIDARG.into());
+        }
+
+        let mut info = TF_LANGBARITEMINFO {
+            clsidService: CLSID_CRYSTALSKK,
+            guidItem: GUID_CRYSTALSKK_LANGBAR,
+            // 押せる釦として、トレイにも出す。
+            dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
+            ulSort: SORT_ORDER,
+            szDescription: [0; 32],
+        };
+        write_fixed(&mut info.szDescription, "CrystalSKK");
+
+        // SAFETY: null でないことを確かめた書き込み先へ、埋めた値を写す。
+        unsafe { *pinfo = info };
+        Ok(())
+    }
+
+    /// 隠す理由はないので、常に表示する。
+    fn GetStatus(&self) -> Result<u32> {
+        Ok(0)
+    }
+
+    fn Show(&self, _fshow: windows::core::BOOL) -> Result<()> {
+        Ok(())
+    }
+
+    fn GetTooltipString(&self) -> Result<BSTR> {
+        Ok(BSTR::from("CrystalSKK の入力モード"))
+    }
+}
+
+impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
+    /// 押されたときの動きはまだ決めていない。
+    fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
+        Ok(())
+    }
+
+    fn InitMenu(&self, _pmenu: Ref<ITfMenu>) -> Result<()> {
+        Ok(())
+    }
+
+    fn OnMenuSelect(&self, _wid: u32) -> Result<()> {
+        Ok(())
+    }
+
+    /// 絵は持たないので、文字で表す。
+    fn GetIcon(&self) -> Result<HICON> {
+        Err(E_FAIL.into())
+    }
+
+    fn GetText(&self) -> Result<BSTR> {
+        Ok(BSTR::from(self.this.label()))
+    }
+}
+
+impl ITfSource_Impl for ModeIndicator_Impl {
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の呼び出し規約が引数の有効性を保証する"
+    )]
+    fn AdviseSink(&self, riid: *const GUID, punk: Ref<IUnknown>) -> Result<u32> {
+        // SAFETY: 呼び出し側が有効な GUID を渡すことは COM の約束。
+        if riid.is_null() || unsafe { *riid } != ITfLangBarItemSink::IID {
+            return Err(E_INVALIDARG.into());
+        }
+        let Some(sink) = punk
+            .as_ref()
+            .and_then(|u| u.cast::<ITfLangBarItemSink>().ok())
+        else {
+            return Err(E_INVALIDARG.into());
+        };
+
+        let cookie = *self.this.next_cookie.borrow();
+        *self.this.next_cookie.borrow_mut() = cookie.wrapping_add(1);
+        self.this.sinks.borrow_mut().push((cookie, sink));
+        Ok(cookie)
+    }
+
+    fn UnadviseSink(&self, dwcookie: u32) -> Result<()> {
+        let mut sinks = self.this.sinks.borrow_mut();
+        let before = sinks.len();
+        sinks.retain(|(cookie, _)| *cookie != dwcookie);
+        if sinks.len() == before {
+            return Err(E_INVALIDARG.into());
+        }
+        Ok(())
+    }
+}
+
+/// 言語バーへ項目を出す。
+pub fn add(thread_manager: &ITfThreadMgr, item: &ITfLangBarItem) -> Result<()> {
+    let manager: ITfLangBarItemMgr = thread_manager.cast()?;
+    // SAFETY: どちらもこの呼び出しのために用意した有効な参照。
+    unsafe { manager.AddItem(item) }?;
+    log::write("言語バーに項目を出した");
+    Ok(())
+}
+
+/// 言語バーから項目を消す。
+pub fn remove(thread_manager: &ITfThreadMgr, item: &ITfLangBarItem) {
+    let Ok(manager) = thread_manager.cast::<ITfLangBarItemMgr>() else {
+        return;
+    };
+    // SAFETY: 出したときと同じ項目を渡している。
+    unsafe {
+        let _ = manager.RemoveItem(item);
+    }
+}
+
+/// 固定長の配列へ、終端を残して文字列を書く。
+fn write_fixed(destination: &mut [u16; 32], text: &str) {
+    let encoded: Vec<u16> = text.encode_utf16().collect();
+    let length = encoded.len().min(destination.len() - 1);
+    destination[..length].copy_from_slice(&encoded[..length]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_label_follows_the_mode() {
+        let indicator = ModeIndicator::new();
+        assert_eq!(indicator.label(), "あ");
+        indicator.set_mode(InputMode::Ascii);
+        assert_eq!(indicator.label(), "A");
+    }
+
+    #[test]
+    fn a_long_description_is_cut_and_still_terminated() {
+        let mut buffer = [1u16; 32];
+        write_fixed(&mut buffer, &"あ".repeat(100));
+        assert_eq!(buffer[31], 1, "終端の分は書き換えない");
+    }
+}

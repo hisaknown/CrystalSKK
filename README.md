@@ -89,7 +89,17 @@ cargo run -p crystalskk-setup -- uninstall
 
 入力方式の登録は機械全体に書かれるため、管理者権限が要る ([ADR-0007](docs/adr/0007-installing-a-tip-requires-administrator.md))。権限がなければ UAC の確認が出るので、応じればよい。導入後、設定 → 言語と地域 → 日本語 → 言語のオプション → キーボード に CrystalSKK が現れる。
 
-登録される DLL はビルド成果物とは別物なので、IME を有効にしたままでも `cargo build` は通る。入れ替えるときだけ `install` をやり直す。
+登録される DLL はビルド成果物とは別物なので、IME を有効にしたままでも `cargo build` は通る。入れ替えるときだけ `install` をやり直す。ただし DLL を読み込んでいるアプリは先に閉じること。
+
+### TIP の様子を見る
+
+TIP は他人のプロセスの中で動くので、標準出力もデバッガも当てにできない。環境変数を設定したアプリから使うと、`%LOCALAPPDATA%\CrystalSKK\tip.log` に記録が残る。
+
+```bash
+setx CRYSTALSKK_LOG 1
+```
+
+設定したあとに起動したアプリから記録される。サインインし直すと確実。有効化されたか、打鍵が届いているかを切り分けるのに使う。**入力のたびにファイルを開くので、常用しないこと。**
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 
