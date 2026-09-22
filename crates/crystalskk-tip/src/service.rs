@@ -214,7 +214,9 @@ impl TextService_Impl {
     ///
     /// 戻り値は「この打鍵を食べたか」。食べなかった打鍵はアプリへ渡る。
     fn handle_key(&self, context: Ref<ITfContext>, wparam: WPARAM) -> BOOL {
-        let Some(key) = keys::translate(wparam) else {
+        let translated = keys::translate(wparam);
+        keys::log_translation(wparam, translated);
+        let Some(key) = translated else {
             return false.into();
         };
         let Some(client_id) = self.this.client_id() else {
@@ -265,10 +267,18 @@ impl TextService_Impl {
 
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
     fn would_handle_key(&self, wparam: WPARAM) -> BOOL {
-        let Some(key) = keys::translate(wparam) else {
+        let translated = keys::translate(wparam);
+        let Some(key) = translated else {
+            // 食べないと答えた打鍵は `OnKeyDown` に来ないので、
+            // 解釈の記録はここでしか残せない。
+            keys::log_translation(wparam, translated);
             return false.into();
         };
-        self.this.engine.borrow().would_handle(key).into()
+        let handled = self.this.engine.borrow().would_handle(key);
+        if !handled {
+            keys::log_translation(wparam, translated);
+        }
+        handled.into()
     }
 }
 

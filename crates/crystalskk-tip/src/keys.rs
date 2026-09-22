@@ -4,13 +4,26 @@
 //! シフトやキーボード配列を通した「実際に入る文字」が要る。それを得るには
 //! `ToUnicodeEx` に聞くのが唯一まともな方法で、自前で A〜Z を並べると
 //! 英語配列以外で壊れる。
+//!
+//! # 修飾キーは二度確かめる
+//!
+//! `GetKeyboardState` が返す配列は、修飾キーの状態を落としていることが
+//! ある。実際に Ctrl+J が素の `j` として届き、英数モードから戻れなく
+//! なった。TIP はアプリのメッセージ処理の途中で呼ばれるため、そのときの
+//! 待ち行列の状態が同期されているとは限らない。
+//!
+//! そこで、配列を受け取ったあとで修飾キーだけ `GetKeyState` で上書きする。
+//! こうすると修飾の判定だけでなく、`ToUnicodeEx` が返す文字も正しくなる。
 
 use crystalskk_core::Key;
 use windows::Win32::Foundation::WPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
-    VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyState, GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY, VK_BACK,
+    VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU,
+    VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
+
+use crate::log;
 
 /// キーボードの状態を読む長さ。`GetKeyboardState` が定める。
 const KEY_STATE_LEN: usize = 256;
@@ -39,11 +52,7 @@ pub fn translate(wparam: WPARAM) -> Option<Key> {
         _ => {}
     }
 
-    let mut state = [0u8; KEY_STATE_LEN];
-    // SAFETY: 定められた長さの配列をそのまま渡している。
-    if unsafe { GetKeyboardState(&mut state) }.is_err() {
-        return None;
-    }
+    let state = keyboard_state()?;
 
     // Ctrl 付きの英字は、文字に直すと制御文字になってしまうので先に拾う。
     if state[VK_CONTROL.0 as usize] & KEY_PRESSED != 0 {
@@ -52,6 +61,68 @@ pub fn translate(wparam: WPARAM) -> Option<Key> {
     }
 
     to_character(virtual_key, &state).map(Key::Char)
+}
+
+/// いまのキーボードの状態。修飾キーは個別に確かめ直す。
+fn keyboard_state() -> Option<[u8; KEY_STATE_LEN]> {
+    let mut state = [0u8; KEY_STATE_LEN];
+    // SAFETY: 定められた長さの配列をそのまま渡している。
+    if unsafe { GetKeyboardState(&mut state) }.is_err() {
+        return None;
+    }
+
+    // 配列が修飾キーを落としていることがあるので、ここだけ上書きする。
+    for key in MODIFIERS {
+        // SAFETY: 仮想キーの番号を渡して状態を問い合わせるだけ。
+        let pressed = unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        if pressed {
+            state[key.0 as usize] |= KEY_PRESSED;
+        }
+    }
+    // 左右どちらかが押されていれば、まとめの側も押されているとみなす。
+    merge_side(&mut state, VK_CONTROL, VK_LCONTROL, VK_RCONTROL);
+    merge_side(&mut state, VK_SHIFT, VK_LSHIFT, VK_RSHIFT);
+    merge_side(&mut state, VK_MENU, VK_LMENU, VK_RMENU);
+
+    Some(state)
+}
+
+/// 左右の別を、まとめの仮想キーへ反映する。
+fn merge_side(
+    state: &mut [u8; KEY_STATE_LEN],
+    both: VIRTUAL_KEY,
+    left: VIRTUAL_KEY,
+    right: VIRTUAL_KEY,
+) {
+    let pressed = (state[left.0 as usize] | state[right.0 as usize]) & KEY_PRESSED;
+    state[both.0 as usize] |= pressed;
+}
+
+/// 確かめ直す修飾キー。
+const MODIFIERS: [VIRTUAL_KEY; 10] = [
+    VK_CONTROL,
+    VK_LCONTROL,
+    VK_RCONTROL,
+    VK_SHIFT,
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_MENU,
+    VK_LMENU,
+    VK_RMENU,
+    VK_CAPITAL,
+];
+
+/// 打鍵の解釈を記録する。何がどう見えているかを外から確かめるため。
+pub fn log_translation(wparam: WPARAM, key: Option<Key>) {
+    let virtual_key = wparam.0 & 0xFFFF;
+    let state = keyboard_state();
+    let pressed = |k: VIRTUAL_KEY| state.is_some_and(|s| s[k.0 as usize] & KEY_PRESSED != 0);
+    log::write(&format!(
+        "キー VK={virtual_key:#04x} Ctrl={} Shift={} Alt={} → {key:?}",
+        pressed(VK_CONTROL),
+        pressed(VK_SHIFT),
+        pressed(VK_MENU),
+    ));
 }
 
 /// 仮想キーが英字なら、その小文字。
