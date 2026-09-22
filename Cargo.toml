@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/crystalskk-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.93"
+repository = "https://github.com/rutto/crystalskk"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
