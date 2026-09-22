@@ -1,0 +1,227 @@
+//! 入力モードのアイコンを、その場で描いて作る。
+//!
+//! トレイの表示は絵がないと出ない。文字を返しても描かれない。
+//!
+//! **絵柄は仮のものである。** 地の四角にモードの文字を白抜きするだけで、
+//! 明るい背景でも暗い背景でも読めることだけを狙っている。差し替える
+//! 前提で、描き方は `draw` 一箇所に閉じてある。
+//!
+//! # 本物の絵を入れるとき
+//!
+//! 描いた絵ではなく、用意した絵を使う段になったら二つ道がある。
+//!
+//! - **`.ico` を `include_bytes!` で抱え、`CreateIconFromResourceEx` で
+//!   `HICON` にする。** リソースコンパイラは要らず、ここの `render` を
+//!   差し替えるだけで済む。言語バーとトレイにはこれで足りる。
+//! - **PE の資源として埋め込む。** 設定画面の一覧に出る絵
+//!   (`RegisterProfile` に渡す「アイコンのあるファイルと番号」) は、
+//!   本物の資源でなければ読まれない。こちらが要るならリソース
+//!   コンパイラか、`.res` を自前で組み立てる仕掛けが要る。
+//!
+//! 一つ目で困らないうちは、二つ目に手を出さなくてよい。
+
+use std::ffi::c_void;
+
+use windows::Win32::Foundation::{COLORREF, RECT};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
+    CreateFontW, CreateSolidBrush, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP,
+    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE, FW_SEMIBOLD,
+    FillRect, GetDC, GetDeviceCaps, HBITMAP, HDC, HFONT, LOGPIXELSY, OUT_DEFAULT_PRECIS, ReleaseDC,
+    SHIFTJIS_CHARSET, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
+use windows::core::{Result, w};
+
+/// 基準の大きさ。拡大率に合わせて伸ばす。
+const BASE_SIZE: i32 = 16;
+
+/// 標準の拡大率での画素密度。
+const BASE_DPI: i32 = 96;
+
+/// これ以上は大きくしない。
+const MAX_SIZE: i32 = 64;
+
+/// 地の色。暗い紺。明るい背景でも沈んで見える。
+const BACKGROUND: COLORREF = COLORREF(0x00_55_3A_2B);
+
+/// 文字の色。
+const FOREGROUND: COLORREF = COLORREF(0x00_FF_FF_FF);
+
+/// モードの文字を描いたアイコンを作る。
+///
+/// 返したアイコンは呼び出し側が [`windows::Win32::UI::WindowsAndMessaging::DestroyIcon`]
+/// で解放する。言語バーはそう扱う。
+pub fn render(label: &str) -> Result<HICON> {
+    let size = icon_size();
+
+    // SAFETY: 以下は GDI の定める手順どおりで、作ったものはすべて
+    // この関数の中で後始末する。
+    unsafe {
+        let screen = GetDC(None);
+        let memory = CreateCompatibleDC(Some(screen));
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let color = create_surface(memory, size, &mut bits);
+        let color = match color {
+            Ok(color) => color,
+            Err(e) => {
+                let _ = DeleteDC(memory);
+                ReleaseDC(None, screen);
+                return Err(e);
+            }
+        };
+
+        let previous = SelectObject(memory, color.into());
+        draw(memory, size, label);
+        SelectObject(memory, previous);
+
+        // GDI は透過情報を書かないので、全面を不透明にする。
+        fill_alpha(bits, size);
+
+        // 32 ビットの色を使うので覆いは要らない。空のものを添える。
+        let mask = CreateBitmap(size, size, 1, 1, None);
+
+        let info = ICONINFO {
+            fIcon: true.into(),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let icon = CreateIconIndirect(&info);
+
+        // アイコンは中身を写して作られるので、こちらの絵は捨ててよい。
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+
+        icon
+    }
+}
+
+/// 拡大率に合わせた一辺の長さ。
+fn icon_size() -> i32 {
+    // SAFETY: 画面の DC を借りて問い合わせ、すぐ返す。
+    let dpi = unsafe {
+        let screen = GetDC(None);
+        let dpi = GetDeviceCaps(Some(screen), LOGPIXELSY);
+        ReleaseDC(None, screen);
+        dpi
+    };
+    let dpi = if dpi > 0 { dpi } else { BASE_DPI };
+    (BASE_SIZE * dpi / BASE_DPI).clamp(BASE_SIZE, MAX_SIZE)
+}
+
+/// 描き込む面を作る。画素へ直接触れるよう、上下を正した 32 ビットの面にする。
+///
+/// # Safety
+///
+/// `bits` は書き込める場所を指していること。
+unsafe fn create_surface(dc: HDC, size: i32, bits: *mut *mut c_void) -> Result<HBITMAP> {
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
+            biWidth: size,
+            // 負にすると上が先になる。画素をそのまま数えられる。
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+
+    // SAFETY: 呼び出し側の約束による。
+    unsafe { CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, bits, None, 0) }
+}
+
+/// 地を塗り、モードの文字を中央に置く。
+///
+/// **ここが絵柄のすべてである。** 差し替えるときはこの関数だけを書き換える。
+///
+/// # Safety
+///
+/// `dc` に描き込む面が選ばれていること。
+unsafe fn draw(dc: HDC, size: i32, label: &str) {
+    let area = RECT {
+        left: 0,
+        top: 0,
+        right: size,
+        bottom: size,
+    };
+
+    // SAFETY: 呼び出し側の約束による。作った道具はここで捨てる。
+    unsafe {
+        let background = CreateSolidBrush(BACKGROUND);
+        FillRect(dc, &area, background);
+        let _ = DeleteObject(background.into());
+
+        let font = mode_font(size);
+        let previous = SelectObject(dc, font.into());
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, FOREGROUND);
+
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        let mut area = area;
+        DrawTextW(
+            dc,
+            &mut text,
+            &mut area,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+        );
+
+        SelectObject(dc, previous);
+        let _ = DeleteObject(font.into());
+    }
+}
+
+/// モードの文字に使う字体。
+///
+/// 仮名を含むので、仮名を持つ字体を頼む。無ければ Windows が similar な
+/// ものを選ぶ。
+fn mode_font(size: i32) -> HFONT {
+    // SAFETY: 大きさと種別を渡して字体を頼むだけ。
+    unsafe {
+        CreateFontW(
+            // 四角いっぱいだと窮屈なので少し縮める。
+            -(size * 3 / 4),
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            SHIFTJIS_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            windows::Win32::Graphics::Gdi::CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            FF_DONTCARE.0.into(),
+            w!("Yu Gothic UI"),
+        )
+    }
+}
+
+/// 全面を不透明にする。
+///
+/// GDI の描画は透過の情報を触らないので、そのままでは全部が透明のまま
+/// 扱われて何も見えない。
+///
+/// # Safety
+///
+/// `bits` が `size * size` 個の 32 ビット画素を指していること。
+unsafe fn fill_alpha(bits: *mut c_void, size: i32) {
+    if bits.is_null() {
+        return;
+    }
+    let count = (size * size).max(0) as usize;
+    // SAFETY: 呼び出し側の約束による。面は 32 ビット画素で作ってある。
+    let pixels = unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), count) };
+    for pixel in pixels {
+        *pixel |= 0xFF00_0000;
+    }
+}

@@ -32,6 +32,7 @@ pub mod edit;
 pub mod factory;
 pub mod guard;
 pub mod guids;
+pub mod icon;
 pub mod keys;
 pub mod langbar;
 pub mod log;

@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 
-use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::TextServices::{
     GUID_LBI_INPUTMODE, ITfLangBarItem, ITfLangBarItem_Impl, ITfLangBarItemButton,
@@ -22,6 +22,7 @@ use crystalskk_core::InputMode;
 
 use crate::guard::guard;
 use crate::guids::CLSID_CRYSTALSKK;
+use crate::icon;
 use crate::log;
 
 /// 並び順。小さいほど手前に出る。
@@ -157,13 +158,15 @@ impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
         guard("OnMenuSelect", || Ok(()))
     }
 
-    /// 絵はまだ持たない。
+    /// トレイに出す絵。
     ///
-    /// トレイの表示は**絵がないと出ない**。動いている実装はいずれも
-    /// ここで本物の `HICON` を返している。資源として埋め込むには
-    /// リソースコンパイラが要るので、その場で描いて作る予定。
+    /// 文字を返しても描かれない。**絵がないと表示自体が出ない**ので、
+    /// ここは必ず本物の `HICON` を返す必要がある。
+    ///
+    /// 返したアイコンは言語バー側が解放する。呼ばれるたびに作り直すのは
+    /// そのため。拡大率が変わっても追随できる利点もある。
     fn GetIcon(&self) -> Result<HICON> {
-        guard("GetIcon", || Err(E_FAIL.into()))
+        guard("GetIcon", || icon::render(self.this.label()))
     }
 
     fn GetText(&self) -> Result<BSTR> {
