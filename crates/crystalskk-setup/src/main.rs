@@ -106,6 +106,10 @@ fn elevated_pass(arguments: &[String]) -> ExitCode {
             if let Some(message) = report::take(&report_path) {
                 print!("{message}");
             }
+            // 昇格した側の報告を鵜呑みにしない。**本人として見た結果**を
+            // 確かめる。昇格した側の `HKEY_CURRENT_USER` は別人のものかも
+            // しれず、向こうから見えている景色は当てにならない。
+            confirm_effective_registration();
             if code == 0 {
                 ExitCode::SUCCESS
             } else {
@@ -159,9 +163,37 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
             report.say("\n");
             report.say("設定 → 時刻と言語 → 言語と地域 → 日本語 → 言語のオプション →\n");
             report.say("キーボード に CrystalSKK が現れます。\n");
+            // 昇格して呼ばれたときは、親のほうが本人として確かめ直す。
+            if report.is_console() {
+                confirm_effective_registration();
+            }
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),
+    }
+}
+
+/// 結局どの DLL が使われるのかを、本人の目線で確かめて出す。
+///
+/// 導入が「成功しました」と言っても、実際に読み込まれるのが別の DLL で
+/// あることがある。利用者ごとの登録が残っていると、そちらが優先される。
+/// **黙って成功を報告すると、それが何時間も隠れる。**
+fn confirm_effective_registration() {
+    let status = install::status();
+    let Some(effective) = status.effective() else {
+        println!();
+        println!("登録が見当たりません。install が通っていません。");
+        return;
+    };
+
+    println!();
+    println!("実際に使われる DLL: {}", effective.display());
+
+    if status.per_user.is_some() {
+        println!();
+        println!("利用者ごとの登録が残っています。**こちらが優先されます。**");
+        println!("機械全体へ入れ替えても、この DLL は使われません。");
+        println!("消せていないので、もう一度 install してください。");
     }
 }
 
