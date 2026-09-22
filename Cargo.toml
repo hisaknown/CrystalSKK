@@ -5,6 +5,7 @@ members = [
     "crates/crystalskk-dict",
     "crates/crystalskk-fetch",
     "crates/crystalskk-cli",
+    "crates/crystalskk-tip",
 ]
 
 [workspace.package]

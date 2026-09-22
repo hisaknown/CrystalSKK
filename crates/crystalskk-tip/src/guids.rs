@@ -1,0 +1,30 @@
+//! CrystalSKK が名乗る GUID。
+//!
+//! これらは一度公開したら**変えてはならない**。利用者のレジストリと
+//! 入力方式の設定はこの値で CrystalSKK を指しているため、変えると
+//! 「入力方式が消えた」ように見え、古い登録が残り続ける。
+
+use windows::core::GUID;
+
+/// TIP そのものを指す COM のクラス ID。
+pub const CLSID_CRYSTALSKK: GUID = GUID::from_u128(0x5cd1c143_735e_4051_986e_69864a08febe);
+
+/// 入力方式 (言語バーに並ぶ項目) を指す GUID。
+pub const GUID_CRYSTALSKK_PROFILE: GUID = GUID::from_u128(0x3894d2cd_3ec7_4877_8fcd_f42c42c3eba3);
+
+/// 見出し語入力中の文字に付ける表示属性。
+pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID =
+    GUID::from_u128(0xbfdd4dbc_77c0_4f2d_beae_4fe6aabbe510);
+
+/// 候補選択中の文字に付ける表示属性。
+pub const GUID_DISPLAY_ATTRIBUTE_CONVERTED: GUID =
+    GUID::from_u128(0x9b6004e5_bb9b_4b85_9741_507b98ddd64d);
+
+/// 言語バーと設定画面に出る名前。
+pub const PROFILE_DESCRIPTION: &str = "CrystalSKK";
+
+/// COM のクラス登録に書く名前。
+pub const CLASS_DESCRIPTION: &str = "CrystalSKK Text Input Processor";
+
+/// 日本語 (日本)。TIP はこの言語に結び付けて登録する。
+pub const LANGID_JA_JP: u16 = 0x0411;

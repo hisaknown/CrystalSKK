@@ -1,0 +1,40 @@
+[package]
+name = "crystalskk-tip"
+description = "CrystalSKK as a TSF text input processor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "crystalskk_tip"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+
+# `#[implement]` の展開が windows-core を名前で参照するため、直接依存に入れる。
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_TextServices",
+]
+
+# COM サーバーを書くため、このクレートは unsafe を許す。
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "warn"

@@ -1,0 +1,130 @@
+//! CrystalSKK の TSF テキスト入力プロセッサ (TIP)。
+//!
+//! このクレートは COM のインプロセスサーバーであり、**入力先アプリの
+//! プロセスに読み込まれる**。Word にも Chrome にもこのコードが同居する。
+//! したがってここは薄く保ち、失敗しうる処理や重い処理を持ち込まない
+//! (PRD §3「ホストアプリを巻き込まない」)。
+//!
+//! いまは登録して言語バーに現れるところまでで、入力はまだ行わない。
+//!
+//! # 登録
+//!
+//! ```text
+//! regsvr32 crystalskk_tip.dll
+//! regsvr32 /u crystalskk_tip.dll
+//! ```
+//!
+//! 登録先は `HKEY_CURRENT_USER` なので管理者権限は要らない (ADR-0006)。
+
+#![cfg(windows)]
+
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_POINTER, HMODULE, S_FALSE, S_OK};
+use windows::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, IClassFactory,
+};
+use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows::core::{BOOL, GUID, HRESULT, Interface};
+
+pub mod factory;
+pub mod guids;
+pub mod profile;
+pub mod registry;
+pub mod service;
+
+use factory::ClassFactory;
+use guids::CLSID_CRYSTALSKK;
+
+/// 読み込まれたこの DLL のハンドル。`DllMain` で受け取る。
+static MODULE: AtomicUsize = AtomicUsize::new(0);
+
+fn module() -> HMODULE {
+    HMODULE(MODULE.load(Ordering::Acquire) as *mut c_void)
+}
+
+/// DLL の出入り口。ハンドルを覚えるためだけに使う。
+///
+/// ここでは何もしない。`DllMain` の中でできることは強く制限されており、
+/// COM の呼び出しもロックの取得も行ってはならない。
+#[unsafe(no_mangle)]
+pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_void) -> BOOL {
+    if reason == DLL_PROCESS_ATTACH {
+        MODULE.store(module.0 as usize, Ordering::Release);
+    }
+    true.into()
+}
+
+/// COM がクラスオブジェクトを要求する入口。
+///
+/// # Safety
+///
+/// COM の規約どおり、`rclsid` と `riid` は有効な GUID を、`ppv` は
+/// ポインタを書き込める場所を指していなければならない。
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DllGetClassObject(
+    rclsid: *const GUID,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if ppv.is_null() || rclsid.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: null でないことを確かめた出力先を空にしておく。
+    unsafe { *ppv = std::ptr::null_mut() };
+
+    // SAFETY: 呼び出し側が有効な GUID を指していることは COM の約束。
+    if unsafe { *rclsid } != CLSID_CRYSTALSKK {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
+
+    let factory: IClassFactory = ClassFactory.into();
+    // SAFETY: `riid` と `ppv` は上で確かめた有効な場所を指す。
+    unsafe { factory.query(riid, ppv) }
+}
+
+/// DLL を取り外してよいか COM が尋ねる。
+#[unsafe(no_mangle)]
+pub extern "system" fn DllCanUnloadNow() -> HRESULT {
+    if factory::can_unload() { S_OK } else { S_FALSE }
+}
+
+/// 自己登録。`regsvr32` から呼ばれる。
+#[unsafe(no_mangle)]
+pub extern "system" fn DllRegisterServer() -> HRESULT {
+    with_com(|| {
+        registry::register_class(module())?;
+        let path = registry::module_path(module())?;
+        profile::register_profile(&path)
+    })
+}
+
+/// 登録の取り消し。`regsvr32 /u` から呼ばれる。
+#[unsafe(no_mangle)]
+pub extern "system" fn DllUnregisterServer() -> HRESULT {
+    with_com(|| {
+        // 入力方式を先に消す。クラス登録が残っていないと消せないため。
+        let profile = profile::unregister_profile();
+        let class = registry::unregister_class();
+        profile.and(class)
+    })
+}
+
+/// COM を用意してから処理を行い、後始末する。
+///
+/// `regsvr32` が COM を初期化しているとは限らないので自分で行う。既に
+/// 別の方式で初期化されていた場合 (`RPC_E_CHANGED_MODE`) は、そのまま使う。
+fn with_com(body: impl FnOnce() -> windows::core::Result<()>) -> HRESULT {
+    // SAFETY: 初期化と後始末を対にしている。
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = body();
+    if initialized {
+        // SAFETY: このスレッドで初期化したときだけ後始末する。
+        unsafe { CoUninitialize() };
+    }
+    match result {
+        Ok(()) => S_OK,
+        Err(e) => e.code(),
+    }
+}

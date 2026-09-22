@@ -25,7 +25,7 @@ CrystalSKK がそれらと違うところは次の3点。
 | `crystalskk-fetch` | 辞書の取得と設置 (WinHTTP) | 着手 |
 | `crystalskk-cli` | ターミナルから変換を動かす確認用ツール | 着手 |
 | `crystalskk-server` | 変換サーバー。IPC、設定、スクリプト実行 | 未着手 |
-| `crystalskk-tip` | TSF TIP (cdylib) | 未着手 |
+| `crystalskk-tip` | TSF TIP (cdylib) | 着手 |
 | `crystalskk-config` | 設定 GUI | 未着手 |
 
 ## 開発
@@ -63,6 +63,22 @@ cargo run -p crystalskk-cli -- --dict ./SKK-JISYO.L
 ```bash
 cargo run -p crystalskk-cli -- -i --dict ./SKK-JISYO.L
 ```
+
+### TIP を登録する
+
+まだ入力はできない。言語バーに現れるところまで。
+
+```bash
+cargo build -p crystalskk-tip --release
+```
+
+```bash
+regsvr32 target/release/crystalskk_tip.dll
+```
+
+解除は `regsvr32 /u` で行う。登録先は `HKEY_CURRENT_USER` なので管理者権限は要らない ([ADR-0006](docs/adr/0006-register-the-tip-per-user-during-development.md))。登録したあと、設定の「言語と地域」→ 日本語 → キーボードに CrystalSKK が現れる。
+
+DLL を作り直す前に、登録を解除しておくこと。読み込まれたままだと上書きできない。
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 

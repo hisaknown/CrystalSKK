@@ -88,6 +88,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crystalskk-tip"
+version = "0.1.0"
+dependencies = [
+ "crystalskk-core",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
