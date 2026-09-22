@@ -18,6 +18,7 @@ use std::process::ExitCode;
 
 use crystalskk_tip::com::Apartment;
 
+mod dictionary;
 mod elevate;
 mod install;
 mod report;
@@ -40,8 +41,11 @@ fn run(arguments: Vec<String>) -> ExitCode {
         Err(message) => return fail(&message, None),
     };
 
-    if parsed.command == Command::Status {
-        return report_status();
+    match parsed.command {
+        Command::Status => return report_status(),
+        // 辞書は利用者ごとの場所へ置くので、権限は要らない。
+        Command::Dict => return dictionary::fetch(),
+        _ => {}
     }
 
     // 権限が要る操作。足りなければ昇格して同じことをやり直す。
@@ -53,7 +57,7 @@ fn run(arguments: Vec<String>) -> ExitCode {
     match parsed.command {
         Command::Install => do_install(parsed.dll.as_deref(), &report),
         Command::Uninstall => do_uninstall(parsed.purge, &report),
-        Command::Status => unreachable!("上で処理済み"),
+        Command::Status | Command::Dict => unreachable!("上で処理済み"),
     }
 }
 
@@ -208,6 +212,8 @@ fn fail(message: &str, report: Option<&Report>) -> ExitCode {
 enum Command {
     Install,
     Uninstall,
+    /// 辞書を取得して置く。
+    Dict,
     /// 何も変えない。命令が決まるまでの置き場所でもある。
     #[default]
     Status,
@@ -241,6 +247,7 @@ impl Options {
                 "install" => set(&mut command, Command::Install)?,
                 "uninstall" => set(&mut command, Command::Uninstall)?,
                 "status" => set(&mut command, Command::Status)?,
+                "dict" => set(&mut command, Command::Dict)?,
                 "--purge" => parsed.purge = true,
                 "--no-elevate" => parsed.no_elevate = true,
                 "--report" => {
@@ -290,6 +297,7 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
   crystalskk-setup uninstall          登録を解除する
   crystalskk-setup uninstall --purge  写した DLL も削除する
   crystalskk-setup status             今の状態を表示する
+  crystalskk-setup dict               辞書を取得して置く (権限は要らない)
 
 install と uninstall には管理者権限が要る。権限がなければ UAC の確認を出して
 自分を呼び直すので、確認に応じてほしい。

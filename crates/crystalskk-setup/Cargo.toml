@@ -12,6 +12,8 @@ name = "crystalskk-setup"
 path = "src/main.rs"
 
 [dependencies]
+crystalskk-dict = { path = "../crystalskk-dict" }
+crystalskk-fetch = { path = "../crystalskk-fetch" }
 crystalskk-tip = { path = "../crystalskk-tip" }
 
 [target.'cfg(windows)'.dependencies.windows]

@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 crystalskk-core = { path = "../crystalskk-core" }
+crystalskk-dict = { path = "../crystalskk-dict" }
 
 # `#[implement]` の展開が windows-core を名前で参照するため、直接依存に入れる。
 [target.'cfg(windows)'.dependencies]

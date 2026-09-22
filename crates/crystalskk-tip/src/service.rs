@@ -22,11 +22,12 @@ use windows::Win32::UI::TextServices::{
 use windows::core::{BOOL, ComObject, GUID, IUnknownImpl, Interface, Ref, Result, implement};
 
 use crystalskk_core::Engine;
-use crystalskk_core::dict::EmptyDict;
+use crystalskk_core::engine::Event;
 
+use crate::dict::SharedUserDict;
 use crate::guard::guard;
 use crate::langbar::ModeIndicator;
-use crate::{edit, keys, langbar, log};
+use crate::{dict, edit, keys, langbar, log};
 
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
@@ -56,9 +57,9 @@ pub struct TextService {
     /// TSF は単一スレッドアパートメントで呼ぶので、`RefCell` で足りる。
     activation: RefCell<Option<Activation>>,
     /// 変換の状態。
-    ///
-    /// 辞書はまだ繋いでいないので、変換はすべて辞書登録になる。
     engine: RefCell<Engine>,
+    /// 学習の書き込み先。
+    user_dictionary: SharedUserDict,
     /// 未確定の文字列を見せている composition と、その文書。
     ///
     /// 打鍵をまたいで持ち越す。開いていなければ `None`。
@@ -73,9 +74,11 @@ impl Default for TextService {
 
 impl TextService {
     pub fn new() -> Self {
+        let (engine, user_dictionary) = dict::build();
         Self {
             activation: RefCell::new(None),
-            engine: RefCell::new(Engine::new(Box::new(EmptyDict))),
+            engine: RefCell::new(engine),
+            user_dictionary,
             composition: RefCell::new(None),
         }
     }
@@ -102,6 +105,27 @@ impl TextService {
             .map(|a| a.indicator_object.clone())
     }
 
+    /// 学習と辞書登録をユーザー辞書へ反映する。
+    ///
+    /// 登録だけはその場で書き出す。新しく覚えた語を落とすと利用者の
+    /// 手間がそのまま失われるため。並び替えの学習は無効化のときに
+    /// まとめて書く。打鍵のたびにファイルへ書きたくない (PRD N-01)。
+    fn apply_events(&self, events: &[Event]) {
+        let mut registered = false;
+        for event in events {
+            match event {
+                Event::Learn { query, word } => self.user_dictionary.learn(query, word),
+                Event::Register { query, word } => {
+                    self.user_dictionary.learn(query, word);
+                    registered = true;
+                }
+            }
+        }
+        if registered {
+            self.user_dictionary.save();
+        }
+    }
+
     /// いまのモードを言語バーへ映す。
     fn show_mode(&self) {
         let mode = self.engine.borrow().mode();
@@ -123,6 +147,7 @@ impl TextService {
 
     fn deactivate(&self) -> Result<()> {
         self.drop_composition();
+        self.user_dictionary.save();
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
         };
@@ -202,9 +227,12 @@ impl TextService_Impl {
 
         let response = self.this.engine.borrow_mut().press(key);
         log::write(&format!(
-            "打鍵 {key:?} → 食べた:{} 確定:{:?}",
-            response.handled, response.commit
+            "打鍵 {key:?} → 食べた:{} 確定:{:?} 未確定:{:?}",
+            response.handled,
+            response.commit,
+            response.preedit.display()
         ));
+        self.this.apply_events(&response.events);
 
         self.this.show_mode();
         log::write("モードを映した");

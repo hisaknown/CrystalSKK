@@ -67,7 +67,7 @@ cargo run -p crystalskk-cli -- -i --dict ./SKK-JISYO.L
 
 ### IME を導入する
 
-かな入力と変換の未確定表示まで動く。辞書はまだ繋いでいないので、変換はすべて辞書登録になる。
+かな入力と変換が動く。候補ウィンドウはまだないので、候補は Space で送りながら未確定表示で見る。
 
 ```bash
 cargo build -p crystalskk-tip --release
@@ -77,7 +77,13 @@ cargo build -p crystalskk-tip --release
 cargo run -p crystalskk-setup -- install
 ```
 
-DLL は `%ProgramFiles%\CrystalSKK\bin` に写してから登録される。`target` の中身を直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
+辞書を取得する。こちらは利用者ごとの場所へ置くので権限は要らない。
+
+```bash
+cargo run -p crystalskk-setup -- dict
+```
+
+DLL は `%ProgramFiles%\CrystalSKK\bin` に、辞書は `%LOCALAPPDATA%\CrystalSKK` に置かれる。辞書は利用者のデータであってプログラムの一部ではないので、場所を分けている。DLL を `target` から直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
 
 ```bash
 cargo run -p crystalskk-setup -- status

@@ -91,6 +91,8 @@ dependencies = [
 name = "crystalskk-setup"
 version = "0.1.0"
 dependencies = [
+ "crystalskk-dict",
+ "crystalskk-fetch",
  "crystalskk-tip",
  "windows",
 ]
@@ -100,6 +102,7 @@ name = "crystalskk-tip"
 version = "0.1.0"
 dependencies = [
  "crystalskk-core",
+ "crystalskk-dict",
  "windows",
  "windows-core",
 ]
