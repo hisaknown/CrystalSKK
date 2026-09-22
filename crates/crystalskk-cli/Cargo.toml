@@ -1,0 +1,24 @@
+[package]
+name = "crystalskk-cli"
+description = "Drive the CrystalSKK engine from a terminal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "crystalskk_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crystalskk"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.29.0"
+crystalskk-core = { path = "../crystalskk-core" }
+crystalskk-dict = { path = "../crystalskk-dict" }
+
+[lints]
+workspace = true

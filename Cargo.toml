@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/crystalskk-core", "crates/crystalskk-dict", "crates/crystalskk-fetch"]
+members = [
+    "crates/crystalskk-core",
+    "crates/crystalskk-dict",
+    "crates/crystalskk-fetch",
+    "crates/crystalskk-cli",
+]
 
 [workspace.package]
 version = "0.1.0"

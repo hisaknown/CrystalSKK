@@ -240,7 +240,7 @@ impl Engine {
             handled: out.handled,
             commit: out.commit,
             preedit: self.preedit(),
-            candidates: self.candidate_view(),
+            candidates: self.candidates(),
             events: out.events,
         }
     }
@@ -278,7 +278,8 @@ impl Engine {
         }
     }
 
-    fn candidate_view(&self) -> Option<CandidateView> {
+    /// 候補選択中なら候補ウィンドウの内容。それ以外は `None`。
+    pub fn candidates(&self) -> Option<CandidateView> {
         match &self.state {
             State::Selecting(s) => Some(CandidateView {
                 candidates: s.candidates.clone(),
