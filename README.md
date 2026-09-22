@@ -77,7 +77,7 @@ cargo build -p crystalskk-tip --release
 cargo run -p crystalskk-setup -- install
 ```
 
-DLL は `%LOCALAPPDATA%\CrystalSKK\bin` に写してから登録される。`target` の中身を直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
+DLL は `%ProgramFiles%\CrystalSKK\bin` に写してから登録される。`target` の中身を直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
 
 ```bash
 cargo run -p crystalskk-setup -- status
@@ -87,9 +87,9 @@ cargo run -p crystalskk-setup -- status
 cargo run -p crystalskk-setup -- uninstall
 ```
 
-管理者権限は要らない。登録は利用者ごとに行われる ([ADR-0006](docs/adr/0006-register-the-tip-per-user-during-development.md))。導入後、設定 → 言語と地域 → 日本語 → 言語のオプション → キーボード に CrystalSKK が現れる。
+入力方式の登録は機械全体に書かれるため、管理者権限が要る ([ADR-0007](docs/adr/0007-installing-a-tip-requires-administrator.md))。権限がなければ UAC の確認が出るので、応じればよい。導入後、設定 → 言語と地域 → 日本語 → 言語のオプション → キーボード に CrystalSKK が現れる。
 
-`regsvr32` でも登録できるが、その場合は `target` の中の DLL がそのまま登録される。
+登録される DLL はビルド成果物とは別物なので、IME を有効にしたままでも `cargo build` は通る。入れ替えるときだけ `install` をやり直す。
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 

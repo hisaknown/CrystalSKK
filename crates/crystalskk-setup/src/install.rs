@@ -3,9 +3,14 @@
 //! 行うことは三つしかない。DLL を置き場所へ写し、COM のクラスとして
 //! 登録し、入力方式として登録する。削除はその逆をたどる。
 //!
-//! 置き場所を `%LOCALAPPDATA%` にしているのは、管理者権限なしで書けること
-//! と、ビルド成果物を直接登録しないためである。`target` の中身を登録すると、
-//! 使用中の DLL がビルドに掴まれて作り直せなくなる。
+//! 置き場所は `%ProgramFiles%` である。登録が機械全体に書かれる以上
+//! (ADR-0007)、DLL も機械全体から見える場所になければ辻褄が合わない。
+//! 書き込みに管理者権限が要ることは、ここでは利点でもある。全利用者の
+//! あらゆるプロセスに読み込まれる DLL を、権限のない者が差し替えられては
+//! ならない。
+//!
+//! ビルド成果物を直接登録しないのは、使用中の DLL がビルドに掴まれて
+//! 作り直せなくなるのを避けるため。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,10 +39,10 @@ pub enum Status {
     },
 }
 
-/// 置き場所。`%LOCALAPPDATA%\CrystalSKK\bin`。
+/// 置き場所。`%ProgramFiles%\CrystalSKK\bin`。
 pub fn install_dir() -> io::Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| io::Error::other("LOCALAPPDATA が設定されていません"))?;
+    let base = std::env::var_os("ProgramFiles")
+        .ok_or_else(|| io::Error::other("ProgramFiles が設定されていません"))?;
     Ok(PathBuf::from(base).join("CrystalSKK").join("bin"))
 }
 
@@ -80,8 +85,8 @@ pub fn install(source: &Path) -> io::Result<Installed> {
     }
 
     let path = destination.to_string_lossy().into_owned();
-    registry::register_class(&path).map_err(to_io)?;
-    profile::register_profile(&path).map_err(to_io)?;
+    registry::register_class(&path).map_err(|e| to_io("COM のクラス登録", e))?;
+    profile::register_profile(&path).map_err(|e| to_io("入力方式の登録", e))?;
 
     Ok(Installed {
         dll: destination,
@@ -115,7 +120,7 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
         let _ = std::fs::remove_dir(&directory);
     }
 
-    profile.and(class).map_err(to_io)
+    profile.and(class).map_err(|e| to_io("登録の解除", e))
 }
 
 /// 導入されているか調べる。
@@ -130,8 +135,27 @@ pub fn status() -> Status {
     }
 }
 
-fn to_io(error: windows::core::Error) -> io::Error {
-    io::Error::other(error.message())
+/// Windows の失敗を、何をしていたかが分かる形に直す。
+///
+/// HRESULT をそのまま出すのは不親切だが、消してしまうともっと困る。
+/// 権限が足りない場合は、それと分かる言葉を添える。
+fn to_io(step: &str, error: windows::core::Error) -> io::Error {
+    let code = error.code();
+    let mut message = format!("{step}に失敗しました ({code:?}): {}", error.message());
+    if is_access_denied(code) {
+        message.push_str(
+            "
+管理者権限が要ります。管理者として実行した PowerShell から試してください。",
+        );
+    }
+    io::Error::other(message)
+}
+
+/// 権限不足を表す HRESULT か。
+fn is_access_denied(code: windows::core::HRESULT) -> bool {
+    // E_ACCESSDENIED と、Win32 の ERROR_ACCESS_DENIED を包んだもの。
+    code == windows::Win32::Foundation::E_ACCESSDENIED
+        || code == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult()
 }
 
 #[cfg(test)]
@@ -139,8 +163,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_install_directory_sits_under_local_appdata() {
-        let directory = install_dir().expect("LOCALAPPDATA がある");
+    fn the_install_directory_sits_under_program_files() {
+        let directory = install_dir().expect("ProgramFiles がある");
         assert!(directory.ends_with(Path::new("CrystalSKK").join("bin")));
     }
 

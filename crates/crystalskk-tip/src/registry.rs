@@ -1,14 +1,18 @@
 //! COM のクラス登録。
 //!
-//! 登録先は `HKEY_CURRENT_USER\Software\Classes` である。管理者権限なしで
-//! 登録・解除できるため、開発中の入れ替えが速い。配布用のインストーラは
-//! `HKEY_LOCAL_MACHINE` に置くことになる (ADR-0006)。
+//! 登録先は `HKEY_LOCAL_MACHINE\Software\Classes` である。入力方式の登録
+//! そのものが機械全体に書かれるため、COM のクラスだけを利用者ごとにしても
+//! 意味がない (ADR-0007)。したがって登録には管理者権限が要る。
+//!
+//! 解除は利用者ごとの領域も見る。ADR-0006 の時期に書かれたものが
+//! 残っている可能性があるため。
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
 };
 use windows::core::{Error, GUID, HSTRING, PCWSTR, Result};
 
@@ -44,26 +48,42 @@ pub fn module_path(module: HMODULE) -> Result<String> {
 /// 登録できるようにするため。DLL が自分を登録するときは
 /// [`module_path()`] で自分の場所を調べて渡す。
 pub fn register_class(dll_path: &str) -> Result<()> {
-    let path = dll_path;
-    let clsid = guid_to_string(&CLSID_CRYSTALSKK);
-
-    let key = format!(r"Software\Classes\CLSID\{clsid}");
-    write_string(&key, None, CLASS_DESCRIPTION)?;
+    let key = class_key();
+    write_string(HKEY_LOCAL_MACHINE, &key, None, CLASS_DESCRIPTION)?;
 
     let server = format!(r"{key}\InprocServer32");
-    write_string(&server, None, path)?;
+    write_string(HKEY_LOCAL_MACHINE, &server, None, dll_path)?;
     // TSF の TIP は常にアパートメントスレッドで動く。
-    write_string(&server, Some("ThreadingModel"), "Apartment")?;
+    write_string(
+        HKEY_LOCAL_MACHINE,
+        &server,
+        Some("ThreadingModel"),
+        "Apartment",
+    )?;
     Ok(())
 }
 
-/// クラス登録を消す。登録されていなくても成功とみなす。
-pub fn unregister_class() -> Result<()> {
+/// COM のクラスを置くキー。
+fn class_key() -> String {
     let clsid = guid_to_string(&CLSID_CRYSTALSKK);
-    let key = HSTRING::from(format!(r"Software\Classes\CLSID\{clsid}"));
-    // SAFETY: HKCU は常に開いており、キー名は有効な文字列。
-    let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &key) };
-    // 消えていればそれでよい。
+    format!(r"Software\Classes\CLSID\{clsid}")
+}
+
+/// クラス登録を消す。登録されていなくても成功とみなす。
+///
+/// 利用者ごとの領域も見るのは、過去の版がそちらへ書いていたため。
+pub fn unregister_class() -> Result<()> {
+    let key = HSTRING::from(class_key());
+    let machine = delete_tree(HKEY_LOCAL_MACHINE, &key);
+    let per_user = delete_tree(HKEY_CURRENT_USER, &key);
+    // どちらかが消せていれば十分。両方失敗したときだけ報告する。
+    machine.or(per_user)
+}
+
+fn delete_tree(root: HKEY, key: &HSTRING) -> Result<()> {
+    // SAFETY: 根のハンドルは定数で、キー名は有効な文字列。
+    let status = unsafe { RegDeleteTreeW(root, key) };
+    // 消えていればそれでよい (2 = ERROR_FILE_NOT_FOUND)。
     if status == ERROR_SUCCESS || status.0 == 2 {
         Ok(())
     } else {
@@ -72,14 +92,14 @@ pub fn unregister_class() -> Result<()> {
 }
 
 /// キーを作り、文字列の値を書く。`name` が `None` なら既定の値。
-fn write_string(key: &str, name: Option<&str>, value: &str) -> Result<()> {
+fn write_string(root: HKEY, key: &str, name: Option<&str>, value: &str) -> Result<()> {
     let key = HSTRING::from(key);
     let mut handle = HKEY::default();
 
     // SAFETY: 出力先のハンドルは有効な場所を指しており、成功したときだけ使う。
     let status = unsafe {
         RegCreateKeyExW(
-            HKEY_CURRENT_USER,
+            root,
             &key,
             None,
             PCWSTR::null(),
@@ -118,13 +138,18 @@ fn write_string(key: &str, name: Option<&str>, value: &str) -> Result<()> {
 }
 
 /// 登録されている DLL の場所。登録されていなければ `None`。
+///
+/// 機械全体の登録を先に見て、次に利用者ごとの登録を見る。
 pub fn registered_dll_path() -> Option<String> {
-    let clsid = guid_to_string(&CLSID_CRYSTALSKK);
-    let key = HSTRING::from(format!(r"Software\Classes\CLSID\{clsid}\InprocServer32"));
+    read_dll_path(HKEY_LOCAL_MACHINE).or_else(|| read_dll_path(HKEY_CURRENT_USER))
+}
+
+fn read_dll_path(root: HKEY) -> Option<String> {
+    let key = HSTRING::from(format!(r"{}\InprocServer32", class_key()));
     let mut handle = HKEY::default();
 
     // SAFETY: 出力先のハンドルは有効な場所を指す。
-    let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &key, None, KEY_READ, &mut handle) };
+    let status = unsafe { RegOpenKeyExW(root, &key, None, KEY_READ, &mut handle) };
     if status != ERROR_SUCCESS {
         return None;
     }
