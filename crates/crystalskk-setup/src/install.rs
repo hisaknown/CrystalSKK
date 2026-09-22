@@ -25,7 +25,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crystalskk_tip::{profile, registry};
+use crystalskk_tip::{icon, profile, registry};
 
 /// 導入した結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,12 @@ pub fn install_dir() -> io::Result<PathBuf> {
 
 /// 登録に使う DLL の名前。
 pub const DLL_NAME: &str = "crystalskk_tip.dll";
+
+/// 設定画面に出す絵の名前。
+pub const ICON_NAME: &str = "crystalskk.ico";
+
+/// 設定画面に出す絵の大きさ。
+const ICON_SIZE: i32 = 32;
 
 /// 導入する。
 ///
@@ -131,7 +137,14 @@ pub fn install(source: &Path) -> io::Result<Installed> {
 
     let path = destination.to_string_lossy().into_owned();
     registry::register_class(&path).map_err(|e| to_io("COM のクラス登録", e))?;
-    profile::register_profile(&path).map_err(|e| to_io("入力方式の登録", e))?;
+
+    // 設定画面の一覧に出す絵。DLL に資源が無いと言語名が出るだけなので、
+    // `.ico` を書き出して、そちらを指す (ADR-0009)。
+    let icon = write_icon(&directory);
+    let icon_path = icon
+        .as_ref()
+        .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
+    profile::register_profile(&icon_path).map_err(|e| to_io("入力方式の登録", e))?;
 
     Ok(Installed {
         source: source.to_path_buf(),
@@ -140,6 +153,16 @@ pub fn install(source: &Path) -> io::Result<Installed> {
         retired,
         cleared_per_user,
     })
+}
+
+/// 設定画面へ渡す絵を書き出す。書けなければ諦める。
+///
+/// 絵が無くても入力はできる。ここで失敗しても導入は続ける。
+fn write_icon(directory: &Path) -> Option<PathBuf> {
+    let bytes = icon::ico_bytes("あ", ICON_SIZE)?;
+    let path = directory.join(ICON_NAME);
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 /// 使用中の DLL を別名へ退ける。
@@ -197,6 +220,7 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
             })?;
         }
         sweep_retired(&directory);
+        let _ = std::fs::remove_file(directory.join(ICON_NAME));
         // 空になったときだけ片付ける。他のものが入っていれば触らない。
         let _ = std::fs::remove_dir(&directory);
     }

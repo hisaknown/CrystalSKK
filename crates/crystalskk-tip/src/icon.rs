@@ -19,6 +19,13 @@
 //!   コンパイラか、`.res` を自前で組み立てる仕掛けが要る。
 //!
 //! 一つ目で困らないうちは、二つ目に手を出さなくてよい。
+//!
+//! # `.ico` ファイルも書ける
+//!
+//! 設定画面の一覧に出る絵は `RegisterProfile` に「絵のあるファイルと
+//! 番号」を渡して指す。**そのファイルは `.ico` でよい。** DLL の資源で
+//! ある必要はない。そこで、導入のときに描いた絵を `.ico` として書き出し、
+//! それを指す。リソースコンパイラは要らない。
 
 use std::ffi::c_void;
 
@@ -112,6 +119,107 @@ pub fn render(label: &str) -> Result<HICON> {
         icon
     }
 }
+
+/// 描いた絵を `.ico` の中身にする。
+///
+/// 設定画面へ渡すのはファイルなので、そこへ書き出せる形が要る。
+pub fn ico_bytes(label: &str, size: i32) -> Option<Vec<u8>> {
+    let pixels = draw_pixels(label, size)?;
+    Some(encode_ico(&pixels, size))
+}
+
+/// 描いた結果の画素を取り出す。上の行が先、一画素 32 ビット。
+fn draw_pixels(label: &str, size: i32) -> Option<Vec<u32>> {
+    // SAFETY: GDI の手順どおりで、作ったものはこの関数の中で後始末する。
+    unsafe {
+        let screen = GetDC(None);
+        let memory = CreateCompatibleDC(Some(screen));
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let surface = create_surface(memory, size, &mut bits).ok();
+
+        let pixels = surface.and_then(|surface| {
+            let previous = SelectObject(memory, surface.into());
+            draw(memory, size, label);
+            SelectObject(memory, previous);
+            let _ = GdiFlush();
+            fill_alpha(bits, size);
+
+            let taken = (!bits.is_null()).then(|| {
+                let count = (size * size).max(0) as usize;
+                std::slice::from_raw_parts(bits.cast::<u32>(), count).to_vec()
+            });
+            let _ = DeleteObject(surface.into());
+            taken
+        });
+
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+        pixels
+    }
+}
+
+/// 画素を `.ico` の並びにする。
+///
+/// `.ico` の中の絵は下の行が先で、高さは覆いの分を足して二倍に書く。
+/// 覆いは使わないので全て 0 にする。
+fn encode_ico(pixels: &[u32], size: i32) -> Vec<u8> {
+    let size = size.max(0);
+    let width = size as usize;
+    // 覆いは 4 バイト境界に揃える。
+    let mask_row = width.div_ceil(32) * 4;
+    let image_len = HEADER_LEN + width * width * 4 + mask_row * width;
+
+    let mut out = Vec::with_capacity(DIR_LEN + ENTRY_LEN + image_len);
+
+    // 目録。
+    out.extend_from_slice(&0u16.to_le_bytes()); // 予約
+    out.extend_from_slice(&1u16.to_le_bytes()); // 種別: アイコン
+    out.extend_from_slice(&1u16.to_le_bytes()); // 枚数
+
+    // 一枚分の見出し。256 画素は 0 で表す決まり。
+    let dimension = u8::try_from(size).unwrap_or(0);
+    out.push(dimension);
+    out.push(dimension);
+    out.push(0); // 色数: 32 ビットなので 0
+    out.push(0); // 予約
+    out.extend_from_slice(&1u16.to_le_bytes()); // 面数
+    out.extend_from_slice(&32u16.to_le_bytes()); // ビット数
+    out.extend_from_slice(&(image_len as u32).to_le_bytes());
+    out.extend_from_slice(&((DIR_LEN + ENTRY_LEN) as u32).to_le_bytes());
+
+    // 絵の見出し。高さは絵と覆いを合わせた分。
+    out.extend_from_slice(&(HEADER_LEN as u32).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&(size * 2).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // 圧縮なし
+    out.extend_from_slice(&0u32.to_le_bytes()); // 大きさは省略してよい
+    out.extend_from_slice(&[0u8; 16]); // 解像度と色表の欄
+
+    // 絵。下の行から書く。
+    for row in (0..width).rev() {
+        for column in 0..width {
+            let pixel = pixels.get(row * width + column).copied().unwrap_or(0);
+            out.extend_from_slice(&pixel.to_le_bytes());
+        }
+    }
+
+    // 覆い。全面を「隠さない」。
+    out.extend_from_slice(&vec![0u8; mask_row * width]);
+
+    out
+}
+
+/// 目録の大きさ。
+const DIR_LEN: usize = 6;
+
+/// 一枚分の見出しの大きさ。
+const ENTRY_LEN: usize = 16;
+
+/// 絵の見出しの大きさ。
+const HEADER_LEN: usize = 40;
 
 /// 拡大率に合わせた一辺の長さ。
 fn icon_size() -> i32 {
@@ -251,6 +359,59 @@ unsafe fn fill_alpha(bits: *mut c_void, size: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ico_starts_with_a_directory_for_one_image() {
+        let pixels = vec![0xFF00_0000u32; 32 * 32];
+        let ico = encode_ico(&pixels, 32);
+
+        assert_eq!(&ico[0..2], &[0, 0], "予約の欄");
+        assert_eq!(&ico[2..4], &[1, 0], "種別はアイコン");
+        assert_eq!(&ico[4..6], &[1, 0], "一枚だけ");
+        assert_eq!(ico[6], 32, "幅");
+        assert_eq!(ico[7], 32, "高さ");
+        assert_eq!(&ico[10..12], &[1, 0], "面数");
+        assert_eq!(&ico[12..14], &[32, 0], "一画素 32 ビット");
+    }
+
+    #[test]
+    fn the_ico_is_exactly_as_long_as_it_says() {
+        let pixels = vec![0xFF00_0000u32; 32 * 32];
+        let ico = encode_ico(&pixels, 32);
+
+        let declared = u32::from_le_bytes(ico[14..18].try_into().expect("4 バイト")) as usize;
+        let offset = u32::from_le_bytes(ico[18..22].try_into().expect("4 バイト")) as usize;
+        assert_eq!(offset, DIR_LEN + ENTRY_LEN);
+        assert_eq!(ico.len(), offset + declared, "宣言した長さと実際が合う");
+    }
+
+    #[test]
+    fn the_ico_header_doubles_the_height_for_the_mask() {
+        let pixels = vec![0u32; 16 * 16];
+        let ico = encode_ico(&pixels, 16);
+        let header = DIR_LEN + ENTRY_LEN;
+
+        let width = i32::from_le_bytes(ico[header + 4..header + 8].try_into().expect("4 バイト"));
+        let height = i32::from_le_bytes(ico[header + 8..header + 12].try_into().expect("4 バイト"));
+        assert_eq!(width, 16);
+        assert_eq!(height, 32, "絵と覆いの分");
+    }
+
+    #[test]
+    fn the_ico_rows_are_written_bottom_up() {
+        // 一行目だけ印を付けて、最後の行に来ることを見る。
+        let mut pixels = vec![0u32; 2 * 2];
+        pixels[0] = 0xDEAD_BEEF;
+        let ico = encode_ico(&pixels, 2);
+
+        let image = DIR_LEN + ENTRY_LEN + HEADER_LEN;
+        // 下から書くので、上の行は後ろに来る。
+        let last_row = image + 2 * 4;
+        assert_eq!(
+            u32::from_le_bytes(ico[last_row..last_row + 4].try_into().expect("4 バイト")),
+            0xDEAD_BEEF
+        );
+    }
 
     #[test]
     fn the_mask_is_word_aligned_per_row() {

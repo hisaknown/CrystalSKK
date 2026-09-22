@@ -25,3 +25,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0006](0006-register-the-tip-per-user-during-development.md) | 開発中の TIP は利用者ごとに登録する | Superseded by 0007 | PRD §10 |
 | [0007](0007-installing-a-tip-requires-administrator.md) | TIP の導入には管理者権限が要る | Accepted | ADR-0006 |
 | [0008](0008-write-to-the-document-only-through-a-composition.md) | 文書への書き込みは必ず composition を通す | Accepted | PRD §3 |
+| [0009](0009-ship-the-profile-icon-as-an-ico-file.md) | 設定画面に出す絵は `.ico` ファイルとして置く | Accepted | PRD N-08 |
