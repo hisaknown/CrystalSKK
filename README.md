@@ -101,6 +101,12 @@ setx CRYSTALSKK_LOG 1
 
 設定したあとに起動したアプリから記録される。サインインし直すと確実。有効化されたか、打鍵が届いているかを切り分けるのに使う。**入力のたびにファイルを開くので、常用しないこと。**
 
+記録は UTF-8 なので、Windows PowerShell で読むときは符号化を指定する。
+
+```bash
+Get-Content -Encoding UTF8 $env:LOCALAPPDATA\CrystalSKK\tip.log -Tail 40
+```
+
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 
 ## ライセンス

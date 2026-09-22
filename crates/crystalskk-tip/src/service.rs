@@ -4,6 +4,9 @@
 //! したがってここに置くものはすべて、他人のプロセスに同居してよいものに
 //! 限られる。重い処理も、失敗しうる処理も、ここでは持たない (PRD §3)。
 //!
+//! COM から呼ばれる入口はすべて [`crate::guard::guard`] を通す。パニックを
+//! そのまま外へ出すと、入力先アプリごと落ちる。
+//!
 //! いまは確定した文字列を文書へ入れるところまで。未確定の表示 (`▽` や
 //! `▼`) はまだ出ない。
 
@@ -15,11 +18,12 @@ use windows::Win32::UI::TextServices::{
     ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
     ITfTextInputProcessorEx_Impl, ITfThreadMgr,
 };
-use windows::core::{BOOL, GUID, IUnknownImpl, Interface, Ref, Result, implement};
+use windows::core::{BOOL, ComObject, GUID, IUnknownImpl, Interface, Ref, Result, implement};
 
 use crystalskk_core::Engine;
 use crystalskk_core::dict::EmptyDict;
 
+use crate::guard::guard;
 use crate::langbar::ModeIndicator;
 use crate::{edit, keys, langbar, log};
 
@@ -35,7 +39,7 @@ struct Activation {
     /// 言語バーに出している入力モードの表示。
     indicator: ITfLangBarItem,
     /// 表示を書き換えるための、実体への持ち手。
-    indicator_object: windows::core::ComObject<ModeIndicator>,
+    indicator_object: ComObject<ModeIndicator>,
 }
 
 /// CrystalSKK の TIP。
@@ -75,11 +79,23 @@ impl TextService {
         self.activation.borrow().as_ref().map(|a| a.client_id)
     }
 
+    /// 表示を書き換えるための持ち手を取り出す。
+    ///
+    /// 複製して返すのは、`RefCell` の借用を COM の呼び出しより長く
+    /// 持たないため。呼び出しの先から戻ってこられると、借用が重なって
+    /// パニックになる。
+    fn indicator(&self) -> Option<ComObject<ModeIndicator>> {
+        self.activation
+            .borrow()
+            .as_ref()
+            .map(|a| a.indicator_object.clone())
+    }
+
     /// いまのモードを言語バーへ映す。
     fn show_mode(&self) {
         let mode = self.engine.borrow().mode();
-        if let Some(activation) = self.activation.borrow().as_ref() {
-            activation.indicator_object.set_mode(mode);
+        if let Some(indicator) = self.indicator() {
+            indicator.set_mode(mode);
         }
     }
 
@@ -130,7 +146,7 @@ impl TextService_Impl {
         log::write("キーイベントの受け口を登録した");
 
         // 言語バーの項目は、出せなくても入力そのものは続けられる。
-        let indicator_object = windows::core::ComObject::new(ModeIndicator::new());
+        let indicator_object = ComObject::new(ModeIndicator::new());
         let indicator: ITfLangBarItem = indicator_object.to_interface();
         if let Err(e) = langbar::add(&thread_manager, &indicator) {
             log::write(&format!("言語バーに項目を出せなかった: {}", e.message()));
@@ -157,6 +173,7 @@ impl TextService_Impl {
             return false.into();
         };
         let Some(context) = context.as_ref() else {
+            log::write("文脈がないので素通しする");
             return false.into();
         };
 
@@ -165,11 +182,17 @@ impl TextService_Impl {
             "打鍵 {key:?} → 食べた:{} 確定:{:?}",
             response.handled, response.commit
         ));
+
         self.this.show_mode();
+        log::write("モードを映した");
+
         if !response.commit.is_empty() {
             // 入れられなくても、エンジンの状態はもう進んでいる。ここで
             // 慌てても直せないので、食べたことだけは正しく伝える。
-            let _ = edit::insert_text(context, client_id, &response.commit);
+            match edit::insert_text(context, client_id, &response.commit) {
+                Ok(()) => log::write("文書へ入れた"),
+                Err(e) => log::write(&format!("文書へ入れられなかった: {}", e.message())),
+            }
         }
         response.handled.into()
     }
@@ -185,26 +208,28 @@ impl TextService_Impl {
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, ptim: Ref<ITfThreadMgr>, tid: u32) -> Result<()> {
-        self.activate(ptim, tid)
+        guard("Activate", || self.activate(ptim, tid))
     }
 
     fn Deactivate(&self) -> Result<()> {
-        self.this.deactivate()
+        guard("Deactivate", || self.this.deactivate())
     }
 }
 
 impl ITfTextInputProcessorEx_Impl for TextService_Impl {
     /// `dwflags` は入力先の種類 (`TF_TMF_*`) を伝える。まだ使わない。
     fn ActivateEx(&self, ptim: Ref<ITfThreadMgr>, tid: u32, _dwflags: u32) -> Result<()> {
-        self.activate(ptim, tid)
+        guard("ActivateEx", || self.activate(ptim, tid))
     }
 }
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
     /// 入力先が変わった。入力の途中経過は続けようがないので捨てる。
     fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
-        self.this.engine.borrow_mut().reset();
-        Ok(())
+        guard("OnSetFocus", || {
+            self.this.engine.borrow_mut().reset();
+            Ok(())
+        })
     }
 
     fn OnTestKeyDown(
@@ -213,11 +238,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
-        Ok(self.would_handle_key(wparam))
+        guard("OnTestKeyDown", || Ok(self.would_handle_key(wparam)))
     }
 
     fn OnKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        Ok(self.handle_key(pic, wparam))
+        guard("OnKeyDown", || Ok(self.handle_key(pic, wparam)))
     }
 
     /// 離した打鍵は使わない。押した側だけで足りる。

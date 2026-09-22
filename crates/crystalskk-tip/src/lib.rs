@@ -29,6 +29,7 @@ use windows::core::{BOOL, GUID, HRESULT, Interface};
 pub mod com;
 pub mod edit;
 pub mod factory;
+pub mod guard;
 pub mod guids;
 pub mod keys;
 pub mod langbar;

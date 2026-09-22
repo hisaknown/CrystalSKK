@@ -19,6 +19,7 @@ use windows::core::{BSTR, GUID, IUnknown, Interface, Ref, Result, implement};
 
 use crystalskk_core::InputMode;
 
+use crate::guard::guard;
 use crate::guids::{CLSID_CRYSTALSKK, GUID_CRYSTALSKK_LANGBAR};
 use crate::log;
 
@@ -66,8 +67,17 @@ impl ModeIndicator {
         }
         *self.mode.borrow_mut() = mode;
 
+        // 知らせる相手を複製してから呼ぶ。借用したまま外へ出ると、
+        // 呼んだ先から戻ってきたときに借用が重なってパニックになる。
+        let sinks: Vec<ITfLangBarItemSink> = self
+            .sinks
+            .borrow()
+            .iter()
+            .map(|(_, sink)| sink.clone())
+            .collect();
+
         // 変化を知らせないと、言語バーは古い表示のままになる。
-        for (_, sink) in self.sinks.borrow().iter() {
+        for sink in sinks {
             // SAFETY: 相手から預かった受け口をそのまま呼ぶ。
             unsafe {
                 let _ = sink.OnUpdate(TF_LBI_STATUS | TF_LBI_TEXT | TF_LBI_ICON);
@@ -121,7 +131,9 @@ impl ITfLangBarItem_Impl for ModeIndicator_Impl {
     }
 
     fn GetTooltipString(&self) -> Result<BSTR> {
-        Ok(BSTR::from("CrystalSKK の入力モード"))
+        guard("GetTooltipString", || {
+            Ok(BSTR::from("CrystalSKK の入力モード"))
+        })
     }
 }
 
@@ -145,7 +157,7 @@ impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
     }
 
     fn GetText(&self) -> Result<BSTR> {
-        Ok(BSTR::from(self.this.label()))
+        guard("GetText", || Ok(BSTR::from(self.this.label())))
     }
 }
 
@@ -166,6 +178,7 @@ impl ITfSource_Impl for ModeIndicator_Impl {
             return Err(E_INVALIDARG.into());
         };
 
+        log::write("言語バーが変化の通知を求めてきた");
         let cookie = *self.this.next_cookie.borrow();
         *self.this.next_cookie.borrow_mut() = cookie.wrapping_add(1);
         self.this.sinks.borrow_mut().push((cookie, sink));

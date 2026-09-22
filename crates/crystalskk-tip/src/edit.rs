@@ -10,6 +10,9 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{Interface, Result, implement};
 
+use crate::guard::guard;
+use crate::log;
+
 /// 確定した文字列を、いまのカーソル位置へ入れるセッション。
 #[implement(ITfEditSession)]
 pub struct InsertText {
@@ -28,13 +31,21 @@ impl std::fmt::Debug for InsertText {
 
 impl ITfEditSession_Impl for InsertText_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
-        let insert: ITfInsertAtSelection = self.this.context.cast()?;
-        // SAFETY: 編集権 `ec` は TSF がこの呼び出しのために渡したもの。
-        // 文字列はこのセッションが持っており、呼び出しより長く生きる。
-        unsafe {
-            insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &self.this.text)?;
-        }
-        Ok(())
+        guard("DoEditSession", || {
+            log::write("編集セッションに入った");
+            let insert: ITfInsertAtSelection = self.this.context.cast()?;
+
+            // SAFETY: 編集権 `ec` は TSF がこの呼び出しのために渡したもの。
+            // 文字列はこのセッションが持っており、呼び出しより長く生きる。
+            //
+            // `TF_IAS_NOQUERY` を指定すると、入れた場所は返ってこない。
+            // したがって返り値は見ない。失敗として扱ってはならない。
+            unsafe {
+                let _ = insert.InsertTextAtSelection(ec, TF_IAS_NOQUERY, &self.this.text);
+            }
+            log::write("文字列を入れた");
+            Ok(())
+        })
     }
 }
 
@@ -53,8 +64,10 @@ pub fn insert_text(context: &ITfContext, client_id: u32, text: &str) -> Result<(
     }
     .into();
 
+    log::write("編集セッションを頼む");
     // SAFETY: 文脈と識別子は TSF から受け取ったもの。
     let result =
         unsafe { context.RequestEditSession(client_id, &session, TF_ES_SYNC | TF_ES_READWRITE)? };
+    log::write(&format!("編集セッションが終わった ({result:?})"));
     result.ok()
 }
