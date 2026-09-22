@@ -56,14 +56,85 @@ impl Preedit {
     }
 }
 
+/// 候補一覧を出すまでの変換回数。
+///
+/// SKK は候補を**まず一つずつ**見せる。ほとんどの変換は最初の候補で
+/// 決まるので、そのたびに一覧を開いては目障りなだけである。何度か送って
+/// 決まらないとき、初めて一覧に頼る。
+///
+/// 既定は CorvusSKK に合わせて 5。5 回目の変換から一覧に移る。
+pub const UNTIL_CANDIDATE_LIST: usize = 5;
+
+/// 一覧から候補を選ぶキー。
+///
+/// 並び順がそのままラベルの並びになり、**この数が一度に出す候補の数**に
+/// なる。選べない候補を並べても仕方がないので、一覧は必ずこの長さで切る。
+pub const SELECTION_KEYS: [char; 7] = ['a', 's', 'd', 'f', 'j', 'k', 'l'];
+
+/// 一覧の一ページに出す候補の数。
+pub const PAGE_SIZE: usize = SELECTION_KEYS.len();
+
+/// 一覧に移る最初の候補の位置。
+const FIRST_LISTED: usize = UNTIL_CANDIDATE_LIST - 1;
+
 /// 候補ウィンドウに出す内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateView {
     pub candidates: Vec<Candidate>,
     /// 選択中の候補の位置。
+    ///
+    /// 一覧を出している間は、そのページの先頭を指す。ページの中に
+    /// 「いま選ばれている一つ」は無く、選ぶのはラベルキーを押すことである。
     pub index: usize,
     /// 送り仮名。表示に付ける。
     pub okuri: Option<String>,
+    /// 一覧を出す段階に入っているか。
+    ///
+    /// **候補ウィンドウを出してよいかどうかがこれで決まる。** 入っていない
+    /// うちは `▼` のところに一つ出ているだけで、窓は要らない。
+    pub listing: bool,
+}
+
+impl CandidateView {
+    /// いま出すページの候補。ラベルと対にして返す。
+    ///
+    /// 一覧を出していないときは空。窓に出すものが無いという意味になる。
+    pub fn page(&self) -> Vec<(char, &Candidate)> {
+        if !self.listing {
+            return Vec::new();
+        }
+        let start = page_start(self.index);
+        self.candidates[start..]
+            .iter()
+            .take(PAGE_SIZE)
+            .zip(SELECTION_KEYS)
+            .map(|(candidate, label)| (label, candidate))
+            .collect()
+    }
+
+    /// いま何ページ目か。0 から数える。
+    pub fn page_number(&self) -> usize {
+        if !self.listing {
+            return 0;
+        }
+        (page_start(self.index) - FIRST_LISTED) / PAGE_SIZE
+    }
+
+    /// 一覧に載る候補は全部で何ページ分あるか。
+    pub fn page_count(&self) -> usize {
+        self.candidates
+            .len()
+            .saturating_sub(FIRST_LISTED)
+            .div_ceil(PAGE_SIZE)
+    }
+}
+
+/// この位置を含むページの先頭。
+fn page_start(index: usize) -> usize {
+    if index < FIRST_LISTED {
+        return index;
+    }
+    FIRST_LISTED + (index - FIRST_LISTED) / PAGE_SIZE * PAGE_SIZE
 }
 
 /// エンジンの外側へ伝える副作用。
@@ -121,6 +192,18 @@ struct Selecting {
     index: usize,
     /// 候補選択を取りやめたときに戻る先。
     origin: Composing,
+}
+
+impl Selecting {
+    /// 一覧を出す段階に入っているか。
+    fn listing(&self) -> bool {
+        self.index >= FIRST_LISTED
+    }
+
+    /// いま出しているページの先頭。
+    fn page_start(&self) -> usize {
+        page_start(self.index)
+    }
 }
 
 /// 辞書登録の枠。
@@ -350,6 +433,7 @@ impl Engine {
                 candidates: s.candidates.clone(),
                 index: s.index,
                 okuri: s.query.okuri.clone(),
+                listing: s.listing(),
             }),
             _ => None,
         }
@@ -698,8 +782,15 @@ impl Engine {
     fn on_selecting(&mut self, mut sel: Selecting, key: Key, out: &mut Out) {
         match key {
             Key::Space | Key::Down => {
-                if sel.index + 1 < sel.candidates.len() {
-                    sel.index += 1;
+                // 一覧を出しているなら、送るのは一件ずつではなく一ページ
+                // ずつ。見えているものを送り直しても意味がない。
+                let next = if sel.listing() {
+                    sel.page_start() + PAGE_SIZE
+                } else {
+                    sel.index + 1
+                };
+                if next < sel.candidates.len() {
+                    sel.index = next;
                     self.state = State::Selecting(sel);
                 } else {
                     // 候補を出し切ったら辞書登録へ。
@@ -707,7 +798,17 @@ impl Engine {
                 }
             }
             Key::Char('x') | Key::Up => {
-                if sel.index > 0 {
+                if sel.listing() {
+                    let start = sel.page_start();
+                    sel.index = if start == FIRST_LISTED {
+                        // 最初のページから戻るときは、一覧を畳んで一つずつの
+                        // 見え方に返る。戻る先は、一覧に移る直前の候補。
+                        FIRST_LISTED.saturating_sub(1)
+                    } else {
+                        start - PAGE_SIZE
+                    };
+                    self.state = State::Selecting(sel);
+                } else if sel.index > 0 {
                     sel.index -= 1;
                     self.state = State::Selecting(sel);
                 } else {
@@ -717,6 +818,9 @@ impl Engine {
             Key::Enter | Key::Ctrl('j') => self.commit_selection(sel, out),
             Key::Ctrl('g') | Key::Backspace | Key::Escape => {
                 self.state = State::Composing(sel.origin);
+            }
+            Key::Char(c) if sel.listing() && SELECTION_KEYS.contains(&c) => {
+                self.choose_from_page(sel, c, out);
             }
             Key::Char(_) | Key::Ctrl('q') => {
                 // 暗黙の確定。確定させた上で、このキーを直接入力として解釈し直す。
@@ -728,6 +832,24 @@ impl Engine {
                 self.state = State::Selecting(sel);
             }
         }
+    }
+
+    /// 一覧のラベルキーで候補を選ぶ。
+    ///
+    /// そのラベルに候補が無いときは、何もせず一覧に留まる。**押し間違いで
+    /// 関係のない文字が入るより、何も起きないほうがよい。**
+    fn choose_from_page(&mut self, mut sel: Selecting, label: char, out: &mut Out) {
+        let Some(offset) = SELECTION_KEYS.iter().position(|k| *k == label) else {
+            self.state = State::Selecting(sel);
+            return;
+        };
+        let chosen = sel.page_start() + offset;
+        if chosen >= sel.candidates.len() {
+            self.state = State::Selecting(sel);
+            return;
+        }
+        sel.index = chosen;
+        self.commit_selection(sel, out);
     }
 
     fn commit_selection(&mut self, sel: Selecting, out: &mut Out) {

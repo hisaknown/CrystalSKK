@@ -482,7 +482,9 @@ mod tests {
     #[test]
     fn a_misspelled_level_records_everything() {
         // 黙って無視されるより、出しすぎるほうがまだよい。
-        let parsed = parse(&["log", "verbose"]).expect("読める").expect("命令がある");
+        let parsed = parse(&["log", "verbose"])
+            .expect("読める")
+            .expect("命令がある");
         assert_eq!(parsed.command, Command::Log(Level::Trace));
     }
 
