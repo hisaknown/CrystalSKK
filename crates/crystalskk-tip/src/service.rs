@@ -27,7 +27,7 @@ use crystalskk_core::engine::Event;
 use crate::dict::SharedUserDict;
 use crate::guard::guard;
 use crate::langbar::ModeIndicator;
-use crate::{dict, edit, keys, langbar, log};
+use crate::{compartment, dict, edit, keys, langbar, log};
 
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
@@ -93,18 +93,6 @@ impl TextService {
         self.activation.borrow().as_ref().map(|a| a.client_id)
     }
 
-    /// 表示を書き換えるための持ち手を取り出す。
-    ///
-    /// 複製して返すのは、`RefCell` の借用を COM の呼び出しより長く
-    /// 持たないため。呼び出しの先から戻ってこられると、借用が重なって
-    /// パニックになる。
-    fn indicator(&self) -> Option<ComObject<ModeIndicator>> {
-        self.activation
-            .borrow()
-            .as_ref()
-            .map(|a| a.indicator_object.clone())
-    }
-
     /// 学習と辞書登録をユーザー辞書へ反映する。
     ///
     /// 登録だけはその場で書き出す。新しく覚えた語を落とすと利用者の
@@ -126,12 +114,28 @@ impl TextService {
         }
     }
 
-    /// いまのモードを言語バーへ映す。
+    /// いまのモードを外へ映す。
+    ///
+    /// 言語バーの項目に知らせるだけでは足りない。Windows の表示は
+    /// 区画に書いた値を見ているので、そちらにも書く (ADR-0010)。
     fn show_mode(&self) {
         let mode = self.engine.borrow().mode();
-        if let Some(indicator) = self.indicator() {
-            indicator.set_mode(mode);
-        }
+
+        // 借用を COM の呼び出しより長く持たない。呼び出しの先から
+        // 戻ってこられると、借用が重なってパニックになる。
+        let published = self.activation.borrow().as_ref().map(|a| {
+            (
+                a.thread_manager.clone(),
+                a.client_id,
+                a.indicator_object.clone(),
+            )
+        });
+
+        let Some((thread_manager, client_id, indicator)) = published else {
+            return;
+        };
+        indicator.set_mode(mode);
+        compartment::publish_mode(&thread_manager, client_id, mode);
     }
 
     /// 開いたままの composition を片付ける。
@@ -207,6 +211,9 @@ impl TextService_Impl {
             indicator,
             indicator_object,
         });
+
+        // 最初のモードも掲示する。何も書かないと、表示が決まらない。
+        self.this.show_mode();
         Ok(())
     }
 

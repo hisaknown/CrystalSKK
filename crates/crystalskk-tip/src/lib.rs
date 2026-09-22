@@ -27,6 +27,7 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::{BOOL, GUID, HRESULT, Interface};
 
 pub mod com;
+pub mod compartment;
 pub mod dict;
 pub mod edit;
 pub mod factory;
