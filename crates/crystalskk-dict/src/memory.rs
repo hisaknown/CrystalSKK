@@ -1,0 +1,330 @@
+//! メモリ上に全件を持つ辞書。
+//!
+//! 送りありと送りなしを別の表に分けて持つ。SKK 辞書自身が二つの区画に
+//! 分かれているためであり、また見出しの形だけでは abbrev (`skk`) と
+//! 送りあり (`おくr`) を区別できないためでもある。
+
+use std::collections::BTreeMap;
+
+use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+
+use crate::format;
+
+/// 読み込みの結果。壊れた行があっても読み込み自体は成功する。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadReport {
+    /// 読み込めた見出しの数。
+    pub entries: usize,
+    /// 解釈できずに読み飛ばした行の数。
+    pub skipped: usize,
+}
+
+/// 全件をメモリに載せた SKK 辞書。
+#[derive(Debug, Clone, Default)]
+pub struct MemoryDict {
+    okuri_ari: BTreeMap<String, Vec<Candidate>>,
+    okuri_nashi: BTreeMap<String, Vec<Candidate>>,
+}
+
+impl MemoryDict {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 辞書のテキストを読み込む。
+    ///
+    /// 区画の注釈行 (`;; okuri-ari entries.`) があればそれに従い、
+    /// なければ見出しの形から推測する。
+    pub fn parse(text: &str) -> (Self, LoadReport) {
+        let mut dict = Self::new();
+        let mut report = LoadReport::default();
+        let mut section: Option<bool> = None;
+
+        for line in text.lines() {
+            if let Some(is_okuri_ari) = section_marker(line) {
+                section = Some(is_okuri_ari);
+                continue;
+            }
+            if line.trim().is_empty() || line.starts_with(';') {
+                continue;
+            }
+            match format::parse_line(line) {
+                Some((key, candidates)) => {
+                    let okuri_ari = section.unwrap_or_else(|| format::is_okuri_ari_key(&key));
+                    dict.table_mut(okuri_ari).insert(key, candidates);
+                    report.entries += 1;
+                }
+                None => report.skipped += 1,
+            }
+        }
+        (dict, report)
+    }
+
+    fn table(&self, okuri_ari: bool) -> &BTreeMap<String, Vec<Candidate>> {
+        if okuri_ari {
+            &self.okuri_ari
+        } else {
+            &self.okuri_nashi
+        }
+    }
+
+    fn table_mut(&mut self, okuri_ari: bool) -> &mut BTreeMap<String, Vec<Candidate>> {
+        if okuri_ari {
+            &mut self.okuri_ari
+        } else {
+            &mut self.okuri_nashi
+        }
+    }
+
+    /// 見出しに対する候補。
+    pub fn get(&self, key: &str, okuri_ari: bool) -> Option<&[Candidate]> {
+        self.table(okuri_ari).get(key).map(Vec::as_slice)
+    }
+
+    /// 見出しの候補を丸ごと置き換える。
+    pub fn insert(&mut self, key: &str, okuri_ari: bool, candidates: Vec<Candidate>) {
+        if candidates.is_empty() {
+            self.table_mut(okuri_ari).remove(key);
+        } else {
+            self.table_mut(okuri_ari).insert(key.to_owned(), candidates);
+        }
+    }
+
+    /// 確定した語を先頭に移す。なければ先頭に加える。
+    ///
+    /// SKK の学習と辞書登録は、どちらも「この見出しではこの語を最初に出す」
+    /// という同じ操作に帰着する。だから両者を分けていない。
+    pub fn learn(&mut self, query: &Query, word: &str) {
+        let entry = self
+            .table_mut(query.is_okuri_ari())
+            .entry(query.key.clone())
+            .or_default();
+        match entry.iter().position(|c| c.word == word) {
+            Some(0) => {}
+            Some(index) => {
+                let candidate = entry.remove(index);
+                entry.insert(0, candidate);
+            }
+            None => entry.insert(0, Candidate::new(word)),
+        }
+    }
+
+    /// 見出しを一件削除する。消すものがなければ `false`。
+    pub fn remove(&mut self, key: &str, okuri_ari: bool) -> bool {
+        self.table_mut(okuri_ari).remove(key).is_some()
+    }
+
+    /// 前方一致する送りなしの見出しを、辞書順に最大 `limit` 件返す。
+    ///
+    /// 補完 (PRD F-11, F-18) はこれを使う。入力中の見出しそのものは返さない。
+    pub fn complete(&self, prefix: &str, limit: usize) -> Vec<&str> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+        self.okuri_nashi
+            .range(prefix.to_owned()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .filter(|(key, _)| key.as_str() != prefix)
+            .take(limit)
+            .map(|(key, _)| key.as_str())
+            .collect()
+    }
+
+    /// 収録している見出しの総数。
+    pub fn len(&self) -> usize {
+        self.okuri_ari.len() + self.okuri_nashi.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// SKK 辞書形式のテキストに書き出す。
+    ///
+    /// 区画の順序と並び順は SKK の慣例に従う。送りありは降順、送りなしは
+    /// 昇順。他の実装が二分探索でこの順序に依存しているため崩さない。
+    ///
+    /// 比較は UTF-8 のバイト順で行う。慣例の辞書は EUC-JP のバイト順で
+    /// 並んでいるため、かな同士の順序は一致するが、ASCII とかなが混ざる
+    /// 位置は異なる。読む側は全件を走査するので実害はない。
+    pub fn to_skk_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(";; -*- mode: fundamental; coding: utf-8 -*-\n");
+        out.push_str(";; okuri-ari entries.\n");
+        for (key, candidates) in self.okuri_ari.iter().rev() {
+            out.push_str(&format::format_line(key, candidates));
+            out.push('\n');
+        }
+        out.push_str(";; okuri-nasi entries.\n");
+        for (key, candidates) in &self.okuri_nashi {
+            out.push_str(&format::format_line(key, candidates));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+impl CandidateSource for MemoryDict {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        self.get(&query.key, query.is_okuri_ari())
+            .map(<[Candidate]>::to_vec)
+            .unwrap_or_default()
+    }
+}
+
+/// 区画を切り替える注釈行なら、それが送りありの区画かを返す。
+fn section_marker(line: &str) -> Option<bool> {
+    if !line.starts_with(';') {
+        return None;
+    }
+    if line.contains("okuri-ari entries") {
+        Some(true)
+    } else if line.contains("okuri-nasi entries") || line.contains("okuri-nashi entries") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+;; -*- mode: fundamental; coding: utf-8 -*-
+;; okuri-ari entries.
+おくr /送/贈/
+たべr /食べ/
+;; okuri-nasi entries.
+かんじ /漢字/感じ/幹事/
+かんじゃ /患者/
+skk /SKK/
+";
+
+    fn sample() -> MemoryDict {
+        MemoryDict::parse(SAMPLE).0
+    }
+
+    #[test]
+    fn parses_both_sections() {
+        let (dict, report) = MemoryDict::parse(SAMPLE);
+        assert_eq!(report.entries, 5);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(dict.len(), 5);
+    }
+
+    #[test]
+    fn section_markers_beat_the_key_shape() {
+        let dict = sample();
+        // `skk` は末尾が ASCII 英字だが、区画の注釈により送りなしとして読まれる。
+        assert!(dict.get("skk", false).is_some());
+        assert!(dict.get("skk", true).is_none());
+    }
+
+    #[test]
+    fn looks_up_by_query() {
+        let dict = sample();
+        let got = dict.lookup(&Query::okuri_nashi("かんじ"));
+        let words: Vec<&str> = got.iter().map(|c| c.word.as_str()).collect();
+        assert_eq!(words, ["漢字", "感じ", "幹事"]);
+
+        let got = dict.lookup(&Query::okuri_ari("おく", 'r', "り"));
+        assert_eq!(got[0].word, "送");
+    }
+
+    #[test]
+    fn unknown_keys_give_no_candidates() {
+        let dict = sample();
+        assert!(dict.lookup(&Query::okuri_nashi("しらない")).is_empty());
+    }
+
+    #[test]
+    fn broken_lines_are_counted_but_do_not_stop_the_load() {
+        let text = "かんじ /漢字/\nこわれた行\nことば /言葉/\n";
+        let (dict, report) = MemoryDict::parse(text);
+        assert_eq!(report.entries, 2);
+        assert_eq!(report.skipped, 1);
+        assert!(dict.get("ことば", false).is_some());
+    }
+
+    #[test]
+    fn learning_moves_a_candidate_to_the_front() {
+        let mut dict = sample();
+        let query = Query::okuri_nashi("かんじ");
+        dict.learn(&query, "幹事");
+        let words: Vec<String> = dict.lookup(&query).iter().map(|c| c.word.clone()).collect();
+        assert_eq!(words, ["幹事", "漢字", "感じ"]);
+    }
+
+    #[test]
+    fn learning_an_unknown_word_registers_it() {
+        let mut dict = sample();
+        let query = Query::okuri_nashi("みこと");
+        dict.learn(&query, "尊");
+        assert_eq!(dict.lookup(&query)[0].word, "尊");
+    }
+
+    #[test]
+    fn learning_keeps_okuri_ari_and_nashi_apart() {
+        let mut dict = MemoryDict::new();
+        dict.learn(&Query::okuri_nashi("skk"), "SKK");
+        dict.learn(&Query::okuri_ari("sk", 'k', "き"), "エスケー");
+
+        assert_eq!(dict.get("skk", false).expect("送りなし")[0].word, "SKK");
+        assert_eq!(dict.get("skk", true).expect("送りあり")[0].word, "エスケー");
+    }
+
+    #[test]
+    fn completion_finds_keys_by_prefix() {
+        let dict = sample();
+        assert_eq!(dict.complete("かん", 10), ["かんじ", "かんじゃ"]);
+        // 入力中の見出しそのものは補完候補にしない。
+        assert_eq!(dict.complete("かんじ", 10), ["かんじゃ"]);
+        assert!(dict.complete("", 10).is_empty());
+        assert!(dict.complete("ない", 10).is_empty());
+    }
+
+    #[test]
+    fn completion_respects_the_limit() {
+        let dict = sample();
+        assert_eq!(dict.complete("かん", 1), ["かんじ"]);
+    }
+
+    #[test]
+    fn completion_ignores_okuri_ari_entries() {
+        let dict = sample();
+        assert!(dict.complete("おく", 10).is_empty());
+    }
+
+    #[test]
+    fn writes_back_in_the_conventional_order() {
+        let dict = sample();
+        let text = dict.to_skk_text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[1], ";; okuri-ari entries.");
+        // 送りありは降順。
+        assert_eq!(lines[2], "たべr /食べ/");
+        assert_eq!(lines[3], "おくr /送/贈/");
+        assert_eq!(lines[4], ";; okuri-nasi entries.");
+        // 送りなしは昇順。UTF-8 のバイト順なので ASCII の見出しが先に来る。
+        assert_eq!(lines[5], "skk /SKK/");
+        assert_eq!(lines[6], "かんじ /漢字/感じ/幹事/");
+        assert_eq!(lines[7], "かんじゃ /患者/");
+    }
+
+    #[test]
+    fn round_trips_through_text() {
+        let dict = sample();
+        let (reparsed, report) = MemoryDict::parse(&dict.to_skk_text());
+        assert_eq!(report.skipped, 0);
+        assert_eq!(reparsed.to_skk_text(), dict.to_skk_text());
+    }
+
+    #[test]
+    fn removes_entries() {
+        let mut dict = sample();
+        assert!(dict.remove("かんじ", false));
+        assert!(!dict.remove("かんじ", false));
+        assert!(dict.lookup(&Query::okuri_nashi("かんじ")).is_empty());
+    }
+}

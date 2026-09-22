@@ -1,0 +1,16 @@
+[package]
+name = "crystalskk-dict"
+description = "SKK dictionary parsing, lookup, and the user dictionary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+# EUC-JP の読み込みに使う。純 Rust で C ツールチェインを要求しない (PRD N-08)。
+encoding_rs = "0.8"
+
+[lints]
+workspace = true
