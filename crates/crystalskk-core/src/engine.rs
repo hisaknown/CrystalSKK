@@ -502,8 +502,13 @@ impl Engine {
                 comp.midashi.push(c);
                 self.state = State::Composing(comp);
             }
-            Key::Char(c) if c.is_ascii_uppercase() && !self.is_midashi_empty(&comp) => {
-                // シフト付きの打鍵は送り仮名の開始を示す。
+            // シフト付きの打鍵は送り仮名の開始を示す。ただし送り仮名が始まれるのは、
+            // 見出し語にかなが一文字でもあり、まだ送り仮名が始まっていないときだけ。
+            // それ以外の位置でのシフトは、新しい区切りを作れないので意味を持たない
+            // (`KAyoU` のような打ちすぎ) ので、小文字として扱う。
+            Key::Char(c)
+                if c.is_ascii_uppercase() && comp.okuri.is_none() && !comp.midashi.is_empty() =>
+            {
                 self.absorb_settled_pending(&mut comp);
                 // 単独では成立しない打鍵が残っているなら、それも送り仮名の一部。
                 // `TabekU` のように子音を打ってからシフトした場合、送り仮名は
@@ -546,11 +551,6 @@ impl Engine {
                 self.state = State::Composing(comp);
             }
         }
-    }
-
-    /// 見出し語がまだ一文字も入っていないか。
-    fn is_midashi_empty(&self, comp: &Composing) -> bool {
-        comp.midashi.is_empty() && self.romaji.is_empty()
     }
 
     /// 送り仮名の開始時に、その前の未確定打鍵を始末する。

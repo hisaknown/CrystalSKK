@@ -216,6 +216,34 @@ fn a_late_shift_is_rescued_mid_word_too() {
     assert_eq!(s.committed, "");
 }
 
+/// シフトの押しすぎを救う。
+///
+/// 勢いあまって一つの音の全部を大文字にしてしまうことがある。二度目以降の
+/// シフトは新しい区切りを作れない位置にあるので、意味を持たない。
+#[test]
+fn an_extra_shift_inside_a_syllable_is_ignored() {
+    let mut s = Session::new();
+    s.type_keys("KAyoU");
+    assert_eq!(s.preedit(), "▼通う", "KayoU と同じ結果になる");
+    assert_eq!(s.committed, "");
+}
+
+#[test]
+fn an_extra_shift_does_not_start_okuri_before_the_midashi() {
+    let mut s = Session::new();
+    // 見出し語にまだかながないので、二文字目のシフトは送り仮名を始められない。
+    s.type_keys("KAnji");
+    assert_eq!(s.preedit(), "▽かんじ");
+}
+
+#[test]
+fn an_extra_shift_inside_okuri_is_ignored() {
+    let mut s = Session::new();
+    // 送り仮名はすでに始まっているので、`U` は送り仮名の続きでしかない。
+    s.type_keys("TabeRU");
+    assert_eq!(s.preedit(), "▼食べる");
+}
+
 /// 単独でかなになる打鍵は、シフトの前に確定させる。
 ///
 /// `honYa` (本屋) では `n` は `ん` として確定すべきであり、続く `ya` と
