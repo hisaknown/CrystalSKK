@@ -47,7 +47,7 @@ use guids::CLSID_CRYSTALSKK;
 /// 読み込まれたこの DLL のハンドル。`DllMain` で受け取る。
 static MODULE: AtomicUsize = AtomicUsize::new(0);
 
-fn module() -> HMODULE {
+pub(crate) fn module() -> HMODULE {
     HMODULE(MODULE.load(Ordering::Acquire) as *mut c_void)
 }
 

@@ -19,6 +19,24 @@
 //! そこで、読み込まれたときに一度だけ**実行ファイルの名前**を書き、以降の
 //! 各行には**時刻**を添える。「この打鍵はあのアプリのものか」「今の操作で
 //! 増えた行はどれか」が、これで言い当てられる。
+//!
+//! # 包装されたアプリでは、環境変数も置き場所も当てにならない
+//!
+//! ストアの仕組みで包装されたアプリ (MSIX) は隔離された入れ物の中で動く。
+//! そこでは二つのことが崩れる。
+//!
+//! - **環境変数が届かない。** 包装されたアプリは起動の道筋が違うので、
+//!   `setx` で設定した値を受け取るとは限らない
+//! - **書き込み先がすり替わる。** `%LOCALAPPDATA%` は入れ物ごとの場所へ
+//!   向けられ、記録は
+//!   `%LOCALAPPDATA%\Packages\<包装の名前>\AC\CrystalSKK\tip.log`
+//!   に落ちる
+//!
+//! 前者は致命的で、**記録が無いことが「読み込まれていない」証しにならなく
+//! なる**。診断の道具としては使い物にならない。
+//!
+//! そこで、環境変数に加えて**目印のファイル**でも記録を始められるようにする。
+//! 置き場所は DLL の隣で、隔離された入れ物からも読める。
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -34,7 +52,7 @@ static ENABLED: OnceLock<Option<PathBuf>> = OnceLock::new();
 fn destination() -> Option<&'static PathBuf> {
     ENABLED
         .get_or_init(|| {
-            std::env::var_os("CRYSTALSKK_LOG")?;
+            switched_on().then_some(())?;
             let base = std::env::var_os("LOCALAPPDATA")?;
             let directory = PathBuf::from(base).join("CrystalSKK");
             std::fs::create_dir_all(&directory).ok()?;
@@ -44,6 +62,27 @@ fn destination() -> Option<&'static PathBuf> {
         })
         .as_ref()
 }
+
+/// 記録するよう頼まれているか。
+///
+/// 環境変数と目印のファイルのどちらでもよい。包装されたアプリには環境変数が
+/// 届かないことがあるので、ファイルという逃げ道を用意している。
+fn switched_on() -> bool {
+    std::env::var_os("CRYSTALSKK_LOG").is_some() || marker().is_some_and(|path| path.exists())
+}
+
+/// 目印のファイルの場所。DLL と同じところに置く。
+///
+/// 隔離された入れ物の中のアプリからも読めるよう、導入先に置くのが肝心で、
+/// 利用者ごとの場所ではいけない。
+fn marker() -> Option<PathBuf> {
+    let module = crate::registry::module_path(crate::module()).ok()?;
+    let directory = PathBuf::from(module).parent()?.to_path_buf();
+    Some(directory.join(MARKER_NAME))
+}
+
+/// 目印のファイルの名前。中身は見ない。あるかどうかだけを見る。
+pub const MARKER_NAME: &str = "log.on";
 
 /// 読み込まれたことを、どのアプリの中かと共に書く。
 ///

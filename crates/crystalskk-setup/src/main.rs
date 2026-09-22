@@ -4,6 +4,7 @@
 //! crystalskk-setup install [DLL]
 //! crystalskk-setup uninstall [--purge]
 //! crystalskk-setup status
+//! crystalskk-setup log on|off
 //! ```
 //!
 //! 入力方式の登録は機械全体に書かれるため、管理者権限が要る (ADR-0007)。
@@ -57,6 +58,8 @@ fn run(arguments: Vec<String>) -> ExitCode {
     match parsed.command {
         Command::Install => do_install(parsed.dll.as_deref(), &report),
         Command::Uninstall => do_uninstall(parsed.purge, &report),
+        Command::LogOn => do_log(true, &report),
+        Command::LogOff => do_log(false, &report),
         Command::Status | Command::Dict => unreachable!("上で処理済み"),
     }
 }
@@ -151,6 +154,47 @@ fn do_uninstall(purge: bool, report: &Report) -> ExitCode {
     }
 }
 
+/// 記録の目印を置く、あるいは外す。
+///
+/// 環境変数ではなくファイルにするのは、**包装されたアプリに環境変数が
+/// 届かない**ため。目印は DLL の隣に置く。そこなら隔離された入れ物の中
+/// からも読める。
+fn do_log(on: bool, report: &Report) -> ExitCode {
+    let directory = match install::install_dir() {
+        Ok(directory) => directory,
+        Err(e) => return fail(&e.to_string(), Some(report)),
+    };
+    let marker = directory.join(crystalskk_tip::log::MARKER_NAME);
+
+    let result = if on {
+        std::fs::write(&marker, b"")
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(e) = result {
+        return fail(&e.to_string(), Some(report));
+    }
+
+    if on {
+        report.say("記録を始めます。アプリを開き直すと効きます。\n");
+        report.say("\n");
+        report.say(concat!(r"記録先: %LOCALAPPDATA%\CrystalSKK\tip.log", "\n"));
+        report.say("包装されたアプリ (MSIX) では、そこではなく\n");
+        report.say(concat!(
+            r"%LOCALAPPDATA%\Packages\<包装の名前>\AC\CrystalSKK\tip.log",
+            " に落ちます。\n"
+        ));
+        report.say("\n");
+        report.say("記録は入力のたびに書かれるので、確認が済んだら log off してください。\n");
+    } else {
+        report.say("記録をやめます。アプリを開き直すと効きます。\n");
+    }
+    ExitCode::SUCCESS
+}
+
 fn report_status() -> ExitCode {
     let status = install::status();
     if !status.is_installed() {
@@ -220,6 +264,10 @@ enum Command {
     Uninstall,
     /// 辞書を取得して置く。
     Dict,
+    /// 診断の記録を始める。
+    LogOn,
+    /// 診断の記録をやめる。
+    LogOff,
     /// 何も変えない。命令が決まるまでの置き場所でもある。
     #[default]
     Status,
@@ -254,6 +302,15 @@ impl Options {
                 "uninstall" => set(&mut command, Command::Uninstall)?,
                 "status" => set(&mut command, Command::Status)?,
                 "dict" => set(&mut command, Command::Dict)?,
+                "log" => {
+                    let which = rest.next().ok_or("log には on か off が要ります")?;
+                    let command_for = match which.as_str() {
+                        "on" => Command::LogOn,
+                        "off" => Command::LogOff,
+                        other => return Err(format!("log に書けるのは on か off です: {other}")),
+                    };
+                    set(&mut command, command_for)?;
+                }
                 "--purge" => parsed.purge = true,
                 "--no-elevate" => parsed.no_elevate = true,
                 "--report" => {
@@ -304,8 +361,9 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
   crystalskk-setup uninstall --purge  写した DLL も削除する
   crystalskk-setup status             今の状態を表示する
   crystalskk-setup dict               辞書を取得して置く (権限は要らない)
+  crystalskk-setup log on|off         診断の記録を始める/やめる
 
-install と uninstall には管理者権限が要る。権限がなければ UAC の確認を出して
+install と uninstall と log には管理者権限が要る。権限がなければ UAC の確認を出して
 自分を呼び直すので、確認に応じてほしい。
 ";
 
@@ -334,6 +392,20 @@ mod tests {
         assert_eq!(parsed.dll, Some(PathBuf::from("a.dll")));
         assert!(parsed.no_elevate);
         assert_eq!(parsed.report, Some(PathBuf::from("r.txt")));
+    }
+
+    #[test]
+    fn reads_the_log_switch() {
+        for (word, expected) in [("on", Command::LogOn), ("off", Command::LogOff)] {
+            let parsed = parse(&["log", word]).expect("読める").expect("命令がある");
+            assert_eq!(parsed.command, expected);
+        }
+    }
+
+    #[test]
+    fn log_needs_on_or_off() {
+        assert!(parse(&["log"]).is_err());
+        assert!(parse(&["log", "maybe"]).is_err());
     }
 
     #[test]
