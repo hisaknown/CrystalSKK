@@ -6,8 +6,16 @@ use crystalskk_core::engine::CandidateView;
 
 use crate::session::Session;
 
-/// 候補一覧。選択中のものを囲んで示す。
+/// 候補の見せ方。
+///
+/// **一覧を出す段階かどうかで見え方が変わる。** 一つずつ見せている間は
+/// 選択中のものを囲み、一覧に移ったらラベル付きで並べる。実機の窓でも
+/// 同じ切り替えをするので、CLI でも同じにしておく。
 pub fn candidates(view: &CandidateView) -> String {
+    if view.listing {
+        return page(view);
+    }
+
     let okuri = view.okuri.as_deref().unwrap_or("");
     let mut out = String::new();
     for (index, candidate) in view.candidates.iter().enumerate() {
@@ -24,8 +32,33 @@ pub fn candidates(view: &CandidateView) -> String {
     out
 }
 
+/// 一覧の一ページ。ラベルを添えて並べる。
+///
+/// 選ぶのはラベルキーを押すことなので、**どれが「選択中」かを示す囲みは
+/// 付けない**。囲むと、矢印キーで動かせるかのように見えてしまう。
+fn page(view: &CandidateView) -> String {
+    let okuri = view.okuri.as_deref().unwrap_or("");
+    let entries: Vec<String> = view
+        .page()
+        .into_iter()
+        .map(|(label, candidate)| format!("{label}: {}{okuri}", candidate.word))
+        .collect();
+    format!(
+        "{}   ({}/{} ページ)",
+        entries.join("  "),
+        view.page_number() + 1,
+        view.page_count()
+    )
+}
+
 /// 選択中の候補の注釈。
+///
+/// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
+/// 一つぶんの注釈を出す先がない。
 pub fn annotation(view: &CandidateView) -> Option<&str> {
+    if view.listing {
+        return None;
+    }
     view.candidates.get(view.index)?.annotation.as_deref()
 }
 
