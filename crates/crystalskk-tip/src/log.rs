@@ -68,7 +68,10 @@ fn destination() -> Option<&'static PathBuf> {
 /// 環境変数と目印のファイルのどちらでもよい。包装されたアプリには環境変数が
 /// 届かないことがあるので、ファイルという逃げ道を用意している。
 fn switched_on() -> bool {
-    std::env::var_os("CRYSTALSKK_LOG").is_some() || marker().is_some_and(|path| path.exists())
+    // 空の値は「無い」とみなす。`setx CRYSTALSKK_LOG ""` で切ったつもりの
+    // 人が、**中身の無い変数のせいで記録され続ける**のは理不尽である。
+    let by_variable = std::env::var_os("CRYSTALSKK_LOG").is_some_and(|value| !value.is_empty());
+    by_variable || marker().is_some_and(|path| path.exists())
 }
 
 /// 目印のファイルの場所。DLL と同じところに置く。
