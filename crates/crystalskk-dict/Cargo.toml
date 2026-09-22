@@ -12,5 +12,8 @@ crystalskk-core = { path = "../crystalskk-core" }
 # EUC-JP の読み込みに使う。純 Rust で C ツールチェインを要求しない (PRD N-08)。
 encoding_rs = "0.8"
 
+[dev-dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+
 [lints]
 workspace = true

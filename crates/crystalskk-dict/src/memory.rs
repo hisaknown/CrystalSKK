@@ -17,6 +17,8 @@ pub struct LoadReport {
     pub entries: usize,
     /// 解釈できずに読み飛ばした行の数。
     pub skipped: usize,
+    /// 既出の見出しと併合した行の数。
+    pub merged: usize,
 }
 
 /// 全件をメモリに載せた SKK 辞書。
@@ -51,7 +53,9 @@ impl MemoryDict {
             match format::parse_line(line) {
                 Some((key, candidates)) => {
                     let okuri_ari = section.unwrap_or_else(|| format::is_okuri_ari_key(&key));
-                    dict.table_mut(okuri_ari).insert(key, candidates);
+                    if dict.merge(&key, okuri_ari, candidates) {
+                        report.merged += 1;
+                    }
                     report.entries += 1;
                 }
                 None => report.skipped += 1,
@@ -79,6 +83,22 @@ impl MemoryDict {
     /// 見出しに対する候補。
     pub fn get(&self, key: &str, okuri_ari: bool) -> Option<&[Candidate]> {
         self.table(okuri_ari).get(key).map(Vec::as_slice)
+    }
+
+    /// 見出しに候補を足す。既にある語は増やさず、順序は既存のものを優先する。
+    ///
+    /// 既出の見出しだったなら `true`。配布されている辞書にも同じ見出しが
+    /// 二度現れることが実際にあり (SKK-JISYO.L に一件)、後勝ちで上書きすると
+    /// 候補を落としてしまう。
+    pub fn merge(&mut self, key: &str, okuri_ari: bool, candidates: Vec<Candidate>) -> bool {
+        let entry = self.table_mut(okuri_ari).entry(key.to_owned()).or_default();
+        let existed = !entry.is_empty();
+        for candidate in candidates {
+            if !entry.iter().any(|c| c.word == candidate.word) {
+                entry.push(candidate);
+            }
+        }
+        existed
     }
 
     /// 見出しの候補を丸ごと置き換える。
@@ -210,7 +230,29 @@ skk /SKK/
         let (dict, report) = MemoryDict::parse(SAMPLE);
         assert_eq!(report.entries, 5);
         assert_eq!(report.skipped, 0);
+        assert_eq!(report.merged, 0);
         assert_eq!(dict.len(), 5);
+    }
+
+    #[test]
+    fn duplicate_keys_are_merged_not_overwritten() {
+        // 配布辞書にも実際にある形。後の行で上書きすると候補が消える。
+        let text = ";; okuri-nasi entries.
+かんじ /漢字/
+かんじ /感じ/漢字/幹事/
+";
+        let (dict, report) = MemoryDict::parse(text);
+        assert_eq!(report.entries, 2);
+        assert_eq!(report.merged, 1);
+        assert_eq!(dict.len(), 1, "見出しは一つに畳まれる");
+
+        let words: Vec<String> = dict
+            .lookup(&Query::okuri_nashi("かんじ"))
+            .iter()
+            .map(|c| c.word.clone())
+            .collect();
+        // 先に出てきた候補が先。重複した語は増やさない。
+        assert_eq!(words, ["漢字", "感じ", "幹事"]);
     }
 
     #[test]

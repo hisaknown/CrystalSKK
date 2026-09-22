@@ -22,6 +22,7 @@ CrystalSKK がそれらと違うところは次の3点。
 |---|---|---|
 | `crystalskk-core` | 変換状態機械、ローマ字変換、候補処理。OS 非依存・I/O なし | 着手 |
 | `crystalskk-dict` | 辞書の読み書きと検索、ユーザー辞書の永続化 | 着手 |
+| `crystalskk-fetch` | 辞書の取得と設置 (WinHTTP) | 着手 |
 | `crystalskk-server` | 変換サーバー。IPC、設定、スクリプト実行 | 未着手 |
 | `crystalskk-tip` | TSF TIP (cdylib) | 未着手 |
 | `crystalskk-config` | 設定 GUI | 未着手 |
@@ -32,6 +33,12 @@ CrystalSKK がそれらと違うところは次の3点。
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+```
+
+辞書を取得して手元に置く:
+
+```bash
+cargo run -p crystalskk-fetch --example install-dict -- ./SKK-JISYO.L
 ```
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
