@@ -133,9 +133,28 @@ impl Session {
             }
         }
 
-        // エンジンが受け取らなかった Enter は、アプリでの改行にあたる。
-        if !response.handled && key == Key::Enter {
-            self.document.push('\n');
+        // エンジンが受け取らなかった打鍵は、そのままアプリに届く。ここでは
+        // 入力先アプリの役をこちらが務める。半角英数モードで文字が消えて
+        // 見えないのは、この肩代わりがないと起きる。
+        if !response.handled {
+            self.apply_to_document(key);
+        }
+    }
+
+    /// エンジンが処理しなかった打鍵を、入力先の文字列に反映する。
+    ///
+    /// 実際の IME では入力先アプリが行うこと。CLI には入力先がないので
+    /// ここで真似る。
+    fn apply_to_document(&mut self, key: Key) {
+        match key {
+            Key::Char(c) => self.document.push(c),
+            Key::Space => self.document.push(' '),
+            Key::Enter => self.document.push('\n'),
+            Key::Tab => self.document.push('\t'),
+            Key::Backspace => {
+                self.document.pop();
+            }
+            Key::Escape | Key::Up | Key::Down | Key::Ctrl(_) => {}
         }
     }
 

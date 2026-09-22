@@ -315,6 +315,57 @@ fn q_commits_the_midashi_as_katakana() {
 }
 
 #[test]
+fn ctrl_q_commits_the_midashi_as_halfwidth_katakana() {
+    let mut s = Session::new();
+    s.type_keys("Kanji");
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.committed, "ｶﾝｼﾞ");
+    assert_eq!(s.preedit(), "");
+    // モードは変わらない。確定の字種を選んだだけ。
+    assert_eq!(s.engine.mode(), InputMode::Hiragana);
+}
+
+#[test]
+fn ctrl_q_takes_the_okuri_along() {
+    let mut s = Session::new();
+    s.type_keys("OkuR");
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.committed, "ｵｸ");
+}
+
+#[test]
+fn ctrl_q_toggles_halfwidth_katakana_mode_in_direct_input() {
+    let mut s = Session::new();
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.engine.mode(), InputMode::HalfKatakana);
+    s.type_keys("kanji");
+    assert_eq!(s.committed, "ｶﾝｼﾞ");
+
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.engine.mode(), InputMode::Hiragana);
+}
+
+#[test]
+fn q_returns_to_hiragana_from_halfwidth_katakana() {
+    let mut s = Session::new();
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.engine.mode(), InputMode::HalfKatakana);
+    // `q` はどのかなモードからでもひらがなへ帰る手段になる。
+    s.type_keys("q");
+    assert_eq!(s.engine.mode(), InputMode::Hiragana);
+}
+
+#[test]
+fn ctrl_q_on_a_candidate_commits_it_first() {
+    let mut s = Session::new();
+    s.type_keys("Kanji ");
+    assert_eq!(s.preedit(), "▼漢字");
+    s.press(Key::Ctrl('q'));
+    assert_eq!(s.committed, "漢字", "選んでいた候補はそのまま確定する");
+    assert_eq!(s.engine.mode(), InputMode::HalfKatakana);
+}
+
+#[test]
 fn q_toggles_katakana_mode_in_direct_input() {
     let mut s = Session::new();
     s.type_keys("q");

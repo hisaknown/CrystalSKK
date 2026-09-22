@@ -112,6 +112,28 @@ fn unhandled_enter_becomes_a_newline_in_the_document() {
     assert_eq!(session.document(), "ああ\n");
 }
 
+/// 半角英数モードでは、エンジンは打鍵をアプリへ素通しする。
+/// CLI はそのアプリの役を務めるので、文字は文書に入る。
+#[test]
+fn ascii_mode_keystrokes_reach_the_document() {
+    let (mut session, _) = session("ascii");
+    type_keys(&mut session, "lhello world");
+    assert_eq!(session.document(), "hello world");
+
+    // Backspace も同じ経路でアプリに届く。
+    type_keys(&mut session, "\\b");
+    assert_eq!(session.document(), "hello worl");
+}
+
+#[test]
+fn returning_from_ascii_mode_resumes_conversion() {
+    let (mut session, _) = session("ascii-return");
+    type_keys(&mut session, "labc");
+    session.press(crystalskk_core::Key::Ctrl('j'));
+    type_keys(&mut session, "Kanji\\s\\n");
+    assert_eq!(session.document(), "abc漢字");
+}
+
 #[test]
 fn saving_is_skipped_when_nothing_was_learned() {
     let (mut session, path) = session("clean");

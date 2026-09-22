@@ -354,9 +354,11 @@ impl Engine {
             }
             Key::Char('q') => {
                 self.flush_romaji(out);
+                // ひらがなからはカタカナへ。それ以外のかなモードからは
+                // ひらがなへ戻す。`q` はいつでも素のかな入力に帰る手段になる。
                 self.mode = match self.mode {
-                    InputMode::Katakana => InputMode::Hiragana,
-                    _ => InputMode::Katakana,
+                    InputMode::Hiragana => InputMode::Katakana,
+                    _ => InputMode::Hiragana,
                 };
             }
             Key::Char('/') => {
@@ -473,6 +475,14 @@ impl Engine {
             Key::Char('q') if !comp.abbrev => {
                 self.absorb_pending(&mut comp);
                 let text = kana::to_katakana(&self.midashi_with_okuri(&comp));
+                self.emit(&text, out);
+                self.state = State::Direct;
+            }
+            // `q` が見出し語をカタカナで確定するのと同じく、`C-q` は半角カタカナで
+            // 確定する。直接入力での `q` と `C-q` の関係をそのまま写したもの。
+            Key::Ctrl('q') if !comp.abbrev => {
+                self.absorb_pending(&mut comp);
+                let text = kana::to_halfwidth_katakana(&self.midashi_with_okuri(&comp));
                 self.emit(&text, out);
                 self.state = State::Direct;
             }
@@ -656,7 +666,7 @@ impl Engine {
             Key::Ctrl('g') | Key::Backspace | Key::Escape => {
                 self.state = State::Composing(sel.origin);
             }
-            Key::Char(_) => {
+            Key::Char(_) | Key::Ctrl('q') => {
                 // 暗黙の確定。確定させた上で、このキーを直接入力として解釈し直す。
                 self.commit_selection(sel, out);
                 self.on_direct(key, out);
