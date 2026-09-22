@@ -10,13 +10,23 @@
 //!
 //! 値の組み合わせは日本語入力の慣例に従う。CrystalSKK の五つのモードを
 //! その語彙へ訳すのが [`conversion_mode`] である。
+//!
+//! # 「IME がオンか」も伝える
+//!
+//! もう一つ `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` という区画があり、
+//! **入力方式がオンかオフか**を表す。オフだと Windows は変換モードを
+//! 見ない。モードを書いても表示が出ないのはこれが理由になりうる。
+//!
+//! SKK には「オン・オフ」という別の軸がない。そこで日本語入力の慣例に
+//! 合わせ、**半角英数を「オフ」、それ以外を「オン」**として伝える
+//! ([`is_open`])。利用者から見た意味も、そのほうが素直である。
 
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use windows::Win32::UI::TextServices::{
     GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_SENTENCE,
-    ITfCompartmentMgr, ITfThreadMgr, TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE,
-    TF_CONVERSIONMODE_KATAKANA, TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN,
-    TF_SENTENCEMODE_PHRASEPREDICT,
+    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, ITfCompartmentMgr, ITfThreadMgr,
+    TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE, TF_CONVERSIONMODE_KATAKANA,
+    TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN, TF_SENTENCEMODE_PHRASEPREDICT,
 };
 use windows::core::{GUID, Interface};
 
@@ -33,6 +43,14 @@ pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMo
         return;
     };
 
+    // まず「オンかオフか」。オフのまま変換モードを書いても読まれない。
+    write(
+        &compartments,
+        client_id,
+        &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+        u32::from(is_open(mode)),
+    );
+
     // 文の変換の仕方。SKK は文法解析をしないが、掲示しないと
     // 「変換方式が決まっていない」扱いになる。
     write(
@@ -48,6 +66,14 @@ pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMo
         &GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
         conversion_mode(mode),
     );
+}
+
+/// このモードは「入力方式がオン」か。
+///
+/// 半角英数だけをオフとする。日本語入力で「IME オフ」と言えば、
+/// 英字がそのまま入る状態を指すため。全角英数はオンのままにする。
+pub fn is_open(mode: InputMode) -> bool {
+    mode != InputMode::Ascii
 }
 
 /// 入力モードを、Windows が使う語彙に訳す。
@@ -159,6 +185,19 @@ mod tests {
             conversion_mode(InputMode::FullAscii) & TF_CONVERSIONMODE_FULLSHAPE,
             0
         );
+    }
+
+    #[test]
+    fn only_half_width_ascii_counts_as_off() {
+        assert!(!is_open(InputMode::Ascii));
+        for mode in [
+            InputMode::Hiragana,
+            InputMode::Katakana,
+            InputMode::HalfKatakana,
+            InputMode::FullAscii,
+        ] {
+            assert!(is_open(mode), "{mode:?} はオン");
+        }
     }
 
     #[test]
