@@ -29,9 +29,10 @@ use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0
 use windows::Win32::UI::TextServices::{
     GUID_COMPARTMENT_EMPTYCONTEXT, GUID_COMPARTMENT_KEYBOARD_DISABLED,
     GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_SENTENCE,
-    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, ITfCompartmentMgr, ITfSource, ITfThreadMgr,
-    TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE, TF_CONVERSIONMODE_KATAKANA,
-    TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN, TF_SENTENCEMODE_PHRASEPREDICT,
+    GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, ITfCompartmentEventSink, ITfCompartmentMgr, ITfSource,
+    ITfThreadMgr, TF_CONVERSIONMODE_ALPHANUMERIC, TF_CONVERSIONMODE_FULLSHAPE,
+    TF_CONVERSIONMODE_KATAKANA, TF_CONVERSIONMODE_NATIVE, TF_CONVERSIONMODE_ROMAN,
+    TF_SENTENCEMODE_PHRASEPREDICT,
 };
 use windows::core::{GUID, IUnknown, Interface};
 
@@ -130,9 +131,9 @@ pub fn advise_open_close(thread_manager: &ITfThreadMgr, sink: &IUnknown) -> Opti
             .GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)
             .ok()?;
         let source = compartment.cast::<ITfSource>().ok()?;
-        source
-            .AdviseSink(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, sink)
-            .ok()
+        // 渡すのは**受け口の種類**であって、見張る区画の GUID ではない。
+        // 区画はもう `GetCompartment` で選んである。
+        source.AdviseSink(&ITfCompartmentEventSink::IID, sink).ok()
     }
 }
 

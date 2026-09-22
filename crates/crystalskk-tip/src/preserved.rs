@@ -42,9 +42,9 @@ const TURN_ON: &[(u16, u32)] = &[
 
 /// 切にするキー。
 ///
-/// 入と同じキーを並べるのは、**同じキーが入切を兼ねる**ため。TSF は
-/// 先に登録したほうを優先し、後から同じ組み合わせを登録しても上書き
-/// されない。押されたとき今の状態を見て決めるので、両方に出しておく。
+/// 入とほとんど同じ顔ぶれになる。**半角/全角は一つのキーで入切を兼ねる**
+/// ので、どちらの側にも並べるしかない。違うのは最後の一つだけで、そちらは
+/// 入専用・切専用のキーである。
 const TURN_OFF: &[(u16, u32)] = &[
     (VK_OEM_3.0, TF_MOD_ALT),
     (VK_KANJI.0, TF_MOD_IGNORE_ALL_MODIFIER),
@@ -55,15 +55,38 @@ const TURN_OFF: &[(u16, u32)] = &[
 
 /// 入切のキーを登録する。
 ///
+/// `open` にはいまの状態を渡す。**入切が変わるたびに登録し直す必要がある。**
+///
+/// TSF は同じ組み合わせを二度登録させない。先に登録したほうが勝ち、後から
+/// 同じキーを別の用途で登録しても黙って無視される。半角/全角のように入切を
+/// 兼ねるキーでは、**どちらを先に登録するかがそのままキーの意味になる**。
+///
+/// だから、いまの状態と逆のほうを先に登録する。入っているなら「切」が、
+/// 切れているなら「入」が、そのキーを取る。押せば必ず反対側へ移る。
+///
 /// 一つも登録できなくても有効化そのものは続ける。入切ができないだけで、
 /// すでに入っているアプリでは入力できる。
-pub fn register(keystrokes: &ITfKeystrokeMgr, client_id: u32) {
-    // 切を先に登録する。同じキーが重なったとき、押して最初に効くのが
-    // 「切」になるようにする。入っている状態から押すのが普通の順番で、
-    // 切られた状態からは入の側が拾う。
-    let off = register_set(keystrokes, client_id, &GUID_PRESERVED_KEY_OFF, TURN_OFF, "OFF");
-    let on = register_set(keystrokes, client_id, &GUID_PRESERVED_KEY_ON, TURN_ON, "ON");
-    log::write(&format!("入切のキーを登録した (入 {on} 件, 切 {off} 件)"));
+pub fn register(keystrokes: &ITfKeystrokeMgr, client_id: u32, open: bool) {
+    let (first, second) = if open {
+        (
+            (&GUID_PRESERVED_KEY_OFF, TURN_OFF, "OFF"),
+            (&GUID_PRESERVED_KEY_ON, TURN_ON, "ON"),
+        )
+    } else {
+        (
+            (&GUID_PRESERVED_KEY_ON, TURN_ON, "ON"),
+            (&GUID_PRESERVED_KEY_OFF, TURN_OFF, "OFF"),
+        )
+    };
+
+    let taken = register_set(keystrokes, client_id, first.0, first.1, first.2);
+    let rest = register_set(keystrokes, client_id, second.0, second.1, second.2);
+    log::write(&format!(
+        "入切のキーを登録した (いまは{}。{} が {taken} 件、{} が {rest} 件)",
+        if open { "入" } else { "切" },
+        first.2,
+        second.2
+    ));
 }
 
 /// 入切のキーの登録を外す。
@@ -91,12 +114,7 @@ fn register_set(
 }
 
 /// 一組の登録を外す。外せなくても続ける。
-fn unregister_set(
-    keystrokes: &ITfKeystrokeMgr,
-    client_id: u32,
-    guid: &GUID,
-    keys: &[(u16, u32)],
-) {
+fn unregister_set(keystrokes: &ITfKeystrokeMgr, client_id: u32, guid: &GUID, keys: &[(u16, u32)]) {
     for (vkey, modifiers) in keys {
         let key = preserved_key(*vkey, *modifiers);
         // SAFETY: 登録したときと同じ組み合わせを渡している。

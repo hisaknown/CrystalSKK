@@ -13,13 +13,13 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::UI::TextServices::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE;
 use windows::Win32::UI::TextServices::{
     ITfCompartmentEventSink, ITfCompartmentEventSink_Impl, ITfComposition, ITfCompositionSink,
     ITfCompositionSink_Impl, ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
     ITfLangBarItem, ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
     ITfTextInputProcessorEx_Impl, ITfThreadMgr,
 };
-use windows::Win32::UI::TextServices::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE;
 use windows::core::{
     BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
 };
@@ -110,6 +110,14 @@ impl TextService {
             .map(|a| a.thread_manager.clone())
     }
 
+    /// 有効化されているときだけ、打鍵の管理者と識別子を複製して返す。
+    fn keystroke_manager(&self) -> Option<(ITfKeystrokeMgr, u32)> {
+        self.activation
+            .borrow()
+            .as_ref()
+            .map(|a| (a.keystrokes.clone(), a.client_id))
+    }
+
     /// いま打鍵を受け取ってよいか。
     ///
     /// 入力方式が切なら受け取らない。入力先が文字を断っていても受け取らない。
@@ -130,10 +138,15 @@ impl TextService {
             return;
         };
         let open = compartment::is_open(&thread_manager);
-        log::write(&format!(
-            "入切を読んだ: {}",
-            if open { "入" } else { "切" }
-        ));
+        log::write(&format!("入切を読んだ: {}", if open { "入" } else { "切" }));
+
+        // 入切のキーを、いまの状態に合わせて登録し直す。入切を兼ねる
+        // キーの意味は登録の順で決まるので、状態が変わるたびにやり直す。
+        // 入にする手立てが無ければ、切られたまま二度と戻らない。
+        if let Some((keystrokes, client_id)) = self.keystroke_manager() {
+            preserved::unregister(&keystrokes, client_id);
+            preserved::register(&keystrokes, client_id, open);
+        }
 
         if open {
             // 入にされた直後はひらがなから始める。日本語を打ちたくて
@@ -268,10 +281,6 @@ impl TextService_Impl {
         if open_close_cookie.is_none() {
             log::write("入切の変化を知らせてもらえない");
         }
-
-        // 入切のキーを横取りする。入にする手立てが無ければ、入力方式は
-        // 切られたまま二度と戻らない。
-        preserved::register(&keystrokes, client_id);
 
         *self.this.activation.borrow_mut() = Some(Activation {
             client_id,
@@ -410,7 +419,10 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
     /// 合わせるだけでよい。
     // TSF が決めた形なので、生のポインタを受けるしかない。中では
     // `as_ref` で確かめてから使う。
-    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "COM の口の形が決まっている")]
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の口の形が決まっている"
+    )]
     fn OnChange(&self, rguid: *const GUID) -> Result<()> {
         guard("OnChange", || {
             // SAFETY: TSF が渡す GUID への参照で、この呼び出しの間は有効。
@@ -464,7 +476,10 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     /// ものを読み直す。**
     // TSF が決めた形なので、生のポインタを受けるしかない。中では
     // `as_ref` で確かめてから使う。
-    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "COM の口の形が決まっている")]
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の口の形が決まっている"
+    )]
     fn OnPreservedKey(&self, _pic: Ref<ITfContext>, rguid: *const GUID) -> Result<BOOL> {
         guard("OnPreservedKey", || {
             // SAFETY: TSF が渡す GUID への参照で、この呼び出しの間は有効。
