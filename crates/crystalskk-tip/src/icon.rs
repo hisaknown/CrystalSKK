@@ -27,8 +27,8 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
     CreateFontW, CreateSolidBrush, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP,
     DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE, FW_SEMIBOLD,
-    FillRect, GetDC, GetDeviceCaps, HBITMAP, HDC, HFONT, LOGPIXELSY, OUT_DEFAULT_PRECIS, ReleaseDC,
-    SHIFTJIS_CHARSET, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    FillRect, GdiFlush, GetDC, GetDeviceCaps, HBITMAP, HDC, HFONT, LOGPIXELSY, OUT_DEFAULT_PRECIS,
+    ReleaseDC, SHIFTJIS_CHARSET, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 use windows::core::{Result, w};
@@ -76,11 +76,19 @@ pub fn render(label: &str) -> Result<HICON> {
         draw(memory, size, label);
         SelectObject(memory, previous);
 
+        // GDI の描画は溜められてから実行される。画素へ直接触る前に
+        // 吐き出させないと、まだ描かれていないものを読むことになる。
+        let _ = GdiFlush();
+
         // GDI は透過情報を書かないので、全面を不透明にする。
         fill_alpha(bits, size);
 
-        // 32 ビットの色を使うので覆いは要らない。空のものを添える。
-        let mask = CreateBitmap(size, size, 1, 1, None);
+        // 覆い。32 ビットの色を使うので全面を「隠さない」= 0 にする。
+        //
+        // `CreateBitmap` に中身を渡さないと**中身は不定**になる。覆いが
+        // でたらめだとアイコンはまだらに、あるいは丸ごと透明になる。
+        let mask_bits = vec![0u8; mask_len(size)];
+        let mask = CreateBitmap(size, size, 1, 1, Some(mask_bits.as_ptr().cast()));
 
         let info = ICONINFO {
             fIcon: true.into(),
@@ -90,6 +98,10 @@ pub fn render(label: &str) -> Result<HICON> {
             hbmColor: color,
         };
         let icon = CreateIconIndirect(&info);
+        match &icon {
+            Ok(_) => crate::log::write(&format!("アイコンを作った ({size} 画素, 「{label}」)")),
+            Err(e) => crate::log::write(&format!("アイコンを作れなかった: {}", e.message())),
+        }
 
         // アイコンは中身を写して作られるので、こちらの絵は捨ててよい。
         let _ = DeleteObject(color.into());
@@ -206,6 +218,15 @@ fn mode_font(size: i32) -> HFONT {
     }
 }
 
+/// 覆いに要るバイト数。
+///
+/// 単色の絵は各行が 2 バイト境界に揃う。
+fn mask_len(size: i32) -> usize {
+    let size = size.max(0) as usize;
+    let bytes_per_row = size.div_ceil(16) * 2;
+    bytes_per_row * size
+}
+
 /// 全面を不透明にする。
 ///
 /// GDI の描画は透過の情報を触らないので、そのままでは全部が透明のまま
@@ -216,6 +237,7 @@ fn mode_font(size: i32) -> HFONT {
 /// `bits` が `size * size` 個の 32 ビット画素を指していること。
 unsafe fn fill_alpha(bits: *mut c_void, size: i32) {
     if bits.is_null() {
+        crate::log::write("描き込む面を取れなかった");
         return;
     }
     let count = (size * size).max(0) as usize;
@@ -223,5 +245,23 @@ unsafe fn fill_alpha(bits: *mut c_void, size: i32) {
     let pixels = unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), count) };
     for pixel in pixels {
         *pixel |= 0xFF00_0000;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mask_is_word_aligned_per_row() {
+        // 16 画素で 2 バイト、17 画素で 4 バイト。
+        assert_eq!(mask_len(16), 2 * 16);
+        assert_eq!(mask_len(17), 4 * 17);
+        assert_eq!(mask_len(32), 4 * 32);
+    }
+
+    #[test]
+    fn an_empty_icon_needs_no_mask() {
+        assert_eq!(mask_len(0), 0);
     }
 }
