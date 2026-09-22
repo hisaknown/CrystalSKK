@@ -14,9 +14,10 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::TextServices::{
-    ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
-    ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
-    ITfTextInputProcessorEx_Impl, ITfThreadMgr,
+    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfKeyEventSink,
+    ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfTextInputProcessor,
+    ITfTextInputProcessor_Impl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
+    ITfThreadMgr,
 };
 use windows::core::{BOOL, ComObject, GUID, IUnknownImpl, Interface, Ref, Result, implement};
 
@@ -43,7 +44,12 @@ struct Activation {
 }
 
 /// CrystalSKK の TIP。
-#[implement(ITfTextInputProcessorEx, ITfTextInputProcessor, ITfKeyEventSink)]
+#[implement(
+    ITfTextInputProcessorEx,
+    ITfTextInputProcessor,
+    ITfKeyEventSink,
+    ITfCompositionSink
+)]
 pub struct TextService {
     /// 有効化されている間だけ中身が入る。
     ///
@@ -189,7 +195,8 @@ impl TextService_Impl {
         if !response.commit.is_empty() {
             // 入れられなくても、エンジンの状態はもう進んでいる。ここで
             // 慌てても直せないので、食べたことだけは正しく伝える。
-            match edit::insert_text(context, client_id, &response.commit) {
+            let sink: ITfCompositionSink = self.to_interface();
+            match edit::insert_text(context, client_id, &sink, &response.commit) {
                 Ok(()) => log::write("文書へ入れた"),
                 Err(e) => log::write(&format!("文書へ入れられなかった: {}", e.message())),
             }
@@ -220,6 +227,24 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
     /// `dwflags` は入力先の種類 (`TF_TMF_*`) を伝える。まだ使わない。
     fn ActivateEx(&self, ptim: Ref<ITfThreadMgr>, tid: u32, _dwflags: u32) -> Result<()> {
         guard("ActivateEx", || self.activate(ptim, tid))
+    }
+}
+
+impl ITfCompositionSink_Impl for TextService_Impl {
+    /// composition がこちらの意図と関係なく終わった。
+    ///
+    /// アプリが文書を触ったときなどに来る。いまは開きっぱなしにしないので
+    /// 起きにくいが、来たら入力の途中経過は捨てる。
+    fn OnCompositionTerminated(
+        &self,
+        _ecwrite: u32,
+        _pcomposition: Ref<ITfComposition>,
+    ) -> Result<()> {
+        guard("OnCompositionTerminated", || {
+            log::write("composition が外から終わらされた");
+            self.this.engine.borrow_mut().reset();
+            Ok(())
+        })
     }
 }
 

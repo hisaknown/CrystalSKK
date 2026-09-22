@@ -10,9 +10,10 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::TextServices::{
-    ITfLangBarItem, ITfLangBarItem_Impl, ITfLangBarItemButton, ITfLangBarItemButton_Impl,
-    ITfLangBarItemMgr, ITfLangBarItemSink, ITfMenu, ITfSource, ITfSource_Impl, ITfThreadMgr,
-    TF_LANGBARITEMINFO, TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY, TfLBIClick,
+    GUID_LBI_INPUTMODE, ITfLangBarItem, ITfLangBarItem_Impl, ITfLangBarItemButton,
+    ITfLangBarItemButton_Impl, ITfLangBarItemMgr, ITfLangBarItemSink, ITfMenu, ITfSource,
+    ITfSource_Impl, ITfThreadMgr, TF_LANGBARITEMINFO, TF_LBI_STYLE_BTN_BUTTON,
+    TF_LBI_STYLE_SHOWNINTRAY, TfLBIClick,
 };
 use windows::Win32::UI::WindowsAndMessaging::HICON;
 use windows::core::{BSTR, GUID, IUnknown, Interface, Ref, Result, implement};
@@ -20,11 +21,11 @@ use windows::core::{BSTR, GUID, IUnknown, Interface, Ref, Result, implement};
 use crystalskk_core::InputMode;
 
 use crate::guard::guard;
-use crate::guids::{CLSID_CRYSTALSKK, GUID_CRYSTALSKK_LANGBAR};
+use crate::guids::CLSID_CRYSTALSKK;
 use crate::log;
 
 /// 並び順。小さいほど手前に出る。
-const SORT_ORDER: u32 = 0;
+const SORT_ORDER: u32 = 1;
 
 /// 言語バーに出す入力モードの表示。
 #[implement(ITfLangBarItemButton, ITfLangBarItem, ITfSource)]
@@ -109,7 +110,10 @@ impl ITfLangBarItem_Impl for ModeIndicator_Impl {
 
             let mut info = TF_LANGBARITEMINFO {
                 clsidService: CLSID_CRYSTALSKK,
-                guidItem: GUID_CRYSTALSKK_LANGBAR,
+                // 独自の GUID ではなく、Windows が定める「入力モード」の
+                // 項目として名乗る。トレイに出るのはこの項目だけであり、
+                // 独自の GUID では言語バーに載っても人目に触れない。
+                guidItem: GUID_LBI_INPUTMODE,
                 // 押せる釦として、トレイにも出す。
                 dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
                 ulSort: SORT_ORDER,
@@ -153,7 +157,11 @@ impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
         guard("OnMenuSelect", || Ok(()))
     }
 
-    /// 絵はまだ持たない。文字だけで表す。
+    /// 絵はまだ持たない。
+    ///
+    /// トレイの表示は**絵がないと出ない**。動いている実装はいずれも
+    /// ここで本物の `HICON` を返している。資源として埋め込むには
+    /// リソースコンパイラが要るので、その場で描いて作る予定。
     fn GetIcon(&self) -> Result<HICON> {
         guard("GetIcon", || Err(E_FAIL.into()))
     }

@@ -12,7 +12,11 @@ pub const CLSID_CRYSTALSKK: GUID = GUID::from_u128(0x5cd1c143_735e_4051_986e_698
 /// 入力方式 (言語バーに並ぶ項目) を指す GUID。
 pub const GUID_CRYSTALSKK_PROFILE: GUID = GUID::from_u128(0x3894d2cd_3ec7_4877_8fcd_f42c42c3eba3);
 
-/// 言語バーに出す項目を指す GUID。
+/// 言語バーに独自の項目を出すときの GUID。
+///
+/// 入力モードの表示には使わない。そちらは Windows が定める
+/// `GUID_LBI_INPUTMODE` を名乗る必要がある。
+#[allow(dead_code, reason = "独自の項目を足す段階で使う")]
 pub const GUID_CRYSTALSKK_LANGBAR: GUID = GUID::from_u128(0x7d3f9a41_0c2e_45b8_9a6d_1f4c8e2b7a09);
 
 /// 見出し語入力中の文字に付ける表示属性。
