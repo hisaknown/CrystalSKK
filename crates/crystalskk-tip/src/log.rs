@@ -6,9 +6,23 @@
 //! 記録先は `%LOCALAPPDATA%\CrystalSKK\tip.log`。利用者ごとの場所なので、
 //! 機械全体に導入されていても書き込みに権限は要らない。
 //!
-//! 既定では何も書かない。環境変数 `CRYSTALSKK_LOG` が設定されているときだけ
-//! 記録する。入力のたびにファイルを開くのは、常用してよい代物ではない。
-//! **これは開発のための仕掛けであり、入力の速さを損なう** (PRD N-01)。
+//! # 詳しさは選べる
+//!
+//! 一行書くたびにファイルを開く。打鍵のたびにそれをやれば**入力が目に
+//! 見えて重くなる** (PRD N-01)。かといって何も出さなければ、実機でしか
+//! 起きない不具合は追えない。
+//!
+//! そこで段階を分ける。**全部出すか何も出さないかの二択にしない。**
+//!
+//! | 段階 | 出るもの | 一打鍵あたり |
+//! |---|---|---|
+//! | [`Level::Off`] | 何も出ない (既定) | 書かない |
+//! | [`Level::Error`] | 失敗だけ | 普段は書かない |
+//! | [`Level::Info`] | 有効化、入切、辞書の読み込み | 普段は書かない |
+//! | [`Level::Trace`] | 打鍵ごとの一部始終 | **毎回書く** |
+//!
+//! `Info` までは「めったに起きないこと」だけなので、常用しても入力の速さに
+//! 響かない。打鍵ごとの記録が要るときだけ `Trace` へ上げる。
 //!
 //! # 「どのアプリの、いつの話か」を残す
 //!
@@ -16,7 +30,7 @@
 //! **どのアプリの記録か分からない**。番号は使い回されるうえ、後から調べよう
 //! にもそのプロセスはもう居ない。
 //!
-//! そこで、読み込まれたときに一度だけ**実行ファイルの名前**を書き、以降の
+//! そこで、記録を始めるときに一度だけ**実行ファイルの名前**を書き、以降の
 //! 各行には**時刻**を添える。「この打鍵はあのアプリのものか」「今の操作で
 //! 増えた行はどれか」が、これで言い当てられる。
 //!
@@ -35,8 +49,8 @@
 //! 前者は致命的で、**記録が無いことが「読み込まれていない」証しにならなく
 //! なる**。診断の道具としては使い物にならない。
 //!
-//! そこで、環境変数に加えて**目印のファイル**でも記録を始められるようにする。
-//! 置き場所は DLL の隣で、隔離された入れ物からも読める。
+//! そこで、環境変数に加えて**目印のファイル**でも段階を指定できる。置き場所は
+//! DLL の隣で、隔離された入れ物からも読める。中身に段階の名前を書く。
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -45,33 +59,141 @@ use std::sync::OnceLock;
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
-/// 記録するかどうか。起動時に一度だけ決める。
-static ENABLED: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// どこまで記録するか。
+///
+/// 並び順がそのまま詳しさの順になっている。ある段階を選ぶと、それより
+/// 上の (数の小さい) ものも出る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Level {
+    /// 何も記録しない。
+    #[default]
+    Off,
+    /// 失敗だけ。
+    Error,
+    /// 節目の出来事。めったに起きないことに限る。
+    Info,
+    /// 打鍵ごとの一部始終。**入力が重くなる。**
+    Trace,
+}
 
-/// 記録先を決める。環境変数がなければ記録しない。
-fn destination() -> Option<&'static PathBuf> {
-    ENABLED
+impl Level {
+    /// 設定に書かれた名前から読み取る。
+    ///
+    /// 読み取れない値は [`Level::Trace`] とみなす。記録を頼んだ人が、
+    /// 綴りを外したせいで**何も出ないまま待たされる**よりはよい。
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "" | "off" | "0" | "none" => Self::Off,
+            "error" => Self::Error,
+            "info" | "on" => Self::Info,
+            _ => Self::Trace,
+        }
+    }
+
+    /// 設定に書く名前。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "error",
+            Self::Info => "info",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+/// 目印のファイルの名前。中身に段階の名前を書く。
+pub const MARKER_NAME: &str = "log.on";
+
+/// 記録する段階と行き先。起動時に一度だけ決める。
+static DESTINATION: OnceLock<Option<(Level, PathBuf)>> = OnceLock::new();
+
+/// 失敗を記録する。
+pub fn error(message: &str) {
+    put(Level::Error, message);
+}
+
+/// 節目の出来事を記録する。
+///
+/// **めったに起きないことに限る。** 打鍵ごとに呼ぶものをここへ入れると、
+/// 段階を分けた意味がなくなる。
+pub fn write(message: &str) {
+    put(Level::Info, message);
+}
+
+/// 打鍵ごとの細かい記録。
+pub fn trace(message: &str) {
+    put(Level::Trace, message);
+}
+
+/// いま打鍵ごとの記録を取るか。
+///
+/// 記録しないと決まっているなら、渡す文字列を組み立てる手間も省きたい。
+pub fn tracing() -> bool {
+    level() >= Level::Trace
+}
+
+/// いまの段階。
+fn level() -> Level {
+    destination().map_or(Level::Off, |(level, _)| *level)
+}
+
+/// 一行書く。失敗しても何もしない。記録できないことで入力を止めない。
+fn put(level: Level, message: &str) {
+    let Some((wanted, path)) = destination() else {
+        return;
+    };
+    if level > *wanted {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "[{} {}] {message}", now(), std::process::id());
+}
+
+/// 記録する段階と行き先を決める。
+fn destination() -> Option<&'static (Level, PathBuf)> {
+    DESTINATION
         .get_or_init(|| {
-            switched_on().then_some(())?;
+            let level = requested();
+            if level == Level::Off {
+                return None;
+            }
             let base = std::env::var_os("LOCALAPPDATA")?;
             let directory = PathBuf::from(base).join("CrystalSKK");
             std::fs::create_dir_all(&directory).ok()?;
             let path = directory.join("tip.log");
-            announce(&path);
-            Some(path)
+            announce(&path, level);
+            Some((level, path))
         })
         .as_ref()
 }
 
-/// 記録するよう頼まれているか。
+/// 頼まれている段階。
 ///
-/// 環境変数と目印のファイルのどちらでもよい。包装されたアプリには環境変数が
-/// 届かないことがあるので、ファイルという逃げ道を用意している。
-fn switched_on() -> bool {
-    // 空の値は「無い」とみなす。`setx CRYSTALSKK_LOG ""` で切ったつもりの
-    // 人が、**中身の無い変数のせいで記録され続ける**のは理不尽である。
-    let by_variable = std::env::var_os("CRYSTALSKK_LOG").is_some_and(|value| !value.is_empty());
-    by_variable || marker().is_some_and(|path| path.exists())
+/// 環境変数と目印のファイルのどちらでもよい。**詳しいほうを採る。**
+/// 包装されたアプリには環境変数が届かないので、ファイルという逃げ道が要る。
+fn requested() -> Level {
+    let by_variable = std::env::var_os("CRYSTALSKK_LOG")
+        .map(|value| Level::parse(&value.to_string_lossy()))
+        .unwrap_or_default();
+    let by_marker = marker()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        // 空のファイルは「段階の指定なし」。置いた以上は記録したいはず
+        // なので、いちばん詳しいところから始める。
+        .map(|text| {
+            if text.trim().is_empty() {
+                Level::Trace
+            } else {
+                Level::parse(&text)
+            }
+        })
+        .unwrap_or_default();
+    by_variable.max(by_marker)
 }
 
 /// 目印のファイルの場所。DLL と同じところに置く。
@@ -84,14 +206,11 @@ fn marker() -> Option<PathBuf> {
     Some(directory.join(MARKER_NAME))
 }
 
-/// 目印のファイルの名前。中身は見ない。あるかどうかだけを見る。
-pub const MARKER_NAME: &str = "log.on";
-
-/// 読み込まれたことを、どのアプリの中かと共に書く。
+/// 記録を始めたことを、どのアプリの中かと共に書く。
 ///
-/// [`destination`] の初期化の中から呼ぶ。[`write`] を使うと初期化が
+/// [`destination`] の初期化の中から呼ぶ。普通の書き込みを使うと初期化が
 /// 入れ子になるので、ここだけは自分でファイルを開く。
-fn announce(path: &std::path::Path) {
+fn announce(path: &std::path::Path, level: Level) {
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -101,10 +220,11 @@ fn announce(path: &std::path::Path) {
     };
     let _ = writeln!(
         file,
-        "[{} {}] ===== 読み込まれた: {} =====",
+        "[{} {}] ===== 読み込まれた: {} ({}) =====",
         now(),
         std::process::id(),
-        host()
+        host(),
+        level.name()
     );
 }
 
@@ -134,17 +254,50 @@ fn now() -> String {
     )
 }
 
-/// 一行書く。失敗しても何もしない。記録できないことで入力を止めない。
-pub fn write(message: &str) {
-    let Some(path) = destination() else {
-        return;
-    };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
-        return;
-    };
-    let _ = writeln!(file, "[{} {}] {message}", now(), std::process::id());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_levels_are_ordered_by_detail() {
+        assert!(Level::Off < Level::Error);
+        assert!(Level::Error < Level::Info);
+        assert!(Level::Info < Level::Trace);
+    }
+
+    #[test]
+    fn names_survive_a_round_trip() {
+        for level in [Level::Off, Level::Error, Level::Info, Level::Trace] {
+            assert_eq!(Level::parse(level.name()), level, "{level:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_value_means_off() {
+        // `setx CRYSTALSKK_LOG ""` で切ったつもりの人を、中身の無い変数の
+        // せいで記録し続けるのは理不尽である。
+        assert_eq!(Level::parse(""), Level::Off);
+        assert_eq!(Level::parse("   "), Level::Off);
+        assert_eq!(Level::parse("off"), Level::Off);
+    }
+
+    #[test]
+    fn a_misspelled_level_records_everything() {
+        // 記録を頼んだ人が、綴りを外したせいで何も出ないまま待たされる
+        // よりはよい。
+        assert_eq!(Level::parse("verbose"), Level::Trace);
+        assert_eq!(Level::parse("1"), Level::Trace);
+    }
+
+    #[test]
+    fn the_old_spelling_still_works() {
+        // 以前の `log on` は「記録する」の意だった。節目だけで足りる。
+        assert_eq!(Level::parse("on"), Level::Info);
+    }
+
+    #[test]
+    fn case_and_spacing_do_not_matter() {
+        assert_eq!(Level::parse(" TRACE\n"), Level::Trace);
+        assert_eq!(Level::parse("Info"), Level::Info);
+    }
 }

@@ -287,7 +287,7 @@ impl TextService_Impl {
         let indicator_object = ComObject::new(ModeIndicator::new());
         let indicator: ITfLangBarItem = indicator_object.to_interface();
         if let Err(e) = langbar::add(&thread_manager, &indicator) {
-            log::write(&format!("言語バーに項目を出せなかった: {}", e.message()));
+            log::error(&format!("言語バーに項目を出せなかった: {}", e.message()));
         }
 
         // 入切の変化を知らせてもらう。**これを聞いていないと、利用者が
@@ -295,7 +295,7 @@ impl TextService_Impl {
         let sink: IUnknown = self.to_interface();
         let open_close_cookie = compartment::advise_open_close(&thread_manager, &sink);
         if open_close_cookie.is_none() {
-            log::write("入切の変化を知らせてもらえない");
+            log::error("入切の変化を知らせてもらえない");
         }
 
         *self.this.activation.borrow_mut() = Some(Activation {
@@ -328,21 +328,25 @@ impl TextService_Impl {
             return false.into();
         };
         let Some(context) = context.as_ref() else {
-            log::write("文脈がないので素通しする");
+            log::trace("文脈がないので素通しする");
             return false.into();
         };
 
         let response = self.this.engine.borrow_mut().press(key);
-        log::write(&format!(
-            "打鍵 {key:?} → 食べた:{} 確定:{:?} 未確定:{:?}",
-            response.handled,
-            response.commit,
-            response.preedit.display()
-        ));
+        // 組み立てる前に段階を見る。記録しないと決まっているなら、
+        // 打鍵のたびに文字列を作る手間も要らない。
+        if log::tracing() {
+            log::trace(&format!(
+                "打鍵 {key:?} → 食べた:{} 確定:{:?} 未確定:{:?}",
+                response.handled,
+                response.commit,
+                response.preedit.display()
+            ));
+        }
         self.this.apply_events(&response.events);
 
         self.this.show_mode();
-        log::write("モードを映した");
+        log::trace("モードを映した");
 
         // 見え方を今の状態に合わせる。書けなくても、エンジンの状態は
         // もう進んでいる。ここで慌てても直せないので、食べたことだけは
@@ -363,9 +367,9 @@ impl TextService_Impl {
         ) {
             Ok(next) => {
                 *self.this.composition.borrow_mut() = next.map(|c| (context.clone(), c));
-                log::write("文書へ反映した");
+                log::trace("文書へ反映した");
             }
-            Err(e) => log::write(&format!("文書へ反映できなかった: {}", e.message())),
+            Err(e) => log::error(&format!("文書へ反映できなかった: {}", e.message())),
         }
         response.handled.into()
     }

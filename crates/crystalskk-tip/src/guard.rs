@@ -25,11 +25,11 @@ pub fn guard<T>(what: &str, body: impl FnOnce() -> Result<T>) -> Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => {
-            log::write(&format!("{what} が失敗した: {}", error.message()));
+            log::error(&format!("{what} が失敗した: {}", error.message()));
             Err(error)
         }
         Err(payload) => {
-            log::write(&format!("{what} でパニックした: {}", describe(&payload)));
+            log::error(&format!("{what} でパニックした: {}", describe(&payload)));
             Err(E_FAIL.into())
         }
     }

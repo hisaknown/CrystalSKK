@@ -101,7 +101,7 @@ pub fn accepts_input(thread_manager: &ITfThreadMgr) -> bool {
 /// 伝えられなくても入力そのものは続く。失敗しても記録するだけにする。
 pub fn publish_mode(thread_manager: &ITfThreadMgr, client_id: u32, mode: InputMode) {
     let Ok(compartments) = thread_manager.cast::<ITfCompartmentMgr>() else {
-        log::write("区画を扱えない");
+        log::error("区画を扱えない");
         return;
     };
 
@@ -206,7 +206,7 @@ fn write(compartments: &ITfCompartmentMgr, client_id: u32, guid: &GUID, value: u
         };
         let variant = integer(value as i32);
         if let Err(e) = compartment.SetValue(client_id, &variant) {
-            log::write(&format!("区画に書けなかった: {}", e.message()));
+            log::error(&format!("区画に書けなかった: {}", e.message()));
         }
     }
 }

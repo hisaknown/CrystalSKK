@@ -106,8 +106,8 @@ pub fn render(label: &str) -> Result<HICON> {
         };
         let icon = CreateIconIndirect(&info);
         match &icon {
-            Ok(_) => crate::log::write(&format!("アイコンを作った ({size} 画素, 「{label}」)")),
-            Err(e) => crate::log::write(&format!("アイコンを作れなかった: {}", e.message())),
+            Ok(_) => crate::log::trace(&format!("アイコンを作った ({size} 画素, 「{label}」)")),
+            Err(e) => crate::log::error(&format!("アイコンを作れなかった: {}", e.message())),
         }
 
         // アイコンは中身を写して作られるので、こちらの絵は捨ててよい。
@@ -345,7 +345,7 @@ fn mask_len(size: i32) -> usize {
 /// `bits` が `size * size` 個の 32 ビット画素を指していること。
 unsafe fn fill_alpha(bits: *mut c_void, size: i32) {
     if bits.is_null() {
-        crate::log::write("描き込む面を取れなかった");
+        crate::log::error("描き込む面を取れなかった");
         return;
     }
     let count = (size * size).max(0) as usize;

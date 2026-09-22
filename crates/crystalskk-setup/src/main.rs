@@ -4,7 +4,7 @@
 //! crystalskk-setup install [DLL]
 //! crystalskk-setup uninstall [--purge]
 //! crystalskk-setup status
-//! crystalskk-setup log on|off
+//! crystalskk-setup log off|error|info|trace
 //! ```
 //!
 //! 入力方式の登録は機械全体に書かれるため、管理者権限が要る (ADR-0007)。
@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crystalskk_tip::com::Apartment;
+use crystalskk_tip::log::Level;
 
 mod dictionary;
 mod elevate;
@@ -67,8 +68,7 @@ fn run(arguments: Vec<String>) -> ExitCode {
     match parsed.command {
         Command::Install => do_install(parsed.dll.as_deref(), &report),
         Command::Uninstall => do_uninstall(parsed.purge, &report),
-        Command::LogOn => do_log(true, &report),
-        Command::LogOff => do_log(false, &report),
+        Command::Log(level) => do_log(level, &report),
         Command::Status | Command::Dict => unreachable!("上で処理済み"),
     }
 }
@@ -210,43 +210,53 @@ fn do_uninstall(purge: bool, report: &Report) -> ExitCode {
     }
 }
 
-/// 記録の目印を置く、あるいは外す。
+/// 記録の段階を、目印のファイルに書く。
 ///
 /// 環境変数ではなくファイルにするのは、**包装されたアプリに環境変数が
 /// 届かない**ため。目印は DLL の隣に置く。そこなら隔離された入れ物の中
 /// からも読める。
-fn do_log(on: bool, report: &Report) -> ExitCode {
+fn do_log(level: Level, report: &Report) -> ExitCode {
     let directory = match install::install_dir() {
         Ok(directory) => directory,
         Err(e) => return fail(&e.to_string(), Some(report)),
     };
     let marker = directory.join(crystalskk_tip::log::MARKER_NAME);
 
-    let result = if on {
-        std::fs::write(&marker, b"")
-    } else {
+    let result = if level == Level::Off {
         match std::fs::remove_file(&marker) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
+    } else {
+        std::fs::write(&marker, level.name().as_bytes())
     };
     if let Err(e) = result {
         return fail(&e.to_string(), Some(report));
     }
 
-    if on {
-        report.say("記録を始めます。アプリを開き直すと効きます。\n");
-        report.say("\n");
-        report.say(concat!(r"記録先: %LOCALAPPDATA%\CrystalSKK\tip.log", "\n"));
-        report.say("包装されたアプリ (MSIX) では、そこではなく\n");
-        report.say(concat!(
-            r"%LOCALAPPDATA%\Packages\<包装の名前>\AC\CrystalSKK\tip.log",
-            " に落ちます。\n"
-        ));
-        report.say("\n");
-        report.say("記録は入力のたびに書かれるので、確認が済んだら log off してください。\n");
-    } else {
+    if level == Level::Off {
         report.say("記録をやめます。アプリを開き直すと効きます。\n");
+        report.say("\n");
+        report.say("環境変数 CRYSTALSKK_LOG を設定している場合は、そちらも消してください。\n");
+        report.say("詳しいほうが採られます。\n");
+        return ExitCode::SUCCESS;
+    }
+
+    report.say(&format!(
+        "記録の段階を {} にしました。アプリを開き直すと効きます。\n",
+        level.name()
+    ));
+    report.say("\n");
+    report.say(concat!(r"記録先: %LOCALAPPDATA%\CrystalSKK\tip.log", "\n"));
+    report.say("包装されたアプリ (MSIX) では、そこではなく\n");
+    report.say(concat!(
+        r"%LOCALAPPDATA%\Packages\<包装の名前>\AC\CrystalSKK\tip.log",
+        " に落ちます。\n"
+    ));
+    if level == Level::Trace {
+        report.say("\n");
+        report.say("trace は打鍵のたびにファイルへ書きます。**入力が重くなります。**\n");
+        report.say("確認が済んだら log info か log off に戻してください。\n");
     }
     ExitCode::SUCCESS
 }
@@ -320,10 +330,8 @@ enum Command {
     Uninstall,
     /// 辞書を取得して置く。
     Dict,
-    /// 診断の記録を始める。
-    LogOn,
-    /// 診断の記録をやめる。
-    LogOff,
+    /// 診断の記録の細かさを決める。
+    Log(Level),
     /// 何も変えない。命令が決まるまでの置き場所でもある。
     #[default]
     Status,
@@ -359,13 +367,12 @@ impl Options {
                 "status" => set(&mut command, Command::Status)?,
                 "dict" => set(&mut command, Command::Dict)?,
                 "log" => {
-                    let which = rest.next().ok_or("log には on か off が要ります")?;
-                    let command_for = match which.as_str() {
-                        "on" => Command::LogOn,
-                        "off" => Command::LogOff,
-                        other => return Err(format!("log に書けるのは on か off です: {other}")),
-                    };
-                    set(&mut command, command_for)?;
+                    let which = rest
+                        .next()
+                        .ok_or("log には段階が要ります (off / error / info / trace)")?;
+                    // 綴りを外した値は、いちばん詳しいところへ倒れる。
+                    // 記録を頼んだ人を黙って無視するよりはよい。
+                    set(&mut command, Command::Log(Level::parse(which)))?;
                 }
                 "--purge" => parsed.purge = true,
                 "--no-elevate" => parsed.no_elevate = true,
@@ -417,7 +424,11 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
   crystalskk-setup uninstall --purge  写した DLL も削除する
   crystalskk-setup status             今の状態を表示する
   crystalskk-setup dict               辞書を取得して置く (権限は要らない)
-  crystalskk-setup log on|off         診断の記録を始める/やめる
+  crystalskk-setup log <段階>         診断の記録の細かさを決める
+                                      off / error / info / trace
+
+log の段階: off (既定) / error (失敗だけ) / info (節目の出来事) /
+trace (打鍵ごと。入力が重くなる)
 
 install と uninstall と log には管理者権限が要る。権限がなければ UAC の確認を出して
 自分を呼び直すので、確認に応じてほしい。
@@ -451,17 +462,28 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_log_switch() {
-        for (word, expected) in [("on", Command::LogOn), ("off", Command::LogOff)] {
+    fn reads_the_log_level() {
+        for (word, expected) in [
+            ("off", Level::Off),
+            ("error", Level::Error),
+            ("info", Level::Info),
+            ("trace", Level::Trace),
+        ] {
             let parsed = parse(&["log", word]).expect("読める").expect("命令がある");
-            assert_eq!(parsed.command, expected);
+            assert_eq!(parsed.command, Command::Log(expected), "{word}");
         }
     }
 
     #[test]
-    fn log_needs_on_or_off() {
+    fn log_needs_a_level() {
         assert!(parse(&["log"]).is_err());
-        assert!(parse(&["log", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn a_misspelled_level_records_everything() {
+        // 黙って無視されるより、出しすぎるほうがまだよい。
+        let parsed = parse(&["log", "verbose"]).expect("読める").expect("命令がある");
+        assert_eq!(parsed.command, Command::Log(Level::Trace));
     }
 
     #[test]

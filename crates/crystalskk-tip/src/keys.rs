@@ -114,10 +114,15 @@ const MODIFIERS: [VIRTUAL_KEY; 10] = [
 
 /// 打鍵の解釈を記録する。何がどう見えているかを外から確かめるため。
 pub fn log_translation(wparam: WPARAM, key: Option<Key>) {
+    // 打鍵ごとに呼ばれる。記録しないと決まっているなら、修飾キーを
+    // 調べるところから省く。
+    if !log::tracing() {
+        return;
+    }
     let virtual_key = wparam.0 & 0xFFFF;
     let state = keyboard_state();
     let pressed = |k: VIRTUAL_KEY| state.is_some_and(|s| s[k.0 as usize] & KEY_PRESSED != 0);
-    log::write(&format!(
+    log::trace(&format!(
         "キー VK={virtual_key:#04x} Ctrl={} Shift={} Alt={} → {key:?}",
         pressed(VK_CONTROL),
         pressed(VK_SHIFT),

@@ -37,11 +37,11 @@ impl LazyDict {
     fn dict(&self) -> &MemoryDict {
         self.loaded.get_or_init(|| {
             let Ok(path) = paths::system_dictionary() else {
-                log::write("辞書の置き場所が分からない");
+                log::error("辞書の置き場所が分からない");
                 return MemoryDict::new();
             };
             let Ok(bytes) = std::fs::read(&path) else {
-                log::write(&format!("辞書がない: {}", path.display()));
+                log::error(&format!("辞書がない: {}", path.display()));
                 return MemoryDict::new();
             };
 
@@ -79,7 +79,7 @@ impl SharedUserDict {
                 dict
             }
             Err(e) => {
-                log::write(&format!("ユーザー辞書を読めなかった: {e}"));
+                log::error(&format!("ユーザー辞書を読めなかった: {e}"));
                 UserDict::new(path)
             }
         };
@@ -99,7 +99,7 @@ impl SharedUserDict {
         }
         match dict.save() {
             Ok(()) => log::write("ユーザー辞書を保存した"),
-            Err(e) => log::write(&format!("ユーザー辞書を保存できなかった: {e}")),
+            Err(e) => log::error(&format!("ユーザー辞書を保存できなかった: {e}")),
         }
     }
 }

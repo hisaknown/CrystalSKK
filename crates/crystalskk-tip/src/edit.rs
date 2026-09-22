@@ -69,7 +69,7 @@ impl ITfEditSession_Impl for Update_Impl {
                     write_into(&this.context, ec, &opened, &this.commit)?;
                     opened.EndComposition(ec)?;
                 }
-                log::write("確定した文字列を書いて composition を閉じた");
+                log::trace("確定した文字列を書いて composition を閉じた");
             }
 
             // 未確定の文字列は、書いて開いたままにする。
@@ -79,7 +79,7 @@ impl ITfEditSession_Impl for Update_Impl {
                 unsafe {
                     write_into(&this.context, ec, &opened, &this.preedit)?;
                 }
-                log::write("未確定の文字列を書いた");
+                log::trace("未確定の文字列を書いた");
                 composition = Some(opened);
             } else if let Some(opened) = composition.take() {
                 // 見せるものがなくなったので、跡を消して閉じる。
@@ -88,7 +88,7 @@ impl ITfEditSession_Impl for Update_Impl {
                     let _ = write_into(&this.context, ec, &opened, &[]);
                     let _ = opened.EndComposition(ec);
                 }
-                log::write("未確定がなくなったので composition を閉じた");
+                log::trace("未確定がなくなったので composition を閉じた");
             }
 
             *this.composition.borrow_mut() = composition;
@@ -116,7 +116,7 @@ fn open_if_needed(
     let compositions: ITfContextComposition = context.cast()?;
     // SAFETY: 範囲は直前に受け取ったもの、受け口はこちらが持つもの。
     let composition = unsafe { compositions.StartComposition(ec, &range, sink) }?;
-    log::write("composition を開いた");
+    log::trace("composition を開いた");
     Ok(composition)
 }
 
@@ -146,14 +146,14 @@ unsafe fn write_into(
         let style = selection.style;
         let selection_range = ManuallyDrop::into_inner(selection.range);
         let Some(selection_range) = selection_range.filter(|_| fetched == 1) else {
-            log::write("選択範囲を取れなかった");
+            log::error("選択範囲を取れなかった");
             return Err(E_FAIL.into());
         };
 
         // 選択が composition の外へ出ているなら書かない。アプリが
         // カーソルを動かした後に書き込むと、関係のない場所を壊す。
         if !covers(ec, &range, &selection_range)? {
-            log::write("選択が composition の外にあるので書かない");
+            log::trace("選択が composition の外にあるので書かない");
             return Err(E_FAIL.into());
         }
 
@@ -291,7 +291,7 @@ impl ITfEditSession_Impl for Terminate_Impl {
                 }
                 let _ = composition.EndComposition(ec);
             }
-            log::write("composition を片付けた");
+            log::trace("composition を片付けた");
             Ok(())
         })
     }
