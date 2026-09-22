@@ -33,6 +33,16 @@ use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
 use crate::langbar::ModeIndicator;
 use crate::{compartment, dict, edit, keys, langbar, log, preserved};
 
+/// 入力方式が入にされた直後の入力モード。
+///
+/// 半角英数から始める。入にした時点では、利用者はまだ日本語を打つと
+/// 決めていない。**入にしただけで打鍵の意味が変わる**と、英字を打つ
+/// つもりだった人がかなを掴まされる。
+///
+/// かなへは `Ctrl+J` で自分から入る。SKK ではそれが普通の入り方で、
+/// 一手増えることにはならない。
+const DEFAULT_MODE: InputMode = InputMode::Ascii;
+
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
 struct Activation {
@@ -149,9 +159,10 @@ impl TextService {
         }
 
         if open {
-            // 入にされた直後はひらがなから始める。日本語を打ちたくて
-            // 入にしたはずで、英数から始めても一手無駄になる。
-            self.engine.borrow_mut().restart_in(InputMode::Hiragana);
+            // 入にされた直後は半角英数から始める。**入にしただけで打鍵の
+            // 意味が変わらない**ほうがよい。かなへは `Ctrl+J` で自分から
+            // 入る、という SKK の作法にも合う。
+            self.engine.borrow_mut().restart_in(DEFAULT_MODE);
             self.show_mode();
         } else {
             self.drop_composition();
