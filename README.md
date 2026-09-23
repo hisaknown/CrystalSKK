@@ -79,13 +79,13 @@ cargo build -p crystalskk-tip --release
 cargo run -p crystalskk-setup -- install
 ```
 
-辞書を取得する。こちらは利用者ごとの場所へ置くので権限は要らない。
+使う辞書は設定ファイルの `dictionaries.sources` に並べる (既定は L 辞書)。URL なら辞書サーバが裏で取得し、起動のたびに更新を確かめる。複数並べると、一つの辞書であるかのように並べた順で引く ([ADR-0022](docs/adr/0022-read-the-listed-dictionaries-as-one.md))。いま取り直したいとき、何が起きたかを見たいときは次を打つ。権限は要らない。
 
 ```bash
 cargo run -p crystalskk-setup -- dict
 ```
 
-DLL は `%ProgramFiles%\CrystalSKK\bin` に、辞書は `%LOCALAPPDATA%\CrystalSKK` に置かれる。辞書は利用者のデータであってプログラムの一部ではないので、場所を分けている。DLL を `target` から直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
+DLL は `%ProgramFiles%\CrystalSKK\bin` に、辞書は `%LOCALAPPDATA%\CrystalSKK\dictionaries` に置かれる。辞書は利用者のデータであってプログラムの一部ではないので、場所を分けている。DLL を `target` から直接登録しないのは、使用中の DLL がビルドに掴まれて作り直せなくなるのを避けるため。
 
 ```bash
 cargo run -p crystalskk-setup -- status

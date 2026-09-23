@@ -56,6 +56,8 @@ pub fn prepare() {
                     loaded.romaji_path.display()
                 );
             }
+            // かつての L 辞書は、もう読まない。
+            crate::dictionary::remove_legacy();
         }
         Err(e) => {
             eprintln!("crystalskk-setup: {e}");

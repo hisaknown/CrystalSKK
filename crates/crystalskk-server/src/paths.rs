@@ -27,7 +27,17 @@ pub fn data_dir() -> io::Result<PathBuf> {
     Ok(local_app_data()?.join("CrystalSKK"))
 }
 
-/// 静的辞書の置き場所。
+/// URL から取ってきた辞書を置く場所。
+///
+/// 中は取得元ごとに分かれる (`raw.githubusercontent.com\skk-dev\…`)。
+pub fn dictionary_cache() -> io::Result<PathBuf> {
+    Ok(data_dir()?.join("dictionaries"))
+}
+
+/// かつて静的辞書を置いていた場所。
+///
+/// 辞書を設定で選べるようにする前は、L 辞書をここに一つだけ置いていた
+/// (ADR-0022)。いまは読まない。導入のときに片付ける。
 pub fn system_dictionary() -> io::Result<PathBuf> {
     Ok(data_dir()?.join(SYSTEM_DICTIONARY_NAME))
 }

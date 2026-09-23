@@ -60,6 +60,49 @@ pub struct Settings {
     pub engine: Options,
     /// 窓の見せ方。
     pub window: Window,
+    /// 引く辞書。並べた順に引く。**使うのは辞書サーバだけ。**
+    pub dictionaries: Vec<Source>,
+}
+
+/// 辞書の在りか。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// 取得して手元に置く。
+    Url(String),
+    /// 手元のファイルを直に読む。書かれたままの場所で、相対なら設定
+    /// ファイルと同じ場所から解く ([`Source::resolve`])。
+    File(String),
+}
+
+impl Source {
+    fn parse(text: &str) -> Self {
+        let lowered = text.to_ascii_lowercase();
+        if lowered.starts_with("https://") || lowered.starts_with("http://") {
+            Self::Url(text.to_owned())
+        } else {
+            Self::File(text.to_owned())
+        }
+    }
+
+    /// ファイルなら、設定ファイルの置き場所から見た場所。URL なら `None`。
+    pub fn resolve(&self, settings_directory: &Path) -> Option<PathBuf> {
+        let Self::File(written) = self else {
+            return None;
+        };
+        let written = Path::new(written);
+        Some(if written.is_absolute() {
+            written.to_path_buf()
+        } else {
+            settings_directory.join(written)
+        })
+    }
+
+    /// 書かれたままの姿。知らせに使う。
+    pub fn as_written(&self) -> &str {
+        match self {
+            Self::Url(text) | Self::File(text) => text,
+        }
+    }
 }
 
 /// 窓の見せ方。エンジンは知らなくてよい値。
@@ -225,6 +268,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         window: Window {
             show_reading: boolean(completion, "completion", "show_reading")?,
         },
+        dictionaries: sources(section(&doc, "dictionaries")?)?,
     })
 }
 
@@ -482,6 +526,29 @@ fn one_char(table: &Table, section: &str, key: &str) -> Result<char, Error> {
     }
 }
 
+/// 辞書の並び。空でもよい (ユーザー辞書だけで使う)。
+fn sources(table: &Table) -> Result<Vec<Source>, Error> {
+    let wrong = || {
+        Error::new(
+            "dictionaries.sources は文字列の並びで書いてください \
+             (例: [\"https://…/SKK-JISYO.L\"])",
+        )
+    };
+    let array = value(table, "dictionaries", "sources")?
+        .as_array()
+        .ok_or_else(wrong)?;
+    array
+        .iter()
+        .map(|item| {
+            let text = item.as_str().ok_or_else(wrong)?.trim();
+            if text.is_empty() {
+                return Err(Error::new("dictionaries.sources に空の文字列があります"));
+            }
+            Ok(Source::parse(text))
+        })
+        .collect()
+}
+
 /// 候補を選ぶキーの並び。
 fn labels(table: &Table, section: &str, key: &str) -> Result<Vec<char>, Error> {
     let text = value(table, section, key)?.as_str().ok_or_else(|| {
@@ -579,7 +646,12 @@ mod tests {
         let filled = fill(Some(user)).unwrap();
         assert_eq!(
             filled.added,
-            ["candidates.until_list", "candidates.labels", "romaji.table"]
+            [
+                "candidates.until_list",
+                "candidates.labels",
+                "dictionaries.sources",
+                "romaji.table"
+            ]
         );
         let settings = parse(&filled.text, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(
@@ -646,6 +718,73 @@ mod tests {
     fn a_section_written_as_a_value_is_refused() {
         let error = fill(Some("completion = 1\n")).unwrap_err();
         assert!(error.to_string().contains("[completion]"));
+    }
+
+    #[test]
+    fn the_template_lists_the_l_dictionary() {
+        let settings = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap();
+        assert_eq!(
+            settings.dictionaries,
+            [Source::Url(
+                "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn urls_and_files_are_told_apart() {
+        let user = TEMPLATE.replace(
+            "    \"https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L\",\n",
+            "    \"HTTPS://example.com/a\",\n    \"my.dict\",\n    \"C:/dicts/b.dict\",\n",
+        );
+        let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
+        assert_eq!(
+            settings.dictionaries,
+            [
+                Source::Url("HTTPS://example.com/a".to_owned()),
+                Source::File("my.dict".to_owned()),
+                Source::File("C:/dicts/b.dict".to_owned()),
+            ]
+        );
+        let here = Path::new("D:/settings");
+        assert_eq!(
+            settings.dictionaries[1].resolve(here),
+            Some(here.join("my.dict"))
+        );
+        assert_eq!(settings.dictionaries[0].resolve(here), None);
+    }
+
+    #[test]
+    fn no_dictionaries_is_a_choice() {
+        // ユーザー辞書だけで使うこともできる。
+        let user = TEMPLATE.replace(
+            "    \"https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L\",\n",
+            "",
+        );
+        assert!(
+            parse(&user, ROMAJI_TEMPLATE)
+                .unwrap()
+                .dictionaries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_broken_dictionary_list_is_explained() {
+        for broken in [
+            "sources = \"one.dict\"",
+            "sources = [1]",
+            "sources = [\"\"]",
+        ] {
+            let start = TEMPLATE.find("sources = [").unwrap();
+            let end = TEMPLATE[start..].find(']').unwrap() + start + 1;
+            let user = format!("{}{broken}{}", &TEMPLATE[..start], &TEMPLATE[end..]);
+            let error = parse(&user, ROMAJI_TEMPLATE).expect_err(broken);
+            assert!(
+                error.to_string().contains("dictionaries.sources"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

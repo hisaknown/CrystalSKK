@@ -18,6 +18,7 @@
 //! 駄目なら、黙って違う結果を出さずに**繋がらないと言う**。
 
 pub mod client;
+pub mod library;
 pub mod names;
 pub mod paths;
 pub mod pipe;

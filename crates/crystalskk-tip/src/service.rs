@@ -31,7 +31,6 @@ use crystalskk_core::engine::Event;
 use crystalskk_core::{Engine, InputMode};
 
 use crate::candwin::{CandidateWindow, Completion, Content, Page, Registration};
-use crate::dict::UNREACHABLE_NOTICE;
 use crate::dict::{Learning, SharedSource};
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
@@ -483,8 +482,10 @@ impl TextService {
         //
         // 見出し語を入力している間だけ出す。確定すれば消える — 知らせを
         // 閉じる手立てを別に覚えてもらう必要がない。
-        if self.source.was_unreachable() && !engine.preedit().is_empty() {
-            return Some(Content::Notice(UNREACHABLE_NOTICE.to_owned()));
+        if let Some(notice) = self.source.notice()
+            && !engine.preedit().is_empty()
+        {
+            return Some(Content::Notice(notice));
         }
 
         // 設定を受け取れなかったことを言う。一度も受け取れていなければ

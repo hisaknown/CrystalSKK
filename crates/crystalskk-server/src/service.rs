@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
-use crystalskk_dict::{MemoryDict, UserDict};
+use crystalskk_dict::UserDict;
+
+use crate::library::Library;
 use crystalskk_ipc::{Request, Reset, Response};
 
 /// 頼みを聞き終えたあと、どうするか。
@@ -25,8 +27,8 @@ pub enum Next {
 /// 辞書を持ち、頼みに答える係。
 #[derive(Debug)]
 pub struct Service {
-    /// 静的辞書。読むだけ。
-    system: MemoryDict,
+    /// 設定に並べた辞書。読むだけ。**一つの辞書であるかのように引く。**
+    library: Library,
     /// ユーザー辞書。**この機械で唯一の書き手がここにいる。**
     user: UserDict,
     /// 設定ファイル。足りない項目を書き足すのも、ここだけである。
@@ -34,18 +36,30 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(system: MemoryDict, user: UserDict, settings: PathBuf) -> Self {
+    pub fn new(library: Library, user: UserDict, settings: PathBuf) -> Self {
         Self {
-            system,
+            library,
             user,
             settings,
         }
     }
 
+    /// 起動したときに、設定に並べた辞書を用意し始める。
+    ///
+    /// 取得には時間がかかるので、最初の頼みが来る前に始めておく。設定が
+    /// 読めなければ何もしない (ユーザー辞書だけで答える)。
+    pub fn prepare(&mut self) {
+        if let Err(e) = self.read_settings() {
+            eprintln!("crystalskk-server: {e}");
+        }
+    }
+
     /// 一つの頼みに答える。
     pub fn handle(&mut self, request: Request) -> (Response, Next) {
+        // 裏で読み終えた辞書があれば、答える前に差し替える。
+        self.library.poll();
         match request {
-            Request::Search(query) => (Response::Ok(self.search(&query)), Next::Listen),
+            Request::Search(query) => (self.search(&query), Next::Listen),
             Request::Complete { prefix, limit } => {
                 (Response::Ok(self.complete(&prefix, limit)), Next::Listen)
             }
@@ -72,14 +86,20 @@ impl Service {
     ///
     /// 順番がそのまま候補の並びになる。**一度選んだ語が先に出る**のは
     /// この順番による。
-    fn search(&self, query: &Query) -> Vec<Candidate> {
+    ///
+    /// 辞書をまだ一度も読み終えていなければ、**引けなかった**と答える。
+    /// 「無い」と答えると、知っているはずの語で辞書登録が始まる。
+    fn search(&self, query: &Query) -> Response {
+        if let Some(reason) = self.library.waiting() {
+            return Response::Error(reason);
+        }
         let mut candidates = self.user.dict().lookup(query);
-        for candidate in self.system.lookup(query) {
+        for candidate in self.library.lookup(query) {
             if !candidates.iter().any(|seen| seen.word == candidate.word) {
                 candidates.push(candidate);
             }
         }
-        candidates
+        Response::Ok(candidates)
     }
 
     /// 前方一致する見出しを返す。
@@ -99,12 +119,12 @@ impl Service {
             .map(str::to_owned)
             .collect();
 
-        for key in self.system.complete(prefix, limit) {
+        for key in self.library.complete(prefix, limit) {
             if found.len() >= limit {
                 break;
             }
-            if !found.iter().any(|seen| seen == key) {
-                found.push(key.to_owned());
+            if !found.contains(&key) {
+                found.push(key);
             }
         }
         found.into_iter().map(Candidate::new).collect()
@@ -121,8 +141,8 @@ impl Service {
     ///
     /// 返すのは**ファイルの全文**である。読み方は受け取った側も同じ
     /// crate で揃えてあるので、値に崩して運び直す必要がない。
-    fn settings(&self) -> Response {
-        match crystalskk_settings::load(&self.settings) {
+    fn settings(&mut self) -> Response {
+        match self.read_settings() {
             Ok(loaded) => {
                 if loaded.created {
                     eprintln!(
@@ -155,6 +175,21 @@ impl Service {
             }
             Err(e) => Response::Error(e.to_string()),
         }
+    }
+
+    /// 設定を読み、並べた辞書に合わせる。
+    ///
+    /// 並びもファイルも変わっていなければ、辞書には何もしない。
+    fn read_settings(&mut self) -> Result<crystalskk_settings::Loaded, crystalskk_settings::Error> {
+        let loaded = crystalskk_settings::load(&self.settings)?;
+        let directory = self
+            .settings
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        self.library
+            .configure(&loaded.settings.dictionaries, &directory);
+        Ok(loaded)
     }
 
     /// 雛形で上書きする。**元の中身は隣に退避する。**
@@ -219,7 +254,6 @@ mod tests {
     /// 実害が出ないようにする。ローマ字テーブルは設定ファイルの隣に
     /// 作られるので、**置き場所ごと分けないと試験どうしで取り合う。**
     fn service_with(entries: &str) -> Service {
-        let (system, _) = MemoryDict::parse(entries);
         let directory = std::env::temp_dir().join(format!(
             "crystalskk-server-test-{}-{:?}",
             std::process::id(),
@@ -227,11 +261,28 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("置き場所を作れる");
+
+        // 辞書は手元のファイルとして並べる。**試験はネットワークに出ない。**
+        let dictionary = directory.join("system.dict");
+        std::fs::write(&dictionary, entries).unwrap();
+        let mut library = Library::new(directory.join("cache"), refuse);
+        library.configure(
+            &[crystalskk_settings::Source::File(
+                dictionary.display().to_string(),
+            )],
+            &directory,
+        );
+        library.settle();
+
         Service::new(
-            system,
+            library,
             UserDict::new(directory.join("user.dict")),
             directory.join("config.toml"),
         )
+    }
+
+    fn refuse(_url: &str, _path: &std::path::Path) -> Result<bool, String> {
+        Err("試験では通信しない".to_owned())
     }
 
     fn service() -> Service {
@@ -386,6 +437,35 @@ mod tests {
             crystalskk_settings::ROMAJI_TEMPLATE
         );
         let _ = std::fs::remove_dir_all(service.settings.parent().unwrap());
+    }
+
+    #[test]
+    fn nothing_is_called_missing_while_the_dictionaries_are_on_their_way() {
+        // 取得しているあいだに「無い」と答えると、辞書登録が始まってしまう。
+        fn slow(_url: &str, _path: &std::path::Path) -> Result<bool, String> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Err("届かない".to_owned())
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "crystalskk-server-test-waiting-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut library = Library::new(directory.join("cache"), slow);
+        library.configure(
+            &[crystalskk_settings::Source::Url(
+                "https://example.com/a".to_owned(),
+            )],
+            &directory,
+        );
+        let mut service = Service::new(
+            library,
+            UserDict::new(directory.join("user.dict")),
+            directory.join("config.toml"),
+        );
+        let (response, _) = service.handle(Request::Search(Query::okuri_nashi("かんじ")));
+        assert!(matches!(response, Response::Error(_)), "{response:?}");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

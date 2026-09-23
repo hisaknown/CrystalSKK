@@ -101,6 +101,7 @@ version = "0.1.0"
 dependencies = [
  "crystalskk-core",
  "crystalskk-dict",
+ "crystalskk-fetch",
  "crystalskk-ipc",
  "crystalskk-settings",
  "windows",

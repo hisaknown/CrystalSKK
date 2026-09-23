@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crystalskk_dict::{MemoryDict, encoding};
 
@@ -145,7 +145,7 @@ pub fn install_bytes(bytes: &[u8], path: &Path) -> Result<InstallReport, Error> 
     }
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(".tmp");
-    let temporary = std::path::PathBuf::from(temporary);
+    let temporary = PathBuf::from(temporary);
 
     let text = dict.to_skk_text();
     fs::write(&temporary, text.as_bytes())?;
@@ -161,6 +161,86 @@ pub fn install_bytes(bytes: &[u8], path: &Path) -> Result<InstallReport, Error> 
     })
 }
 
+/// URL の辞書を手元に置く場所。
+///
+/// `<root>\<host>\<path...>` の形にする。**置き場所を見れば、どこから
+/// 取ってきた辞書か分かる**ようにしたい。名前だけ (`SKK-JISYO.L`) だと、
+/// 別の場所から取った同じ名前の辞書とぶつかる。
+///
+/// Windows のファイル名に使えない文字は `_` に換える。`..` のような
+/// 上へ登る部分も換え、`root` の外へ出ない。
+pub fn cache_path(root: &Path, url: &str) -> Result<PathBuf, Error> {
+    let parsed = url::Url::parse(url)?;
+    let default_port = if parsed.secure { 443 } else { 80 };
+    let host = if parsed.port == default_port {
+        parsed.host.clone()
+    } else {
+        format!("{}_{}", parsed.host, parsed.port)
+    };
+
+    let mut path = root.join(sanitize(&host));
+    let segments: Vec<&str> = parsed
+        .target
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return Err(Error::bad_url(url));
+    }
+    for segment in segments {
+        path.push(sanitize(segment));
+    }
+    Ok(path)
+}
+
+/// ファイル名に使えない文字を換える。
+fn sanitize(segment: &str) -> String {
+    if segment == "." || segment == ".." {
+        return "_".to_owned();
+    }
+    segment
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// 取得して手元に置く。**前回から変わっていなければ、中身を落としてこない。**
+///
+/// 前回の `ETag` は辞書の隣 (`<名前>.etag`) に覚えておく。手元に辞書が
+/// 無ければ `ETag` は使わない (消されたなら取り直す)。変化がなければ `None`。
+pub fn refresh(url: &str, path: &Path) -> Result<Option<InstallReport>, Error> {
+    let etag_path = sidecar(path, "etag");
+    let etag = if path.exists() {
+        fs::read_to_string(&etag_path).ok()
+    } else {
+        None
+    };
+    let installed = install(url, path, etag.as_deref().map(str::trim))?;
+    if let Some(report) = &installed {
+        match &report.etag {
+            Some(etag) => fs::write(&etag_path, etag)?,
+            None => {
+                let _ = fs::remove_file(&etag_path);
+            }
+        }
+    }
+    Ok(installed)
+}
+
+/// 隣に置く控えのファイル。
+fn sidecar(path: &Path, extension: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".");
+    name.push(extension);
+    PathBuf::from(name)
+}
+
 /// 辞書を取得して設置する。前回から変化がなければ `None`。
 pub fn install(url: &str, path: &Path, etag: Option<&str>) -> Result<Option<InstallReport>, Error> {
     match get(url, etag)? {
@@ -170,6 +250,58 @@ pub fn install(url: &str, path: &Path, etag: Option<&str>) -> Result<Option<Inst
             report.etag = downloaded.etag;
             Ok(Some(report))
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn a_url_becomes_a_readable_place() {
+        let root = Path::new("cache");
+        let path = cache_path(root, SKK_JISYO_L).unwrap();
+        assert_eq!(
+            path,
+            root.join("raw.githubusercontent.com")
+                .join("skk-dev")
+                .join("dict")
+                .join("master")
+                .join("SKK-JISYO.L")
+        );
+    }
+
+    #[test]
+    fn the_same_name_from_elsewhere_does_not_collide() {
+        let root = Path::new("cache");
+        let a = cache_path(root, "https://example.com/SKK-JISYO.L").unwrap();
+        let b = cache_path(root, "https://example.org/SKK-JISYO.L").unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn nothing_escapes_the_root() {
+        let root = Path::new("cache");
+        let path = cache_path(root, "https://example.com/../../secret?x=1").unwrap();
+        assert!(path.starts_with(root));
+        assert!(
+            !path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        );
+        assert!(!path.to_string_lossy().contains('?'));
+    }
+
+    #[test]
+    fn a_port_is_part_of_the_place() {
+        let root = Path::new("cache");
+        let path = cache_path(root, "http://localhost:8080/dict").unwrap();
+        assert!(path.starts_with(root.join("localhost_8080")));
+    }
+
+    #[test]
+    fn a_url_without_a_file_is_refused() {
+        assert!(cache_path(Path::new("cache"), "https://example.com/").is_err());
     }
 }
 

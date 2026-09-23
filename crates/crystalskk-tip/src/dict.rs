@@ -50,8 +50,11 @@ pub const UNREACHABLE_NOTICE: &str = "辞書に繋がりません (別のアプ�
 /// そのまま使えた。
 #[derive(Debug, Default)]
 pub struct ServerSource {
-    /// 直近の引き方でサーバに届かなかったか。
-    unreachable: std::cell::Cell<bool>,
+    /// 直近の引き方で引けなかったなら、その訳。**利用者に見せる文。**
+    ///
+    /// サーバに届かなかったときと、届いたが引けなかったとき (辞書を取得
+    /// している最中など) がある。どちらも「辞書に無い」とは違う。
+    trouble: std::cell::RefCell<Option<String>>,
 }
 
 impl ServerSource {
@@ -59,9 +62,34 @@ impl ServerSource {
         Self::default()
     }
 
-    /// 直近の引き方でサーバに届かなかったか。
+    /// 直近の引き方で引けなかったか。
     pub fn was_unreachable(&self) -> bool {
-        self.unreachable.get()
+        self.trouble.borrow().is_some()
+    }
+
+    /// 直近の引き方で引けなかった訳。
+    pub fn notice(&self) -> Option<String> {
+        self.trouble.borrow().clone()
+    }
+
+    /// 答えを候補にする。引けなかったなら訳を覚えて、空を返す。
+    fn answer(&self, response: Response) -> Vec<Candidate> {
+        let (candidates, trouble) = match response {
+            Response::Ok(candidates) => (candidates, None),
+            // 答えは返っている。居ないわけではないので、起こしても意味が
+            // ない。**言われたことをそのまま伝える** (「辞書を取得して
+            // います」など)。
+            Response::Error(reason) => {
+                log::error(&format!("辞書サーバが断りました: {reason}"));
+                (Vec::new(), Some(reason))
+            }
+            Response::Settings { .. } | Response::Done(_) => {
+                log::error("検索に候補ではないものが返りました");
+                (Vec::new(), Some(UNREACHABLE_NOTICE.to_owned()))
+            }
+        };
+        *self.trouble.borrow_mut() = trouble;
+        candidates
     }
 }
 
@@ -69,39 +97,23 @@ impl CandidateSource for ServerSource {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         let request = Request::Search(query.clone());
         match client::ask(&request) {
-            Ok(Response::Ok(candidates)) => {
-                self.unreachable.set(false);
-                return candidates;
-            }
-            Ok(Response::Error(reason)) => {
-                // 答えは返っている。居ないわけではないので、起こしても
-                // 意味がない。
-                log::error(&format!("辞書サーバが断りました: {reason}"));
-                self.unreachable.set(true);
-                return Vec::new();
-            }
-            Ok(Response::Settings { .. } | Response::Done(_)) => {
-                log::error("検索に候補ではないものが返りました");
-                self.unreachable.set(true);
-                return Vec::new();
-            }
+            Ok(response) => return self.answer(response),
             Err(e) => log::write(&format!("辞書サーバが居ません ({e})。起こします")),
         }
 
         // 居なかった。起こして、もう一度だけ尋ねる。
         if !launch::server() {
-            self.unreachable.set(true);
+            *self.trouble.borrow_mut() = Some(UNREACHABLE_NOTICE.to_owned());
             return Vec::new();
         }
         match client::ask(&request) {
-            Ok(Response::Ok(candidates)) => {
+            Ok(response) => {
                 log::write("辞書サーバが起きました");
-                self.unreachable.set(false);
-                candidates
+                self.answer(response)
             }
-            _ => {
+            Err(_) => {
                 log::error("起こしても辞書サーバに繋がりません");
-                self.unreachable.set(true);
+                *self.trouble.borrow_mut() = Some(UNREACHABLE_NOTICE.to_owned());
                 Vec::new()
             }
         }
@@ -129,7 +141,7 @@ impl CandidateSource for ServerSource {
     /// 伝えるのがここの役目**で、伝わらないと「候補が無い」と見分けが
     /// つかず、辞書登録が始まってしまう。
     fn available(&self) -> bool {
-        !self.unreachable.get()
+        self.trouble.borrow().is_none()
     }
 }
 
@@ -141,9 +153,9 @@ impl CandidateSource for ServerSource {
 pub struct SharedSource(Rc<ServerSource>);
 
 impl SharedSource {
-    /// 直近の引き方でサーバに届かなかったか。
-    pub fn was_unreachable(&self) -> bool {
-        self.0.was_unreachable()
+    /// 直近の引き方で引けなかった訳。引けていれば `None`。
+    pub fn notice(&self) -> Option<String> {
+        self.0.notice()
     }
 }
 

@@ -5,8 +5,9 @@
 
 use std::process::ExitCode;
 
-use crystalskk_dict::{MemoryDict, UserDict, encoding};
+use crystalskk_dict::UserDict;
 use crystalskk_ipc::{Request, Response};
+use crystalskk_server::library::{self, Library};
 use crystalskk_server::service::{Next, Service};
 use crystalskk_server::{client, names, paths, pipe};
 
@@ -130,28 +131,12 @@ fn serve() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 辞書を読む。
+/// ユーザー辞書を読み、設定に並べた辞書を用意し始める。
+///
+/// 並べた辞書は裏で取得して読む (ADR-0022)。**待ち受けを先に始める。**
+/// L 辞書の取得には数秒かかり、そのあいだ TIP を待たせられない。
 fn load() -> std::io::Result<Service> {
-    let system = match paths::system_dictionary() {
-        Ok(path) => match std::fs::read(&path) {
-            Ok(bytes) => {
-                let decoded = encoding::decode(&bytes);
-                let (dict, report) = MemoryDict::parse(&decoded.text);
-                eprintln!(
-                    "crystalskk-server: 辞書を読みました: {} 件 ({})",
-                    report.entries, decoded.encoding
-                );
-                dict
-            }
-            Err(e) => {
-                // 辞書が無くても待つ。**あとから置かれることもある**し、
-                // ユーザー辞書だけでも引ける。
-                eprintln!("crystalskk-server: 辞書がありません ({e})");
-                MemoryDict::new()
-            }
-        },
-        Err(e) => return Err(e),
-    };
+    let library = Library::new(paths::dictionary_cache()?, library::fetch_over_http);
 
     let path = paths::user_dictionary()?;
     let user = match UserDict::load(&path) {
@@ -168,7 +153,9 @@ fn load() -> std::io::Result<Service> {
         }
     };
 
-    Ok(Service::new(system, user, paths::settings()?))
+    let mut service = Service::new(library, user, paths::settings()?);
+    service.prepare();
+    Ok(service)
 }
 
 /// 一つだけであることを示す印。

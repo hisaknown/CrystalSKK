@@ -478,7 +478,7 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
   crystalskk-setup uninstall          登録を解除する
   crystalskk-setup uninstall --purge  写した DLL も削除する
   crystalskk-setup status             今の状態を表示する
-  crystalskk-setup dict               辞書を取得して置く (権限は要らない)
+  crystalskk-setup dict               設定に並べた辞書をいま取り直す (権限は要らない)
   crystalskk-setup log <段階>         診断の記録の細かさを決める
                                       off / error / info / trace
 
