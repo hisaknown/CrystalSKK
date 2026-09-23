@@ -1159,7 +1159,7 @@ impl Engine {
             }
             // 出ている補完候補を受け取る。押す前の状態が違うだけで、
             // Tab と同じ操作である。
-            Key::Char(c) if Some(c) == self.take_key() && shows_ghost(&comp) => {
+            Key::Char(c) if Some(c) == self.take_key() && offers_completion(&comp) => {
                 self.take_completion(&mut comp);
                 self.convert_and_commit(comp, out);
             }
@@ -1549,12 +1549,15 @@ fn query_of(comp: &Composing) -> Query {
     }
 }
 
-/// 補完候補を見せている最中か。
-fn shows_ghost(comp: &Composing) -> bool {
+/// 補完候補を出している最中か (まだ選んでいない)。
+///
+/// 出ているなら `.` はそれを受け取る。**未入力の残りが無くても出ている**
+/// ことがある — 打った見出しそのものが辞書にあれば、それが最初の補完
+/// 候補になる (`Konpyu-ta.` → `コンピュータ`)。
+fn offers_completion(comp: &Composing) -> bool {
     comp.completion
         .as_ref()
-        .and_then(Completion::ghost)
-        .is_some()
+        .is_some_and(|completion| completion.chosen.is_none() && !completion.entries.is_empty())
 }
 
 /// 候補選択中に受け取るキーか。[`Engine::would_handle`] の一部。

@@ -359,14 +359,24 @@ impl CandidateSource for Completing {
         self.0
             .iter()
             .map(|(heading, _)| *heading)
-            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .filter(|key| key.starts_with(prefix))
             .take(limit)
             .map(str::to_owned)
             .collect()
     }
 }
 
+/// 打った見出しそのものは辞書に無い。補完候補は長い見出しだけになる。
 fn completing() -> Engine {
+    common::engine(Box::new(Completing(vec![
+        ("かんじ", "漢字"),
+        ("かんじゃ", "患者"),
+        ("かんき", "寒気"),
+    ])))
+}
+
+/// 打った見出しそのもの (かん) も辞書にある。
+fn completing_with_the_typed_word() -> Engine {
     common::engine(Box::new(Completing(vec![
         ("かん", "巻"),
         ("かんじ", "漢字"),
@@ -490,11 +500,51 @@ fn a_period_is_just_a_period_when_nothing_is_offered() {
 #[test]
 fn converting_ignores_the_guess() {
     // 受け取っていない補完候補は、変換の見出し語に入らない。
-    let mut engine = completing();
+    let mut engine = completing_with_the_typed_word();
     typed(&mut engine, "Kann ");
     let view = engine.candidates().expect("変換している");
     assert_eq!(
         view.candidates[0].word, "巻",
         "「かんじ」ではなく「かん」を引く"
     );
+}
+
+#[test]
+fn the_typed_heading_is_offered_first_when_it_is_a_word() {
+    // **打ち終えた語が辞書にあるなら、それがいちばん確かな補完である。**
+    // `Konpyu-ta.` で コンピュータ が引けないのはおかしい。
+    let mut engine = completing_with_the_typed_word();
+    typed(&mut engine, "Kann");
+    let view = engine.completion().expect("補完候補が出ている");
+    assert_eq!(view.current().word, "巻");
+    assert!(
+        engine
+            .preedit()
+            .segments
+            .iter()
+            .all(|s| s.role != Role::Completion),
+        "未入力の残りは無いので、下線の無い文字は出ない"
+    );
+
+    // 残りが無くても、`.` で受け取って確定する。
+    let response = engine.press(Key::Char('.'));
+    assert_eq!(response.commit, "巻");
+}
+
+#[test]
+fn tab_starts_from_the_typed_heading() {
+    let mut engine = completing_with_the_typed_word();
+    assert_eq!(typed(&mut engine, "Kann\t"), "▽かん");
+    assert_eq!(typed(&mut engine, "\t"), "▽かんじ");
+    let view = engine.completion().expect("巡っている");
+    let words: Vec<&str> = view.entries.iter().map(|e| e.word.as_str()).collect();
+    assert_eq!(words, ["巻", "漢字", "患者", "寒気"]);
+}
+
+#[test]
+fn a_period_is_still_a_period_when_nothing_is_offered() {
+    // 打った見出しが辞書に無く、続く見出しも無ければ、`.` はただの句点。
+    let mut engine = completing();
+    let preedit = typed(&mut engine, "Tesuto.");
+    assert!(preedit.ends_with('。'), "{preedit}");
 }

@@ -176,11 +176,12 @@ impl MemoryDict {
 
     /// 前方一致する送りなしの見出しを、**使った順**に最大 `limit` 件返す。
     ///
-    /// 補完はこれを使う (PRD F-11, F-18)。入力中の見出しそのものは返さない。
+    /// 補完はこれを先に使う (PRD F-11, F-18)。**入力中の見出しそのものも
+    /// 返す** — 打ち終えた語が辞書にあるなら、それがいちばん確かな補完で
+    /// ある (ADR-0019)。
     ///
-    /// 静的辞書には使った順が無いので、何も返らない。**補完はユーザー辞書
-    /// から引くものである** — 17 万件の見出しから前方一致を並べても、
-    /// 使う語が先に来る保証がない。CorvusSKK も ddskk もそうしている。
+    /// 静的辞書には使った順が無いので、何も返らない。そちらは
+    /// [`Self::complete`] で辞書順に引く。
     pub fn complete_recent(&self, prefix: &str, limit: usize) -> Vec<&str> {
         if prefix.is_empty() {
             return Vec::new();
@@ -189,14 +190,15 @@ impl MemoryDict {
             .iter()
             .filter(|(okuri_ari, _)| !okuri_ari)
             .map(|(_, key)| key.as_str())
-            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .filter(|key| key.starts_with(prefix))
             .take(limit)
             .collect()
     }
 
     /// 前方一致する送りなしの見出しを、辞書順に最大 `limit` 件返す。
     ///
-    /// 補完 (PRD F-11, F-18) はこれを使う。入力中の見出しそのものは返さない。
+    /// 補完 (PRD F-11, F-18) はこれを使う。**入力中の見出しそのものも返す。**
+    /// 辞書順なので、あれば必ず先頭に来る。
     pub fn complete(&self, prefix: &str, limit: usize) -> Vec<&str> {
         if prefix.is_empty() {
             return Vec::new();
@@ -204,7 +206,6 @@ impl MemoryDict {
         self.okuri_nashi
             .range(prefix.to_owned()..)
             .take_while(|(key, _)| key.starts_with(prefix))
-            .filter(|(key, _)| key.as_str() != prefix)
             .take(limit)
             .map(|(key, _)| key.as_str())
             .collect()
@@ -419,8 +420,8 @@ skk /SKK/
     fn completion_finds_keys_by_prefix() {
         let dict = sample();
         assert_eq!(dict.complete("かん", 10), ["かんじ", "かんじゃ"]);
-        // 入力中の見出しそのものは補完候補にしない。
-        assert_eq!(dict.complete("かんじ", 10), ["かんじゃ"]);
+        // 打ち終えた見出しそのものも返す。辞書順なので先頭に来る。
+        assert_eq!(dict.complete("かんじ", 10), ["かんじ", "かんじゃ"]);
         assert!(dict.complete("", 10).is_empty());
         assert!(dict.complete("ない", 10).is_empty());
     }

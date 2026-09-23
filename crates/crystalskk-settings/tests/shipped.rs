@@ -34,7 +34,7 @@ impl CandidateSource for Dict {
         self.0
             .iter()
             .map(|(heading, _)| *heading)
-            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .filter(|key| key.starts_with(prefix))
             .take(limit)
             .map(str::to_owned)
             .collect()
@@ -47,6 +47,11 @@ fn dict() -> Dict {
         ("かんじゃ", vec!["患者".to_owned()]),
         ("たくさん", (1..=20).map(|n| format!("候補{n}")).collect()),
         ("う゛ぁいおりん", vec!["ヴァイオリン".to_owned()]),
+        ("こんぴゅーた", vec!["コンピュータ".to_owned()]),
+        (
+            "こんぴゅーたういるす",
+            vec!["コンピュータウイルス".to_owned()],
+        ),
     ])
 }
 
@@ -181,4 +186,16 @@ fn vu_is_written_the_way_the_dictionaries_write_it() {
     assert_eq!(press_all(&mut engine, "Vaiorinnq"), "ヴァイオリン");
     let mut engine = configured();
     assert_eq!(press_all(&mut engine, "qvu"), "ヴ");
+}
+
+#[test]
+fn a_fully_typed_word_is_what_the_period_takes() {
+    // 続く見出し (こんぴゅーたういるす) があっても、打ち終えた語が先。
+    let mut engine = configured();
+    assert_eq!(press_all(&mut engine, "Konpyu-ta."), "コンピュータ");
+    let mut engine = configured();
+    press_all(&mut engine, "Konpyu-ta\t");
+    assert_eq!(engine.preedit().display(), "▽こんぴゅーた");
+    let view = engine.completion().expect("巡っている");
+    assert_eq!(view.current().word, "コンピュータ");
 }

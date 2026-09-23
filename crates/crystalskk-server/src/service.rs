@@ -388,13 +388,14 @@ mod tests {
     }
 
     #[test]
-    fn completion_never_offers_what_is_already_typed() {
-        let mut service = service_with("かんじ /漢字/\n");
+    fn completion_offers_what_is_already_typed_first() {
+        // 打ち終えた見出しが辞書にあれば、それが最初の補完候補になる。
+        let mut service = service_with("かんじ /漢字/\nかんじゃ /患者/\n");
         let (response, _) = service.handle(Request::Complete {
             prefix: "かんじ".to_owned(),
             limit: 16,
         });
-        assert!(words(&response).is_empty(), "打ち終えた見出しは出さない");
+        assert_eq!(words(&response), vec!["かんじ", "かんじゃ"]);
     }
 
     #[test]

@@ -36,7 +36,7 @@ impl CandidateSource for Dict {
         self.0
             .iter()
             .map(|(heading, _)| *heading)
-            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .filter(|key| key.starts_with(prefix))
             .take(limit)
             .map(str::to_owned)
             .collect()
@@ -118,9 +118,12 @@ fn tab_still_completes_when_dynamic_completion_is_off() {
         "引いてみて候補があるなら食べる"
     );
     press_all(&mut engine, "\t");
-    assert_eq!(engine.preedit().display(), "▽かんじ");
+    // 打った見出し (かん) が辞書にあるので、まずそれを選ぶ。
+    assert_eq!(engine.preedit().display(), "▽かん");
     let view = engine.completion().expect("巡っている");
     assert!(view.taken);
+    press_all(&mut engine, "\t");
+    assert_eq!(engine.preedit().display(), "▽かんじ");
 }
 
 #[test]
@@ -131,9 +134,10 @@ fn the_minimum_length_decides_when_guessing_starts() {
     engine.configure(options);
 
     press_all(&mut engine, "Kann");
-    assert_eq!(ghost(&engine), None, "二文字ではまだ補完しない");
+    assert!(engine.completion().is_none(), "二文字ではまだ補完しない");
     press_all(&mut engine, "ji");
-    assert_eq!(ghost(&engine).as_deref(), Some("ゃ"), "三文字で補完する");
+    let view = engine.completion().expect("三文字で補完する");
+    assert_eq!(view.current().word, "漢字");
 }
 
 #[test]
@@ -143,7 +147,7 @@ fn the_take_key_can_be_changed() {
     let mut engine = Engine::new(Box::new(Dict::sample()));
     engine.configure(options);
 
-    assert_eq!(press_all(&mut engine, "Kann,"), "漢字");
+    assert_eq!(press_all(&mut engine, "Kanji,"), "漢字");
 }
 
 #[test]
