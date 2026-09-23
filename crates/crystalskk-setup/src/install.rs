@@ -247,6 +247,12 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
         let _ = std::fs::remove_file(directory.join(ICON_NAME));
         // 空になったときだけ片付ける。他のものが入っていれば触らない。
         let _ = std::fs::remove_dir(&directory);
+        // 言語モデル一式は、こちらが置いたものしか入っていない (ADR-0031)。
+        // 辞書サーバは先に止めてあるので、握られてもいない。
+        let _ = std::fs::remove_dir_all(crystalskk_server::paths::ranker_dir(&directory));
+        if let Some(parent) = directory.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 
     profile.and(class).map_err(|e| to_io("登録の解除", e))
