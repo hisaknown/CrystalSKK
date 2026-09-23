@@ -24,6 +24,9 @@
 //! `Info` までは「めったに起きないこと」だけなので、常用しても入力の速さに
 //! 響かない。打鍵ごとの記録が要るときだけ `Trace` へ上げる。
 //!
+//! 常用する以上は際限なく伸びては困るので、記録を始めるときに大きさを見て、
+//! 育ちすぎていれば一代だけ退ける。
+//!
 //! # 「どのアプリの、いつの話か」を残す
 //!
 //! 一つのファイルに、あらゆるアプリの記録が混ざって流れ込む。番号だけでは
@@ -167,6 +170,7 @@ fn destination() -> Option<&'static (Level, PathBuf)> {
             let directory = PathBuf::from(base).join("CrystalSKK");
             std::fs::create_dir_all(&directory).ok()?;
             let path = directory.join("tip.log");
+            rotate_if_large(&path);
             announce(&path, level);
             Some((level, path))
         })
@@ -205,6 +209,29 @@ fn marker() -> Option<PathBuf> {
     let directory = PathBuf::from(module).parent()?.to_path_buf();
     Some(directory.join(MARKER_NAME))
 }
+
+/// 大きくなりすぎていたら、一代だけ退けて新しく始める。
+///
+/// `info` は常用してよい段階だが、**際限なく伸びてよいわけではない**。
+/// 誰も見ないまま何ヶ月も肥えるのは、利用者の領域に置くものとして筋が悪い。
+///
+/// 見るのは記録を始めるときだけにする。書き込みのたびに大きさを調べれば、
+/// せっかく軽くした意味がなくなる。
+fn rotate_if_large(path: &std::path::Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= MAX_BYTES {
+        return;
+    }
+    // 一代だけ残す。二代目は落とす。**古い記録より新しい記録のほうが
+    // 役に立つ。**
+    let retired = path.with_extension("log.old");
+    let _ = std::fs::rename(path, retired);
+}
+
+/// これを超えたら退ける。
+const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 記録を始めたことを、どのアプリの中かと共に書く。
 ///
