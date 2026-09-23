@@ -26,16 +26,16 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
     CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
     EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps, GetSysColor, GetTextExtentPoint32W, HDC,
-    HFONT, LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SYS_COLOR_INDEX, SelectObject,
+    SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetSystemMetrics,
-    GetWindowLongPtrW, HWND_TOPMOST, NONCLIENTMETRICSW, RegisterClassExW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETNONCLIENTMETRICS, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
+    GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, NONCLIENTMETRICSW, RegisterClassExW,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
+    WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -119,6 +119,12 @@ impl CandidateWindow {
 
         let (width, height) = measure(page);
         let (x, y) = place(anchor, width, height);
+        // 中身が変われば描き直す。大きさが同じままでも中身は違いうるので、
+        // 動かしただけで描き直されるとは限らない。
+        // SAFETY: 窓は自分で作ったもの。
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
             let _ = SetWindowPos(
@@ -219,6 +225,11 @@ fn register_class() -> Option<()> {
     let ok = *REGISTERED.get_or_init(|| {
         let class = WNDCLASSEXW {
             cbSize: u32::try_from(std::mem::size_of::<WNDCLASSEXW>()).unwrap_or(0),
+            // 大きさが変わったら全部描き直す。これが無いと、**縮んだとき
+            // 古い絵がそのまま残る**。Windows は新たに現れた部分しか
+            // 描き直さないため、七件の一覧から五件の一覧へ移ると、
+            // 前のページの五件が居座って見える。
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
             lpszClassName: CLASS_NAME,
             hInstance: crate::module().into(),
