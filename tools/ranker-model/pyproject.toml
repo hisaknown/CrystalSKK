@@ -1,0 +1,28 @@
+[project]
+name = "ranker-model"
+version = "0.1.0"
+description = "変換の候補を並べる言語モデルを、配る形に作る (ADR-0031)。"
+requires-python = ">=3.12,<3.13"
+# llama.cpp (b11124) の requirements-convert_hf_to_gguf.txt に揃える。
+dependencies = [
+    "torch==2.11.0",
+    "numpy~=2.2.6",
+    "sentencepiece>=0.1.98,<0.3.0",
+    "transformers==4.57.6",
+    "protobuf>=4.21.0,<5.0.0",
+    "safetensors",
+    "huggingface_hub",
+    "pyyaml",
+    "requests",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
