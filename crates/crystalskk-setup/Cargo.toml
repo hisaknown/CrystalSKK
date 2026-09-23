@@ -15,9 +15,13 @@ path = "src/main.rs"
 crystalskk-dict = { path = "../crystalskk-dict" }
 crystalskk-fetch = { path = "../crystalskk-fetch" }
 crystalskk-ipc = { path = "../crystalskk-ipc" }
+crystalskk-lm = { path = "../crystalskk-lm" }
 crystalskk-server = { path = "../crystalskk-server" }
 crystalskk-settings = { path = "../crystalskk-settings" }
 crystalskk-tip = { path = "../crystalskk-tip" }
+sha2 = "0.10"
+# 取り出すのは llama.cpp の配布物だけで、その圧縮は deflate。C は使わない。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"

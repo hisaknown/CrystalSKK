@@ -24,6 +24,7 @@ mod access;
 mod dictionary;
 mod elevate;
 mod install;
+mod ranker;
 mod report;
 mod server;
 mod settings;
@@ -74,7 +75,11 @@ fn run(arguments: Vec<String>) -> ExitCode {
 
     let report = Report::new(parsed.report.as_deref());
     match parsed.command {
-        Command::Install => do_install(parsed.dll.as_deref(), &report),
+        Command::Install => do_install(
+            parsed.dll.as_deref(),
+            parsed.ranker_from.as_deref(),
+            &report,
+        ),
         Command::Uninstall => do_uninstall(parsed.purge, &report),
         Command::Log(level) => do_log(level, &report),
         Command::Status | Command::Dict => unreachable!("上で処理済み"),
@@ -128,7 +133,7 @@ fn elevated_pass(arguments: &[String]) -> ExitCode {
     }
 }
 
-fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
+fn do_install(source: Option<&Path>, ranker_from: Option<&Path>, report: &Report) -> ExitCode {
     let source = match source.map(PathBuf::from).or_else(default_source) {
         Some(path) => path,
         None => {
@@ -168,7 +173,7 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
                 report.say("古い利用者ごとの登録を消しました。\n");
                 report.say("そちらが優先されるため、残っていると古い DLL が使われます。\n");
             }
-            install_server(&installed.dll, report);
+            install_server(&installed.dll, ranker_from, report);
 
             report.say("\n");
             report.say("設定 → 時刻と言語 → 言語と地域 → 日本語 → 言語のオプション →\n");
@@ -190,7 +195,7 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
 ///
 /// **辞書を持っているのはサーバだけ** (ADR-0016) なので、これが居ないと
 /// 変換が一件も引けない。入れ替えたらその場で起こす。
-fn install_server(dll: &Path, report: &Report) {
+fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
     let Some(directory) = dll.parent() else {
         return;
     };
@@ -219,6 +224,14 @@ fn install_server(dll: &Path, report: &Report) {
     if let Err(e) = server::register_autostart(directory) {
         report.say(&format!("自動起動を登録できません: {e}\n"));
     }
+
+    // 言語モデル一式は、辞書サーバが止まっているうちに入れ替える。
+    // 動いているサーバは DLL とモデルを握っている。
+    ranker::install(
+        &crystalskk_server::paths::ranker_dir(directory),
+        ranker_from,
+        report,
+    );
 
     match server::start(directory) {
         Ok(()) => report.say("辞書サーバを起こしました。\n"),
@@ -402,6 +415,8 @@ struct Parsed {
     no_elevate: bool,
     /// 伝えたいことを書き出す先。昇格した側に渡される。
     report: Option<PathBuf>,
+    /// 言語モデル一式 (`build.py` の出力) のあるフォルダ。
+    ranker_from: Option<PathBuf>,
 }
 
 /// 起動時の指定を読む係。
@@ -431,6 +446,14 @@ impl Options {
                 }
                 "--purge" => parsed.purge = true,
                 "--no-elevate" => parsed.no_elevate = true,
+                "--ranker-from" => {
+                    let path = rest
+                        .next()
+                        .ok_or("--ranker-from に言語モデル一式のフォルダが要ります")?;
+                    // 報告にはどこから写したかを出す。相対のままだと分かりにくい。
+                    let path = std::path::absolute(path).map_err(|e| format!("{path}: {e}"))?;
+                    parsed.ranker_from = Some(path);
+                }
                 "--report" => {
                     let path = rest.next().ok_or("--report に書き出す先が要ります")?;
                     parsed.report = Some(PathBuf::from(path));
@@ -452,6 +475,9 @@ impl Options {
         };
         if parsed.purge && command != Command::Uninstall {
             return Err("--purge は uninstall にだけ使えます".to_owned());
+        }
+        if parsed.ranker_from.is_some() && command != Command::Install {
+            return Err("--ranker-from は install にだけ使えます".to_owned());
         }
         if parsed.dll.is_some() && command != Command::Install {
             return Err("DLL を渡せるのは install だけです".to_owned());
@@ -475,6 +501,8 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
 
 使い方:
   crystalskk-setup install [DLL]      導入する (DLL 省略時はビルド成果物を探す)
+      --ranker-from <フォルダ>        候補を並べる言語モデル一式の場所
+                                      (省略時は target/ranker-model/out を探す)
   crystalskk-setup uninstall          登録を解除する
   crystalskk-setup uninstall --purge  写した DLL も削除する
   crystalskk-setup status             今の状態を表示する
