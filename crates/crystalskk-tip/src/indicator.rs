@@ -20,15 +20,15 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
-    GetWindowLongPtrW, HWND_TOPMOST, KillTimer, LWA_ALPHA, RegisterClassExW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, KillTimer, LWA_ALPHA, RegisterClassExW,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
+    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::candwin::scaled;
+use crate::dpi;
 use crate::guard::guard;
 use crate::theme::Palette;
 use crate::{icon, log};
@@ -55,6 +55,8 @@ pub struct ModeWindow {
     shown: Cell<Option<Option<InputMode>>>,
     /// 描く色。出すときに受け取る。
     palette: Cell<Option<Palette>>,
+    /// 描く拡大率。出すときに、出すモニターで決める。
+    dpi: Cell<u32>,
 }
 
 impl ModeWindow {
@@ -88,8 +90,14 @@ impl ModeWindow {
             }
         }
 
-        let side = scaled(GLYPH) + scaled(PADDING) * 2;
-        let (x, y) = place(caret, side, side, work_area(caret), scaled(GAP));
+        // 窓を出すモニターの拡大率で描く (`crate::dpi`)。
+        let dpi = dpi::at(POINT {
+            x: caret.left,
+            y: caret.bottom,
+        });
+        self.dpi.set(dpi);
+        let side = side(dpi);
+        let (x, y) = place(caret, side, side, work_area(caret), dpi::scale(GAP, dpi));
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
@@ -97,6 +105,35 @@ impl ModeWindow {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             // 出し直すたびに時計を掛け直す。
             SetTimer(Some(hwnd), TIMER, duration_ms, None);
+        }
+    }
+
+    /// 窓が出ているか。
+    pub fn is_visible(&self) -> bool {
+        let hwnd = *self.hwnd.borrow();
+        // SAFETY: 尋ねるだけ。
+        !hwnd.is_invalid() && unsafe { IsWindowVisible(hwnd) }.as_bool()
+    }
+
+    /// 絵も消える時刻もそのままに、`caret` のそばへ動かす。
+    pub fn follow(&self, caret: RECT) {
+        if !self.is_visible() {
+            return;
+        }
+        let hwnd = *self.hwnd.borrow();
+        let dpi = dpi::at(POINT {
+            x: caret.left,
+            y: caret.bottom,
+        });
+        let rescaled = self.dpi.replace(dpi) != dpi;
+        let side = side(dpi);
+        let (x, y) = place(caret, side, side, work_area(caret), dpi::scale(GAP, dpi));
+        // SAFETY: 窓は自分で作ったもの。
+        unsafe {
+            if rescaled {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
+            }
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, side, side, SWP_NOACTIVATE);
         }
     }
 
@@ -180,6 +217,11 @@ impl Drop for ModeWindow {
     }
 }
 
+/// 窓の一辺。絵と、そのまわりの余白。
+fn side(dpi: u32) -> i32 {
+    dpi::scale(GLYPH, dpi) + dpi::scale(PADDING, dpi) * 2
+}
+
 /// 置き場所を決める。
 ///
 /// カーソルの真下、左端を揃える。作業領域 (タスクバーを除いた画面) から
@@ -222,7 +264,7 @@ fn work_area(caret: RECT) -> RECT {
 }
 
 /// 描く。地、縁、絵の色は `palette` に従う。
-fn pixels(mode: Option<InputMode>, side: i32, palette: Palette) -> Vec<u32> {
+fn pixels(mode: Option<InputMode>, side: i32, palette: Palette, dpi: u32) -> Vec<u32> {
     let Palette {
         background,
         text: ink,
@@ -239,7 +281,7 @@ fn pixels(mode: Option<InputMode>, side: i32, palette: Palette) -> Vec<u32> {
         out[i * side_u + side_u - 1] = border;
     }
 
-    let glyph = u32::try_from(scaled(GLYPH)).unwrap_or(24);
+    let glyph = u32::try_from(side - 2 * dpi::scale(PADDING, dpi)).unwrap_or(16);
     let (size, coverage) = icon::mode_coverage(mode, glyph);
     let size = size as usize;
     // 選ばれた絵が大きめでも、真ん中に置いてはみ出た分は切る。
@@ -321,11 +363,12 @@ unsafe extern "system" fn window_proc(
                     let hdc = BeginPaint(hwnd, &mut ps);
                     let owner =
                         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ModeWindow).as_ref();
-                    if let Some((mode, palette)) =
-                        owner.and_then(|o| Some((o.shown.get()?, o.palette.get()?)))
+                    if let Some((mode, palette, o_dpi)) =
+                        owner.and_then(|o| Some((o.shown.get()?, o.palette.get()?, o.dpi.get())))
                     {
-                        let side = scaled(GLYPH) + scaled(PADDING) * 2;
-                        let drawn = pixels(mode, side, palette);
+                        let dpi = o_dpi;
+                        let side = side(dpi);
+                        let drawn = pixels(mode, side, palette, dpi);
                         let info = BITMAPINFO {
                             bmiHeader: BITMAPINFOHEADER {
                                 biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
@@ -427,7 +470,7 @@ mod tests {
             selected_text: 0xFF_FF_FF,
         };
         let side = 20;
-        let drawn = pixels(Some(InputMode::Hiragana), side, palette);
+        let drawn = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE);
         assert_eq!(drawn.len(), (side * side) as usize);
         assert_eq!(drawn[0], palette.border, "縁");
         assert_eq!(drawn[(side + 2) as usize], palette.background, "地");

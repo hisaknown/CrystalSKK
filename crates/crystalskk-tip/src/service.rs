@@ -24,6 +24,10 @@ use windows::Win32::UI::TextServices::{
     ITfSource, ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
     ITfTextInputProcessorEx_Impl, ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl,
 };
+use windows::Win32::UI::TextServices::{
+    ITfContextView, ITfTextLayoutSink, ITfTextLayoutSink_Impl, TF_LC_CHANGE, TF_LC_DESTROY,
+    TfLayoutCode,
+};
 use windows::core::{
     BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
 };
@@ -73,6 +77,9 @@ struct Activation {
     /// タスクバーの明るさの変化を聞く。落とせば聞くのをやめる。
     #[allow(dead_code, reason = "持っていること自体が役目")]
     theme_watcher: Option<crate::theme::Watcher>,
+    /// 入力先の組版の変化を聞く受け口 (自分自身)。小窓を出すたびに、
+    /// その入力先へ差し出す (ADR-0028)。
+    layout_sink: ITfTextLayoutSink,
 }
 
 /// CrystalSKK の TIP。
@@ -83,7 +90,8 @@ struct Activation {
     ITfCompositionSink,
     ITfCompartmentEventSink,
     ITfDisplayAttributeProvider,
-    ITfThreadMgrEventSink
+    ITfThreadMgrEventSink,
+    ITfTextLayoutSink
 )]
 pub struct TextService {
     /// 有効化されている間だけ中身が入る。
@@ -133,6 +141,11 @@ pub struct TextService {
     /// **アプリが自分で描くと言うことがある。** そのときは自前の窓を
     /// 出さず、中身だけを渡す。
     announced: RefCell<Option<Announced>>,
+    /// 組版の変化を聞いている入力先と、その受付番号 (ADR-0028)。
+    ///
+    /// 小窓を出している入力先を聞く。アプリの画面が動いたら、窓を
+    /// 付いていかせる。
+    layout: RefCell<Option<(ITfContext, u32)>>,
 }
 
 impl Default for TextService {
@@ -159,6 +172,7 @@ impl TextService {
             settings_problem: RefCell::new(None),
             settings_asked: std::cell::Cell::new(None),
             announced: RefCell::new(None),
+            layout: RefCell::new(None),
         }
     }
 
@@ -328,6 +342,55 @@ impl TextService {
         };
         self.candidates
             .show(&content, anchor, *self.owner.borrow(), self.palette());
+        let context = self.composition.borrow().as_ref().map(|(c, _)| c.clone());
+        if let Some(context) = context {
+            self.watch_layout(&context);
+        }
+    }
+
+    /// `context` の組版の変化を聞く。すでに聞いていれば何もしない。
+    ///
+    /// 聞けるのは一度に一つの入力先だけにする。小窓は一つの入力先の
+    /// そばにしか出ないからである。
+    fn watch_layout(&self, context: &ITfContext) {
+        if self
+            .layout
+            .borrow()
+            .as_ref()
+            .is_some_and(|(watched, _)| watched == context)
+        {
+            return;
+        }
+        self.unwatch_layout();
+        let Some(sink) = self
+            .activation
+            .borrow()
+            .as_ref()
+            .map(|a| a.layout_sink.clone())
+        else {
+            return;
+        };
+        let Ok(source) = context.cast::<ITfSource>() else {
+            return;
+        };
+        // SAFETY: 受け口の種類は定数、受け口は外すまで生かす。
+        match unsafe { source.AdviseSink(&ITfTextLayoutSink::IID, &sink) } {
+            Ok(cookie) => *self.layout.borrow_mut() = Some((context.clone(), cookie)),
+            Err(e) => log::trace(&format!("組版の変化を聞けない: {}", e.message())),
+        }
+    }
+
+    /// 組版の変化を聞くのをやめる。
+    fn unwatch_layout(&self) {
+        let Some((context, cookie)) = self.layout.borrow_mut().take() else {
+            return;
+        };
+        if let Ok(source) = context.cast::<ITfSource>() {
+            // SAFETY: 受付番号は差し出したときに受け取ったもの。
+            unsafe {
+                let _ = source.UnadviseSink(cookie);
+            }
+        }
     }
 
     /// 候補一覧をシステムへ差し出す。返るのは自前の窓を出してよいか。
@@ -421,6 +484,7 @@ impl TextService {
         let mode = compartment::is_open(&thread_manager).then(|| self.engine.borrow().mode());
         let window = Rc::clone(&self.mode_window);
         let palette = self.palette();
+        self.watch_layout(&context);
         edit::caret(&context, client_id, move |caret, owner| {
             window.show(mode, caret, owner, settings.duration_ms, palette);
         });
@@ -685,6 +749,7 @@ impl TextService {
     }
 
     fn deactivate(&self) -> Result<()> {
+        self.unwatch_layout();
         self.withdraw_list();
         self.drop_composition();
         self.candidates.close();
@@ -772,6 +837,7 @@ impl TextService_Impl {
 
         // 入力先 (文書) の焦点の変化を知らせてもらう。入力モードを
         // カーソルのそばに出すのに使う (ADR-0025)。
+        let layout_sink: ITfTextLayoutSink = self.to_interface();
         let thread_events: ITfThreadMgrEventSink = self.to_interface();
         let thread_events_cookie = thread_manager.cast::<ITfSource>().ok().and_then(|source| {
             // SAFETY: 受け口の種類は定数、受け口は無効化まで生かす。
@@ -790,6 +856,7 @@ impl TextService_Impl {
             open_close_cookie,
             thread_events_cookie,
             theme_watcher,
+            layout_sink,
         });
 
         // 見え方の番号を取る。取れなくても入力は続くので、記録だけする。
@@ -1035,6 +1102,65 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
     }
 }
 
+impl ITfTextLayoutSink_Impl for TextService_Impl {
+    /// 入力先の組版が変わった (ADR-0028)。
+    ///
+    /// アプリの画面が動けば、未確定の文字列やカーソルも動く。**打鍵の
+    /// ときに尋ねた位置は古くなる。** ブラウザでは、打鍵の直後にはまだ
+    /// 組版が済んでおらず、済んでから知らせが来ることが多い。知らせが
+    /// 来たら位置を尋ね直し、出ている窓を付いていかせる。
+    fn OnLayoutChange(
+        &self,
+        pic: Ref<ITfContext>,
+        lcode: TfLayoutCode,
+        _pview: Ref<ITfContextView>,
+    ) -> Result<()> {
+        guard("OnLayoutChange", || {
+            let Some(context) = pic.as_ref() else {
+                return Ok(());
+            };
+            if lcode == TF_LC_DESTROY {
+                // 入力先の画面が無くなった。そばに出していた窓も要らない。
+                self.this.candidates.hide();
+                self.this.mode_window.hide();
+                self.this.unwatch_layout();
+                return Ok(());
+            }
+            if lcode != TF_LC_CHANGE {
+                return Ok(());
+            }
+            let Some(client_id) = self.this.client_id() else {
+                return Ok(());
+            };
+            let candidates = self.this.candidates.is_visible();
+            let mode = self.this.mode_window.is_visible();
+            if !candidates && !mode {
+                self.this.unwatch_layout();
+                return Ok(());
+            }
+            let composition = self
+                .this
+                .composition
+                .borrow()
+                .as_ref()
+                .filter(|(c, _)| c == context)
+                .map(|(_, c)| c.clone());
+            if candidates && let Some(composition) = composition {
+                let service = self.to_object();
+                edit::composition_extent(context, client_id, composition, move |rect| {
+                    *service.anchor.borrow_mut() = Some(rect);
+                    service.candidates.follow(rect);
+                });
+            }
+            if mode {
+                let window = Rc::clone(&self.this.mode_window);
+                edit::caret(context, client_id, move |caret, _| window.follow(caret));
+            }
+            Ok(())
+        })
+    }
+}
+
 impl ITfThreadMgrEventSink_Impl for TextService_Impl {
     fn OnInitDocumentMgr(&self, _pdim: Ref<ITfDocumentMgr>) -> Result<()> {
         Ok(())
@@ -1055,6 +1181,7 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
     ) -> Result<()> {
         guard("ThreadMgr::OnSetFocus", || {
             self.this.mode_window.hide();
+            self.this.unwatch_layout();
             let Some(document) = pdimfocus.as_ref() else {
                 return Ok(());
             };

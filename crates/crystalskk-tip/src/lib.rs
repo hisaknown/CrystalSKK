@@ -32,6 +32,7 @@ pub mod compartment;
 pub mod dialog;
 pub mod dict;
 pub mod display;
+pub mod dpi;
 pub mod edit;
 pub mod factory;
 pub mod guard;

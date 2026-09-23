@@ -219,7 +219,33 @@ pub fn caret(
     client_id: u32,
     then: impl FnOnce(RECT, Option<HWND>) + 'static,
 ) {
-    let session = ComObject::new(Caret {
+    read(context, client_id, move |context, ec| {
+        if let Some(rect) = caret_extent(context, ec) {
+            then(rect, owner_window(context));
+        }
+    });
+}
+
+/// 未確定の文字列が画面のどこにあるかを尋ね直し、分かったら `then` に渡す。
+///
+/// アプリの画面が動いたとき (スクロール、窓の移動、遅れて済んだ組版) に、
+/// 候補の窓を付いていかせるのに使う。呼び返しの時期は [`caret`] と同じ。
+pub fn composition_extent(
+    context: &ITfContext,
+    client_id: u32,
+    composition: ITfComposition,
+    then: impl FnOnce(RECT) + 'static,
+) {
+    read(context, client_id, move |context, ec| {
+        if let Some(rect) = text_extent(context, ec, &composition) {
+            then(rect);
+        }
+    });
+}
+
+/// 読むだけのセッションを頼み、編集権が来たら `then` を呼ぶ。
+fn read(context: &ITfContext, client_id: u32, then: impl FnOnce(&ITfContext, u32) + 'static) {
+    let session = ComObject::new(Read {
         context: context.clone(),
         then: RefCell::new(Some(Box::new(then))),
     });
@@ -229,34 +255,31 @@ pub fn caret(
         context.RequestEditSession(client_id, &requested, TF_ES_ASYNCDONTCARE | TF_ES_READ)
     };
     if let Err(e) = requested {
-        log::trace(&format!("カーソルの位置を尋ねられない: {}", e.message()));
+        log::trace(&format!("位置を尋ねられない: {}", e.message()));
     }
 }
 
-/// カーソルの位置が分かったあとにすること。位置と、入力先の窓を受け取る。
-type AfterCaret = Box<dyn FnOnce(RECT, Option<HWND>)>;
+/// 編集権が来たあとにすること。文脈と編集権を受け取る。
+type AfterRead = Box<dyn FnOnce(&ITfContext, u32)>;
 
-/// カーソルの位置を尋ねるセッション。
+/// 読むだけのセッション。
 #[implement(ITfEditSession)]
-struct Caret {
+struct Read {
     context: ITfContext,
-    then: RefCell<Option<AfterCaret>>,
+    then: RefCell<Option<AfterRead>>,
 }
 
-impl std::fmt::Debug for Caret {
+impl std::fmt::Debug for Read {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Caret").finish_non_exhaustive()
+        f.debug_struct("Read").finish_non_exhaustive()
     }
 }
 
-impl ITfEditSession_Impl for Caret_Impl {
+impl ITfEditSession_Impl for Read_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
         guard("DoEditSession", || {
-            let Some(then) = self.this.then.borrow_mut().take() else {
-                return Ok(());
-            };
-            if let Some(rect) = caret_extent(&self.this.context, ec) {
-                then(rect, owner_window(&self.this.context));
+            if let Some(then) = self.this.then.borrow_mut().take() {
+                then(&self.this.context, ec);
             }
             Ok(())
         })

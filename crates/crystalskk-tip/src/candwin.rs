@@ -20,32 +20,33 @@
 //! (`WS_EX_NOACTIVATE`)。奪うと、打っている最中にアプリからカーソルが
 //! 消える。
 //!
-//! # 絵柄は仮である
+//! # 描き方
 //!
-//! 文字と枠を素朴に描くだけで、DPI とシステム色には従うが、暗い配色や
-//! 注釈にはまだ対応していない。差し替える前提で、描き方は `paint` の
-//! 一箇所に閉じてある。
+//! 文字と枠を素朴に描く。色は設定に従い、明るい組と暗い組をアプリの明るさで
+//! 選ぶ (ADR-0026)。大きさは窓を出すモニターの拡大率に従う ([`crate::dpi`])。
+//! 候補の注釈は本文の右に薄く添える (ADR-0027)。描き方は `paint` の一箇所に
+//! 閉じてある。
 
 use std::cell::RefCell;
-use std::ffi::c_void;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint,
-    FillRect, FrameRect, GetDC, GetDeviceCaps, GetTextExtentPoint32W, HDC, HFONT, InvalidateRect,
-    LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, FillRect,
+    FrameRect, GetDC, GetTextExtentPoint32W, HDC, InvalidateRect, PAINTSTRUCT, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
-    GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, NONCLIENTMETRICSW,
+    GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
     RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
-    WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
+use crate::dpi;
 use crate::guard::guard;
 use crate::log;
 use crate::theme::Palette;
@@ -267,9 +268,15 @@ impl CandidateWindow {
 
         // 描く中身を窓に預ける。描画はいつ来るか分からないので、
         // 窓自身が持っていなければならない。
+        // 窓を出すモニターの拡大率で描く (`crate::dpi`)。
+        let dpi = dpi::at(POINT {
+            x: anchor.left,
+            y: anchor.bottom,
+        });
         let stored = Box::into_raw(Box::new(Painted {
             content: content.clone(),
             palette,
+            dpi,
         }));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
@@ -279,7 +286,7 @@ impl CandidateWindow {
             }
         }
 
-        let (width, height) = measure(content);
+        let (width, height) = measure(content, dpi);
         let (x, y) = place(anchor, width, height);
         // 中身が変われば描き直す。大きさが同じままでも中身は違いうるので、
         // 動かしただけで描き直されるとは限らない。
@@ -300,6 +307,30 @@ impl CandidateWindow {
             );
             // 焦点は奪わない。打っている最中にカーソルが消えてはならない。
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+
+    /// 窓が出ているか。
+    pub fn is_visible(&self) -> bool {
+        let hwnd = *self.hwnd.borrow();
+        // SAFETY: 尋ねるだけ。
+        !hwnd.is_invalid() && unsafe { IsWindowVisible(hwnd) }.as_bool()
+    }
+
+    /// 中身はそのままに、`anchor` のそばへ動かす。出ていなければ何もしない。
+    ///
+    /// 動いた先のモニターの拡大率が違えば、その大きさで描き直す。
+    pub fn follow(&self, anchor: RECT) {
+        if !self.is_visible() {
+            return;
+        }
+        let hwnd = *self.hwnd.borrow();
+        // SAFETY: 預けてあるのは `show` で作った箱で、窓があるあいだ生きている。
+        let painted =
+            unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Painted).as_ref() }
+                .map(|painted| (painted.content.clone(), painted.palette));
+        if let Some((content, palette)) = painted {
+            self.show(&content, anchor, None, palette);
         }
     }
 
@@ -454,7 +485,7 @@ unsafe extern "system" fn window_proc(
                     let hdc = BeginPaint(hwnd, &mut ps);
                     let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Painted;
                     if let Some(painted) = stored.as_ref() {
-                        paint(hdc, &painted.content, painted.palette);
+                        paint(hdc, &painted.content, painted.palette, painted.dpi);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -482,13 +513,14 @@ unsafe extern "system" fn window_proc(
 /// # Safety
 ///
 /// `hdc` が描画中のものであること。
-unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
+unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32) {
     // SAFETY: 呼び出し側の約束による。作ったものはこの関数の中で片付ける。
     unsafe {
-        let font = ui_font();
+        let font = dpi::message_font(dpi);
+        let pad = dpi::scale(PADDING, dpi);
         let previous = font.map(|f| SelectObject(hdc, f.into()));
 
-        let (width, height) = measure(content);
+        let (width, height) = measure(content, dpi);
         let area = RECT {
             left: 0,
             top: 0,
@@ -517,10 +549,10 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
                 .map(|line| line.text)
                 .unwrap_or_default();
             let mut rect = RECT {
-                left: PADDING,
-                top: PADDING,
-                right: width - PADDING,
-                bottom: height - PADDING,
+                left: pad,
+                top: pad,
+                right: width - pad,
+                bottom: height - pad,
             };
             let mut wide: Vec<u16> = text.encode_utf16().collect();
             DrawTextW(
@@ -530,14 +562,14 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
                 DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
         } else {
-            let line_height = line_height(hdc);
+            let line_height = line_height(hdc, dpi);
             let highlight = content.highlight();
             for (index, line) in content.lines().iter().enumerate() {
-                let top = PADDING + line_height * i32::try_from(index).unwrap_or(0);
+                let top = pad + line_height * i32::try_from(index).unwrap_or(0);
                 let rect = RECT {
-                    left: PADDING,
+                    left: pad,
                     top,
-                    right: width - PADDING,
+                    right: width - pad,
                     bottom: top + line_height,
                 };
 
@@ -562,7 +594,7 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
                 } else {
                     (palette.text, palette.background)
                 };
-                draw_line(hdc, line, rect, ink, ground);
+                draw_line(hdc, line, rect, ink, ground, dpi);
             }
         }
 
@@ -581,7 +613,7 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
 /// # Safety
 ///
 /// `hdc` に書体が選ばれていること。
-unsafe fn draw_line(hdc: HDC, line: &Line, rect: RECT, ink: u32, ground: u32) {
+unsafe fn draw_line(hdc: HDC, line: &Line, rect: RECT, ink: u32, ground: u32, dpi: u32) {
     // SAFETY: 呼び出し側の約束による。
     unsafe {
         SetTextColor(hdc, colorref(ink));
@@ -597,10 +629,10 @@ unsafe fn draw_line(hdc: HDC, line: &Line, rect: RECT, ink: u32, ground: u32) {
         let Some(note) = &line.note else {
             return;
         };
-        let left = rect.left + text_width(hdc, &line.text) + scaled(NOTE_GAP);
+        let left = rect.left + text_width(hdc, &line.text) + dpi::scale(NOTE_GAP, dpi);
         let mut area = RECT {
             left,
-            right: (left + scaled(NOTE_WIDTH)).min(rect.right),
+            right: (left + dpi::scale(NOTE_WIDTH, dpi)).min(rect.right),
             ..rect
         };
         SetTextColor(hdc, colorref(mix(ink, ground)));
@@ -649,6 +681,8 @@ const WRAP_WIDTH: i32 = 360;
 struct Painted {
     content: Content,
     palette: Palette,
+    /// 描く拡大率。出すときに、出すモニターで決める。
+    dpi: u32,
 }
 
 /// `0xRRGGBB` を `COLORREF` (`0x00BBGGRR`) にする。
@@ -657,11 +691,11 @@ fn colorref(rgb: u32) -> COLORREF {
 }
 
 /// 窓の大きさを測る。
-fn measure(content: &Content) -> (i32, i32) {
+fn measure(content: &Content, dpi: u32) -> (i32, i32) {
     // SAFETY: 画面の DC を借りて測り、すぐ返す。
     unsafe {
         let hdc = GetDC(None);
-        let font = ui_font();
+        let font = dpi::message_font(dpi);
         let previous = font.map(|f| SelectObject(hdc, f.into()));
 
         let measured = if content.wraps() {
@@ -676,7 +710,7 @@ fn measure(content: &Content) -> (i32, i32) {
             let mut rect = RECT {
                 left: 0,
                 top: 0,
-                right: scaled(WRAP_WIDTH),
+                right: dpi::scale(WRAP_WIDTH, dpi),
                 bottom: 0,
             };
             DrawTextW(
@@ -687,13 +721,14 @@ fn measure(content: &Content) -> (i32, i32) {
             );
             (rect.right - rect.left, rect.bottom - rect.top)
         } else {
-            let line_height = line_height(hdc);
+            let line_height = line_height(hdc, dpi);
             let lines = content.lines();
             let widest = lines
                 .iter()
                 .map(|line| {
                     let note = line.note.as_deref().map_or(0, |note| {
-                        scaled(NOTE_GAP) + text_width(hdc, note).min(scaled(NOTE_WIDTH))
+                        dpi::scale(NOTE_GAP, dpi)
+                            + text_width(hdc, note).min(dpi::scale(NOTE_WIDTH, dpi))
                     });
                     text_width(hdc, &line.text) + note
                 })
@@ -709,7 +744,10 @@ fn measure(content: &Content) -> (i32, i32) {
         }
         ReleaseDC(None, hdc);
 
-        (measured.0 + PADDING * 2, measured.1 + PADDING * 2)
+        (
+            measured.0 + dpi::scale(PADDING, dpi) * 2,
+            measured.1 + dpi::scale(PADDING, dpi) * 2,
+        )
     }
 }
 
@@ -718,15 +756,15 @@ fn measure(content: &Content) -> (i32, i32) {
 /// # Safety
 ///
 /// `hdc` に測りたい書体が選ばれていること。
-unsafe fn line_height(hdc: HDC) -> i32 {
+unsafe fn line_height(hdc: HDC, dpi: u32) -> i32 {
     // SAFETY: 呼び出し側の約束による。
     unsafe {
         let sample: Vec<u16> = "あA".encode_utf16().collect();
         let mut size = SIZE::default();
         if GetTextExtentPoint32W(hdc, &sample, &mut size).as_bool() {
-            size.cy + scaled(LINE_GAP)
+            size.cy + dpi::scale(LINE_GAP, dpi)
         } else {
-            scaled(FALLBACK_LINE_HEIGHT)
+            dpi::scale(FALLBACK_LINE_HEIGHT, dpi)
         }
     }
 }
@@ -764,48 +802,6 @@ fn place(anchor: RECT, width: i32, height: i32) -> (i32, i32) {
 
     (x, y)
 }
-
-/// 画面の案内に使う書体。
-///
-/// システムの設定に従う。自前で書体を選ぶと、利用者が大きさを変えていても
-/// 追随できない。
-fn ui_font() -> Option<HFONT> {
-    let mut metrics = NONCLIENTMETRICSW {
-        cbSize: u32::try_from(std::mem::size_of::<NONCLIENTMETRICSW>()).unwrap_or(0),
-        ..Default::default()
-    };
-    // SAFETY: 大きさを正しく告げた構造体へ書かせる。
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
-            metrics.cbSize,
-            Some(std::ptr::from_mut(&mut metrics).cast::<c_void>()),
-            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    }
-    .is_ok();
-    if !ok {
-        return None;
-    }
-    // SAFETY: 受け取った書体の指定をそのまま使う。
-    unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.into()
-}
-
-/// 拡大率に合わせて伸ばす。
-pub(crate) fn scaled(value: i32) -> i32 {
-    // SAFETY: 画面の DC を借りて問い合わせ、すぐ返す。
-    let dpi = unsafe {
-        let hdc = GetDC(None);
-        let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSY);
-        ReleaseDC(None, hdc);
-        dpi
-    };
-    let dpi = if dpi > 0 { dpi } else { BASE_DPI };
-    value * dpi / BASE_DPI
-}
-
-/// 標準の拡大率での画素密度。
-const BASE_DPI: i32 = 96;
 
 /// 文字と枠の間。
 const PADDING: i32 = 6;

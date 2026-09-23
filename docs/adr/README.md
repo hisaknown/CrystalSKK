@@ -44,3 +44,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0025](0025-show-the-mode-near-the-caret-for-a-moment.md) | 入力モードは、切り替えたときにカーソルのそばへ短く出す | Accepted | ADR-0013, ADR-0015, ADR-0020, ADR-0024 |
 | [0026](0026-colours-of-the-popups-are-settings.md) | 小窓の色は明るい組と暗い組を設定に書き、アプリの明るさで選ぶ | Accepted | ADR-0015, ADR-0020, ADR-0025 |
 | [0027](0027-annotations-go-in-the-window-only.md) | 候補の注釈は窓にだけ出す | Accepted | ADR-0015, ADR-0020, ADR-0026, PRD F-13 |
+| [0028](0028-popups-follow-the-monitor-and-the-layout.md) | 小窓は出すモニターの拡大率で描き、入力先の組版の変化に付いていく | Accepted | ADR-0015, ADR-0025, ADR-0026 |
