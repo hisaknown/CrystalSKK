@@ -624,13 +624,13 @@ fn ui_font() -> Option<HFONT> {
 }
 
 /// システムの色。
-fn system_color(index: i32) -> COLORREF {
+pub(crate) fn system_color(index: i32) -> COLORREF {
     // SAFETY: 番号を渡して色を受け取るだけ。
     COLORREF(unsafe { GetSysColor(SYS_COLOR_INDEX(index)) })
 }
 
 /// 拡大率に合わせて伸ばす。
-fn scaled(value: i32) -> i32 {
+pub(crate) fn scaled(value: i32) -> i32 {
     // SAFETY: 画面の DC を借りて問い合わせ、すぐ返す。
     let dpi = unsafe {
         let hdc = GetDC(None);

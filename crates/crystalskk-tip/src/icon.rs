@@ -67,6 +67,13 @@ fn pick(drawing: drawn::Mode, wanted: u32) -> (u32, &'static [u8]) {
         .expect("どのモードの絵も一枚以上ある")
 }
 
+/// 入力モードの絵の濃さ。欲しい大きさに合うものを選ぶ。
+///
+/// カーソルのそばに出す窓 ([`crate::indicator`]) も同じ絵を使う。
+pub fn mode_coverage(mode: Option<InputMode>, wanted: u32) -> (u32, &'static [u8]) {
+    pick(mode_drawing(mode), wanted)
+}
+
 /// 入力モードのアイコンを作る。**単色で、地は透明。**
 ///
 /// 色 (`0xRRGGBB`) はタスクバーの明るさに合わせて渡す

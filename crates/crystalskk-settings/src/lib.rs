@@ -60,6 +60,8 @@ pub struct Settings {
     pub engine: Options,
     /// 窓の見せ方。
     pub window: Window,
+    /// カーソルのそばに出す入力モードの絵。
+    pub mode_indicator: ModeIndicator,
     /// 引く辞書。並べた順に引く。**使うのは辞書サーバだけ。**
     pub dictionaries: Vec<Source>,
 }
@@ -122,6 +124,17 @@ impl Source {
             }
         }
     }
+}
+
+/// カーソルのそばに出す入力モードの絵。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeIndicator {
+    /// モードや入切を切り替えたときに出すか。
+    pub on_switch: bool,
+    /// 入力先に入ったときにも出すか。
+    pub on_focus: bool,
+    /// 出しておく時間 (ミリ秒)。
+    pub duration_ms: u32,
 }
 
 /// 窓の見せ方。エンジンは知らなくてよい値。
@@ -286,6 +299,15 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         },
         window: Window {
             show_reading: boolean(completion, "completion", "show_reading")?,
+        },
+        mode_indicator: {
+            let indicator = section(&doc, "mode_indicator")?;
+            ModeIndicator {
+                on_switch: boolean(indicator, "mode_indicator", "on_switch")?,
+                on_focus: boolean(indicator, "mode_indicator", "on_focus")?,
+                duration_ms: u32::try_from(count(indicator, "mode_indicator", "duration_ms")?)
+                    .map_err(|_| Error::new("mode_indicator.duration_ms が大きすぎます"))?,
+            }
         },
         dictionaries: sources(section(&doc, "dictionaries")?)?,
     })
@@ -694,6 +716,9 @@ mod tests {
             [
                 "candidates.until_list",
                 "candidates.labels",
+                "mode_indicator.on_switch",
+                "mode_indicator.on_focus",
+                "mode_indicator.duration_ms",
                 "dictionaries.sources",
                 "romaji.table"
             ]
@@ -870,6 +895,19 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn the_mode_indicator_shows_on_switch_for_a_second() {
+        let indicator = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().mode_indicator;
+        assert_eq!(
+            indicator,
+            ModeIndicator {
+                on_switch: true,
+                on_focus: false,
+                duration_ms: 1000,
+            }
+        );
     }
 
     #[test]

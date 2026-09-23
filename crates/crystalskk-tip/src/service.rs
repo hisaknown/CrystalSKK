@@ -11,6 +11,7 @@
 //! 文書へ書く (ADR-0008)。開いたままの composition はここで預かる。
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -19,9 +20,9 @@ use windows::Win32::UI::TextServices::{
     IEnumTfDisplayAttributeInfo, ITfCompartmentEventSink, ITfCompartmentEventSink_Impl,
     ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
     ITfDisplayAttributeInfo, ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl,
-    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfTextInputProcessor,
-    ITfTextInputProcessor_Impl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
-    ITfThreadMgr,
+    ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
+    ITfSource, ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
+    ITfTextInputProcessorEx_Impl, ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl,
 };
 use windows::core::{
     BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
@@ -67,6 +68,8 @@ struct Activation {
     indicator_object: ComObject<ModeIndicator>,
     /// 入切の区画を見張るための受付番号。外すときに要る。
     open_close_cookie: Option<u32>,
+    /// 入力先 (文書) の焦点の変化を聞くための受付番号。外すときに要る。
+    thread_events_cookie: Option<u32>,
     /// タスクバーの明るさの変化を聞く。落とせば聞くのをやめる。
     #[allow(dead_code, reason = "持っていること自体が役目")]
     theme_watcher: Option<crate::theme::Watcher>,
@@ -79,7 +82,8 @@ struct Activation {
     ITfKeyEventSink,
     ITfCompositionSink,
     ITfCompartmentEventSink,
-    ITfDisplayAttributeProvider
+    ITfDisplayAttributeProvider,
+    ITfThreadMgrEventSink
 )]
 pub struct TextService {
     /// 有効化されている間だけ中身が入る。
@@ -110,6 +114,10 @@ pub struct TextService {
     ///
     /// 取れなければ既定の下線のままになるだけで、入力は続く。
     atoms: RefCell<Option<crate::display::Atoms>>,
+    /// カーソルのそばに入力モードを出す窓 (ADR-0025)。
+    ///
+    /// 窓の手続きがこの中身を指すので、**動かない場所に置く** (`Rc`)。
+    mode_window: Rc<crate::indicator::ModeWindow>,
     /// 受け取った設定。受け取るまでは `None` で、エンジンも動かない。
     ///
     /// **既定の値では動かない** (ADR-0020)。ファイルに書かれていない値で
@@ -146,6 +154,7 @@ impl TextService {
             owner: RefCell::new(None),
             anchor: RefCell::new(None),
             atoms: RefCell::new(None),
+            mode_window: Rc::new(crate::indicator::ModeWindow::new()),
             settings: RefCell::new(None),
             settings_problem: RefCell::new(None),
             settings_asked: std::cell::Cell::new(None),
@@ -381,6 +390,44 @@ impl TextService {
         }
     }
 
+    /// カーソルのそばに、いまの入力モードを短く出す (ADR-0025)。
+    ///
+    /// `context` は入力先。分からなければ焦点のある文書から探す。**打ちかけ
+    /// のあいだは出さない。** 未確定の文字列と候補の窓が、そこに出ている。
+    fn announce_mode(&self, context: Option<ITfContext>) {
+        let Some(settings) = self
+            .settings
+            .borrow()
+            .as_ref()
+            .map(|s| s.mode_indicator.clone())
+        else {
+            return;
+        };
+        if !self.engine.borrow().preedit().is_empty() {
+            return;
+        }
+        let (Some(thread_manager), Some(client_id)) = (self.thread_manager(), self.client_id())
+        else {
+            return;
+        };
+        let Some(context) = context.or_else(|| focused_context(&thread_manager)) else {
+            return;
+        };
+        let mode = compartment::is_open(&thread_manager).then(|| self.engine.borrow().mode());
+        let window = Rc::clone(&self.mode_window);
+        edit::caret(&context, client_id, move |caret, owner| {
+            window.show(mode, caret, owner, settings.duration_ms);
+        });
+    }
+
+    /// いまの設定でカーソルのそばに出すことになっているか。
+    fn indicates(&self, when: impl Fn(&crystalskk_settings::ModeIndicator) -> bool) -> bool {
+        self.settings
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| when(&s.mode_indicator))
+    }
+
     /// 設定を尋ね直し、エンジンに渡す。
     ///
     /// 入力先が変わったときに呼ぶ。**書き換えた設定はそこで効く。** 打鍵の
@@ -598,6 +645,7 @@ impl TextService {
         self.withdraw_list();
         self.drop_composition();
         self.candidates.close();
+        self.mode_window.close();
         self.learning.save();
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
@@ -607,6 +655,14 @@ impl TextService {
         activation.indicator_object.clear_handler();
         if let Some(cookie) = activation.open_close_cookie {
             compartment::unadvise_open_close(&activation.thread_manager, cookie);
+        }
+        if let Some(cookie) = activation.thread_events_cookie
+            && let Ok(source) = activation.thread_manager.cast::<ITfSource>()
+        {
+            // SAFETY: 受付番号は有効化のときに受け取ったもの。
+            unsafe {
+                let _ = source.UnadviseSink(cookie);
+            }
         }
         preserved::unregister(&activation.keystrokes, activation.client_id);
         langbar::remove(&activation.thread_manager, &activation.indicator);
@@ -671,6 +727,17 @@ impl TextService_Impl {
             log::error("入切の変化を知らせてもらえない");
         }
 
+        // 入力先 (文書) の焦点の変化を知らせてもらう。入力モードを
+        // カーソルのそばに出すのに使う (ADR-0025)。
+        let thread_events: ITfThreadMgrEventSink = self.to_interface();
+        let thread_events_cookie = thread_manager.cast::<ITfSource>().ok().and_then(|source| {
+            // SAFETY: 受け口の種類は定数、受け口は無効化まで生かす。
+            unsafe { source.AdviseSink(&ITfThreadMgrEventSink::IID, &thread_events) }.ok()
+        });
+        if thread_events_cookie.is_none() {
+            log::error("入力先の焦点の変化を知らせてもらえない");
+        }
+
         *self.this.activation.borrow_mut() = Some(Activation {
             client_id,
             keystrokes,
@@ -678,6 +745,7 @@ impl TextService_Impl {
             indicator,
             indicator_object,
             open_close_cookie,
+            thread_events_cookie,
             theme_watcher,
         });
 
@@ -715,6 +783,7 @@ impl TextService_Impl {
         if !self.this.accepts_keys() {
             return false.into();
         }
+        let before = self.this.engine.borrow().mode();
         let translated = keys::translate(wparam);
         keys::log_translation(wparam, translated);
         let Some(key) = translated else {
@@ -785,11 +854,19 @@ impl TextService_Impl {
                 self.this.candidates.hide();
             }
         }
+
+        // 打鍵でモードが変わったら、カーソルのそばに出す。
+        if self.this.engine.borrow().mode() != before && self.this.indicates(|i| i.on_switch) {
+            self.this.announce_mode(Some(context.clone()));
+        }
         response.handled.into()
     }
 
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
     fn would_handle_key(&self, wparam: WPARAM) -> BOOL {
+        // 打ち始めたら、カーソルのそばのモードの窓は消す。**打っている字に
+        // かぶる。** モードを変える打鍵なら、処理のあとで出し直す。
+        self.this.mode_window.hide();
         if !self.this.accepts_keys() {
             return false.into();
         }
@@ -905,9 +982,54 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
             };
             if *guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
                 self.this.sync_with_open_state();
+                // 入切が変わったら、カーソルのそばに出す。
+                if self.this.indicates(|i| i.on_switch) {
+                    self.this.announce_mode(None);
+                }
             }
             Ok(())
         })
+    }
+}
+
+impl ITfThreadMgrEventSink_Impl for TextService_Impl {
+    fn OnInitDocumentMgr(&self, _pdim: Ref<ITfDocumentMgr>) -> Result<()> {
+        Ok(())
+    }
+
+    fn OnUninitDocumentMgr(&self, _pdim: Ref<ITfDocumentMgr>) -> Result<()> {
+        Ok(())
+    }
+
+    /// 入力先 (文書) の焦点が移った。
+    ///
+    /// 前の入力先のそばに出ていた窓は消す。設定で頼まれていれば、新しい
+    /// 入力先のそばにいまのモードを出す。
+    fn OnSetFocus(
+        &self,
+        pdimfocus: Ref<ITfDocumentMgr>,
+        _pdimprevfocus: Ref<ITfDocumentMgr>,
+    ) -> Result<()> {
+        guard("ThreadMgr::OnSetFocus", || {
+            self.this.mode_window.hide();
+            let Some(document) = pdimfocus.as_ref() else {
+                return Ok(());
+            };
+            if self.this.indicates(|i| i.on_focus) {
+                // SAFETY: 問い合わせるだけ。
+                let context = unsafe { document.GetTop() }.ok();
+                self.this.announce_mode(context);
+            }
+            Ok(())
+        })
+    }
+
+    fn OnPushContext(&self, _pic: Ref<ITfContext>) -> Result<()> {
+        Ok(())
+    }
+
+    fn OnPopContext(&self, _pic: Ref<ITfContext>) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -1001,6 +1123,12 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
             Ok(true.into())
         })
     }
+}
+
+/// 焦点のある文書の、いちばん上の文脈。
+fn focused_context(thread_manager: &ITfThreadMgr) -> Option<ITfContext> {
+    // SAFETY: 問い合わせるだけ。
+    unsafe { thread_manager.GetFocus().ok()?.GetTop().ok() }
 }
 
 #[cfg(test)]

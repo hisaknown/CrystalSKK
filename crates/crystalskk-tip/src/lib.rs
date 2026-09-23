@@ -37,6 +37,7 @@ pub mod factory;
 pub mod guard;
 pub mod guids;
 pub mod icon;
+pub mod indicator;
 pub mod keys;
 pub mod langbar;
 pub mod launch;
@@ -80,6 +81,7 @@ pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_v
     if reason == DLL_PROCESS_DETACH {
         candwin::unregister_class();
         theme::unregister_class();
+        indicator::unregister_class();
     }
     true.into()
 }

@@ -32,8 +32,8 @@ use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0
 use windows::Win32::UI::TextServices::{
     GUID_PROP_ATTRIBUTE, ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
     ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
-    TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READWRITE, TF_ES_SYNC,
-    TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
+    TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
+    TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
 use windows::core::{ComObject, Interface, Result, implement};
 
@@ -206,6 +206,94 @@ fn text_extent(context: &ITfContext, ec: u32, composition: &ITfComposition) -> O
         // 潰れた矩形は当てにならない。アプリがまだ描いていないことがある。
         (rect.right > rect.left || rect.bottom > rect.top).then_some(rect)
     }
+}
+
+/// カーソル (選択範囲) が画面のどこにあるかを尋ね、分かったら `then` に渡す。
+///
+/// 未確定の文字列が無いときに窓を出すのに使う (入力モードの表示)。
+/// 位置を尋ねるには編集権が要るので、読むだけのセッションを頼む。
+/// **いつ呼び返されるかは TSF 次第**で、すぐのこともあれば後のこともある。
+/// 位置が取れなければ `then` は呼ばれない。
+pub fn caret(
+    context: &ITfContext,
+    client_id: u32,
+    then: impl FnOnce(RECT, Option<HWND>) + 'static,
+) {
+    let session = ComObject::new(Caret {
+        context: context.clone(),
+        then: RefCell::new(Some(Box::new(then))),
+    });
+    let requested: ITfEditSession = session.to_interface();
+    // SAFETY: 文脈と識別子は TSF から受け取ったもの。
+    let requested = unsafe {
+        context.RequestEditSession(client_id, &requested, TF_ES_ASYNCDONTCARE | TF_ES_READ)
+    };
+    if let Err(e) = requested {
+        log::trace(&format!("カーソルの位置を尋ねられない: {}", e.message()));
+    }
+}
+
+/// カーソルの位置が分かったあとにすること。位置と、入力先の窓を受け取る。
+type AfterCaret = Box<dyn FnOnce(RECT, Option<HWND>)>;
+
+/// カーソルの位置を尋ねるセッション。
+#[implement(ITfEditSession)]
+struct Caret {
+    context: ITfContext,
+    then: RefCell<Option<AfterCaret>>,
+}
+
+impl std::fmt::Debug for Caret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Caret").finish_non_exhaustive()
+    }
+}
+
+impl ITfEditSession_Impl for Caret_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        guard("DoEditSession", || {
+            let Some(then) = self.this.then.borrow_mut().take() else {
+                return Ok(());
+            };
+            if let Some(rect) = caret_extent(&self.this.context, ec) {
+                then(rect, owner_window(&self.this.context));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// カーソルの画面上の位置。
+///
+/// 位置を返さないアプリもある。CUAS (古い IME の仕組みを TSF に写す層)
+/// 越しのアプリは、**高さの無い、幅 1 画素の矩形**を返してくることがあり、
+/// これは当てにならない (CorvusSKK も捨てている)。
+fn caret_extent(context: &ITfContext, ec: u32) -> Option<RECT> {
+    // SAFETY: 編集権はこの呼び出しのためのもの。
+    unsafe {
+        let mut selections = [TF_SELECTION::default()];
+        let mut fetched = 0u32;
+        context
+            .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selections, &mut fetched)
+            .ok()?;
+        // `TF_SELECTION` の範囲は手で落とす約束になっている。普通の持ち手へ
+        // 移し替えて、以降は自動で解放されるようにする。
+        let [selection] = selections;
+        let range = ManuallyDrop::into_inner(selection.range).filter(|_| fetched == 1)?;
+
+        let view = context.GetActiveView().ok()?;
+        let mut rect = RECT::default();
+        let mut clipped = windows::core::BOOL::default();
+        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
+        usable_caret(rect).then_some(rect)
+    }
+}
+
+/// カーソルの位置として当てにできる矩形か。
+fn usable_caret(rect: RECT) -> bool {
+    let nothing = rect == RECT::default();
+    let hairline = rect.top == rect.bottom && rect.right - rect.left == 1;
+    !nothing && !hairline
 }
 
 /// 入力先アプリの窓を尋ねる。
@@ -450,5 +538,31 @@ impl ITfEditSession_Impl for Terminate_Impl {
             log::trace("composition を片付けた");
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hairline_is_not_a_caret() {
+        // CUAS 越しのアプリが返す、高さの無い幅 1 画素の矩形。
+        let hairline = RECT {
+            left: 10,
+            top: 20,
+            right: 11,
+            bottom: 20,
+        };
+        assert!(!usable_caret(hairline));
+        assert!(!usable_caret(RECT::default()), "何も返さなかった");
+
+        let caret = RECT {
+            left: 10,
+            top: 20,
+            right: 11,
+            bottom: 38,
+        };
+        assert!(usable_caret(caret), "幅 1 でも高さがあれば本物のカーソル");
     }
 }
