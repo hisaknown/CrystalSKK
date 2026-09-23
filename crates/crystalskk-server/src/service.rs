@@ -7,7 +7,8 @@
 //! ここには Windows が出てこない。パイプの向こうから来た一行をどう
 //! 解釈するか、それだけを担う。**運び方と、答え方を分けてある。**
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Context, NoopRanker, Query, Ranker};
 use crystalskk_dict::UserDict;
@@ -34,6 +35,9 @@ pub struct Service {
     settings: PathBuf,
     /// 変換の候補を、前後の文章から並べる (ADR-0030)。
     ranker: Box<dyn Ranker>,
+    /// いまのランカーを作った設定。変わったときだけ作り直す。言語モデルの
+    /// 読み込みは重い。
+    ranker_settings: Option<crystalskk_settings::Ranker>,
 }
 
 impl std::fmt::Debug for Service {
@@ -53,6 +57,7 @@ impl Service {
             user,
             settings,
             ranker: Box::new(NoopRanker),
+            ranker_settings: None,
         }
     }
 
@@ -242,7 +247,26 @@ impl Service {
             .unwrap_or_default();
         self.library
             .configure(&loaded.settings.dictionaries, &directory);
+        self.configure_ranker(&loaded.settings.ranker, &directory);
         Ok(loaded)
+    }
+
+    /// 設定が変わっていれば、ランカーを作り直す。
+    ///
+    /// **作れなくても入力は止めない。** 記録に残し、辞書の順で答え続ける。
+    fn configure_ranker(&mut self, settings: &crystalskk_settings::Ranker, directory: &Path) {
+        if self.ranker_settings.as_ref() == Some(settings) {
+            return;
+        }
+        self.ranker_settings = Some(settings.clone());
+        self.ranker = match language_model(settings, directory) {
+            Ok(Some(ranker)) => ranker,
+            Ok(None) => Box::new(NoopRanker),
+            Err(e) => {
+                eprintln!("crystalskk-server: 候補を並べ替えずに続けます: {e}");
+                Box::new(NoopRanker)
+            }
+        };
     }
 
     /// 雛形で上書きする。**元の中身は隣に退避する。**
@@ -297,6 +321,34 @@ fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// 設定どおりの、言語モデルで並べるランカー。切ってあれば `None`。
+fn language_model(
+    settings: &crystalskk_settings::Ranker,
+    directory: &Path,
+) -> Result<Option<Box<dyn Ranker>>, String> {
+    use crystalskk_settings::Ranker as Settings;
+
+    if !settings.enabled {
+        return Ok(None);
+    }
+    let place = |written: &str, what: &str| {
+        Settings::resolve(written, directory).ok_or_else(|| format!("ranker.{what} が空です"))
+    };
+    let scorer = crystalskk_lm::LlamaScorer::load(
+        &place(&settings.runtime, "runtime")?,
+        &place(&settings.model, "model")?,
+        &place(&settings.tokenizer, "tokenizer")?,
+        settings.threads,
+    )?;
+    let policy = crystalskk_lm::Policy {
+        weight: settings.weight.0,
+        deadline: Duration::from_millis(u64::from(settings.deadline_ms)),
+        before: settings.before,
+        after: settings.after,
+    };
+    Ok(Some(Box::new(crystalskk_lm::LmRanker::new(scorer, policy))))
 }
 
 #[cfg(test)]
@@ -437,6 +489,45 @@ mod tests {
         assert_eq!(
             convert(&mut service, "かんじ", "会議の幹"),
             ["感じ", "幹事", "漢字"]
+        );
+    }
+
+    fn ranker_settings(enabled: bool) -> crystalskk_settings::Ranker {
+        crystalskk_settings::Ranker {
+            enabled,
+            model: "model.gguf".to_owned(),
+            tokenizer: "tokenizer.json".to_owned(),
+            runtime: String::new(),
+            weight: crystalskk_settings::Weight(1.0),
+            deadline_ms: 100,
+            before: 100,
+            after: 5,
+            threads: 4,
+        }
+    }
+
+    #[test]
+    fn no_language_model_is_loaded_while_the_ranker_is_off() {
+        let ranker = language_model(&ranker_settings(false), Path::new("."));
+        assert!(matches!(ranker, Ok(None)));
+    }
+
+    #[test]
+    fn a_ranker_that_cannot_be_built_says_why() {
+        let Err(e) = language_model(&ranker_settings(true), Path::new(".")) else {
+            panic!("作れないはず");
+        };
+        assert!(e.contains("ranker.runtime"), "{e}");
+    }
+
+    #[test]
+    fn conversions_go_on_when_the_ranker_cannot_be_built() {
+        // **並べ替えられなくても入力は止めない。** 辞書の順で答える。
+        let mut service = service_with("かんじ /漢字/感じ/幹事/\n");
+        service.configure_ranker(&ranker_settings(true), Path::new("."));
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["漢字", "感じ", "幹事"]
         );
     }
 

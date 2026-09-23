@@ -16,6 +16,7 @@ crystalskk-core = { path = "../crystalskk-core" }
 crystalskk-dict = { path = "../crystalskk-dict" }
 crystalskk-fetch = { path = "../crystalskk-fetch" }
 crystalskk-ipc = { path = "../crystalskk-ipc" }
+crystalskk-lm = { path = "../crystalskk-lm" }
 crystalskk-settings = { path = "../crystalskk-settings" }
 
 [target.'cfg(windows)'.dependencies.windows]
