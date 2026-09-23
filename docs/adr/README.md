@@ -45,3 +45,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0026](0026-colours-of-the-popups-are-settings.md) | 小窓の色は明るい組と暗い組を設定に書き、アプリの明るさで選ぶ | Accepted | ADR-0015, ADR-0020, ADR-0025 |
 | [0027](0027-annotations-go-in-the-window-only.md) | 候補の注釈は窓にだけ出す | Accepted | ADR-0015, ADR-0020, ADR-0026, PRD F-13 |
 | [0028](0028-popups-follow-the-monitor-and-the-layout.md) | 小窓は出すモニターの拡大率で描き、入力先の組版の変化に付いていく | Accepted | ADR-0015, ADR-0025, ADR-0026 |
+| [0029](0029-a-missing-dictionary-is-told-not-guessed.md) | 欠けた辞書は知らせ、辞書登録には進ませない | Accepted | ADR-0016, ADR-0022 |

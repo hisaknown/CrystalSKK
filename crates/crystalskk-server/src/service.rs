@@ -99,6 +99,13 @@ impl Service {
                 candidates.push(candidate);
             }
         }
+        // 欠けた辞書があれば、候補が無いことを「無い」とは言い切れない
+        // (ADR-0029)。
+        if candidates.is_empty()
+            && let Some(reason) = self.library.shortfall()
+        {
+            return Response::Error(reason);
+        }
         Response::Ok(candidates)
     }
 
@@ -314,6 +321,28 @@ mod tests {
         let mut service = service();
         let (response, _) = service.handle(Request::Search(Query::okuri_nashi("ない")));
         assert_eq!(response, Response::Ok(Vec::new()));
+    }
+
+    #[test]
+    fn nothing_found_while_a_dictionary_is_missing_is_not_an_answer() {
+        // 欠けた辞書にあったはずの語で、登録を始めさせない (ADR-0029)。
+        let mut service = service();
+        let directory = std::env::temp_dir();
+        service.library.configure(
+            &[crystalskk_settings::Source::File(
+                directory
+                    .join("crystalskk-no-such.dict")
+                    .display()
+                    .to_string(),
+            )],
+            &directory,
+        );
+        service.library.settle();
+        let (response, _) = service.handle(Request::Search(Query::okuri_nashi("ない")));
+        assert!(
+            matches!(&response, Response::Error(reason) if reason.contains("登録には進みません")),
+            "{response:?}"
+        );
     }
 
     #[test]

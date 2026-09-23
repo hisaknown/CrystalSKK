@@ -17,12 +17,22 @@
 //! 引く側はそれを「引けなかった」として伝える。**「辞書に無い」と取り
 //! 違えて辞書登録が始まるのを防ぐ。** 二度目からは、読み直しているあいだも
 //! 前の辞書で答える。
+//!
+//! # 欠けた辞書 (ADR-0029)
+//!
+//! 取得できず、手元にも前の版が無い辞書は**欠けている**。欠けているあいだは
+//! [`Library::shortfall`] が理由を返す。引く側は、候補が一つも無かったときに
+//! それを伝え、辞書登録には進ませない。**欠けた辞書にあったはずの語で登録が
+//! 始まるのを防ぐ。** 欠けた URL の辞書は、しばらく置いて取り直す。
+//!
+//! 更新を確かめられなかっただけなら、前の版で引けるので、記録に残すだけに
+//! する。
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_dict::{MemoryDict, derive, encoding};
@@ -32,6 +42,12 @@ use crystalskk_settings::Source;
 ///
 /// 試験では差し替える。**試験がネットワークに出てはいけない。**
 pub type Fetch = fn(url: &str, path: &Path) -> Result<bool, String>;
+
+/// 欠けた辞書を取り直すまでの間。
+#[cfg(not(test))]
+const RETRY: Duration = Duration::from_secs(5 * 60);
+#[cfg(test)]
+const RETRY: Duration = Duration::ZERO;
 
 /// 本物の取得。
 pub fn fetch_over_http(url: &str, path: &Path) -> Result<bool, String> {
@@ -59,6 +75,10 @@ pub struct Library {
     checked_updates: bool,
     /// 直近の読み込みで困ったこと。
     problems: Vec<String>,
+    /// 欠けている辞書と、その訳。
+    missing: Vec<String>,
+    /// 最後に欠けていると分かった時刻。取り直すのに使う。
+    missing_since: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -106,6 +126,8 @@ struct Outcome {
     /// 読み終えたときの時刻を入れた計画。
     entries: Vec<Entry>,
     problems: Vec<String>,
+    /// 読めなかった辞書と、その訳。
+    missing: Vec<String>,
 }
 
 impl Library {
@@ -119,6 +141,8 @@ impl Library {
             generation: 0,
             checked_updates: false,
             problems: Vec::new(),
+            missing: Vec::new(),
+            missing_since: None,
         }
     }
 
@@ -148,6 +172,13 @@ impl Library {
             return;
         }
         if self.loaded.as_deref() == Some(entries.as_slice()) {
+            // 欠けた URL の辞書があれば、しばらく置いて取り直す。
+            let fetchable = entries.iter().any(|e| e.url.is_some() && !e.path.exists());
+            let due = self.missing_since.is_some_and(|at| at.elapsed() >= RETRY);
+            if fetchable && due && self.job.is_none() {
+                self.missing_since = None;
+                self.start(entries, problems, false);
+            }
             return;
         }
 
@@ -185,6 +216,8 @@ impl Library {
         self.shelves = outcome.shelves;
         self.loaded = Some(outcome.entries);
         self.problems = outcome.problems;
+        self.missing_since = (!outcome.missing.is_empty()).then(Instant::now);
+        self.missing = outcome.missing;
         self.job = None;
     }
 
@@ -206,6 +239,20 @@ impl Library {
         } else {
             "辞書を読んでいます".to_owned()
         })
+    }
+
+    /// 欠けている辞書があれば、その知らせ。
+    ///
+    /// 引く側は、候補が一つも無かったときにこれを伝える。**欠けた辞書に
+    /// あったはずの語で、辞書登録を始めさせない。**
+    pub fn shortfall(&self) -> Option<String> {
+        if self.missing.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}。辞書に無い語なのか分からないので、登録には進みません",
+            self.missing.join("、")
+        ))
     }
 
     /// 直近の読み込みで困ったこと。
@@ -278,6 +325,8 @@ impl Library {
         std::thread::spawn(move || {
             let mut outcome = load_all(entries, fetch, check_updates);
             outcome.generation = generation;
+            // 在りかが解けなかった辞書も、欠けている。
+            outcome.missing.splice(0..0, problems.iter().cloned());
             outcome.problems.splice(0..0, problems);
             // 受け手が居なくなっていれば (次の読み込みに替わった) 捨てる。
             let _ = sender.send(outcome);
@@ -307,12 +356,14 @@ impl Library {
 fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outcome {
     let mut shelves = Vec::new();
     let mut problems = Vec::new();
+    let mut missing = Vec::new();
     // 同じファイルは一度だけ取って、一度だけ読む。L 辞書とそこから作る
     // カタカナ語の辞書は、同じファイルを読む。
     let mut fetched: Vec<PathBuf> = Vec::new();
     let mut texts: HashMap<PathBuf, String> = HashMap::new();
 
     for entry in &mut entries {
+        let mut fetch_failure = None;
         if let Some(url) = &entry.url
             && !fetched.contains(&entry.path)
             && (check_updates || !entry.path.exists())
@@ -323,7 +374,11 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
                 Ok(false) => {}
                 // 手元に前のものがあれば、それで続ける。通信できないのは
                 // よくあることで、辞書が引けなくなるほどのことではない。
-                Err(e) => problems.push(format!("{} を取得できません: {e}", entry.written)),
+                Err(e) => {
+                    let problem = format!("{} を取得できません: {e}", entry.written);
+                    problems.push(problem.clone());
+                    fetch_failure = Some(problem);
+                }
             }
         }
 
@@ -333,7 +388,12 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
                     let decoded = encoding::decode(&bytes);
                     texts.insert(entry.path.clone(), decoded.text);
                 }
-                Err(e) => problems.push(format!("{} を読めません: {e}", entry.written)),
+                Err(e) => {
+                    let problem = format!("{} を読めません: {e}", entry.written);
+                    problems.push(problem.clone());
+                    // 取れなかったから読めないのなら、取れなかったほうを言う。
+                    missing.push(fetch_failure.clone().unwrap_or(problem));
+                }
             }
         }
         if let Some(text) = texts.get(&entry.path) {
@@ -355,6 +415,7 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
         shelves,
         entries,
         problems,
+        missing,
     }
 }
 
@@ -517,6 +578,48 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("example.com/far"))
         );
+        // 手元に前の版も無いので、欠けている。
+        let shortfall = library.shortfall().expect("欠けている");
+        assert!(shortfall.contains("example.com/far"), "{shortfall}");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_old_copy_is_not_missing() {
+        // 更新を確かめられなかっただけなら、前の版で引ける。欠けてはいない。
+        let directory = scratch("old-copy");
+        let mut library = Library::new(directory.join("cache"), pretend);
+        let sources = vec![Source::Url("https://example.com/old".to_owned())];
+        library.configure(&sources, &directory);
+        library.settle();
+        assert_eq!(library.shortfall(), None);
+
+        library.fetch = refuse;
+        library.checked_updates = false;
+        library.loaded = None;
+        library.configure(&sources, &directory);
+        library.settle();
+        assert!(!library.problems().is_empty(), "取得できなかったことは残る");
+        assert_eq!(library.shortfall(), None);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_missing_dictionary_is_fetched_again_later() {
+        let directory = scratch("retry");
+        let mut library = Library::new(directory.join("cache"), refuse);
+        let sources = vec![Source::Url("https://example.com/later".to_owned())];
+        library.configure(&sources, &directory);
+        library.settle();
+        assert!(library.shortfall().is_some());
+
+        // 通信できるようになった。次に設定を尋ねられたとき (試験では間を
+        // 置かない) に取り直す。
+        library.fetch = pretend;
+        library.configure(&sources, &directory);
+        library.settle();
+        assert_eq!(library.shortfall(), None);
+        assert!(!library.lookup(&Query::okuri_nashi("とりよせ")).is_empty());
         let _ = fs::remove_dir_all(&directory);
     }
 
