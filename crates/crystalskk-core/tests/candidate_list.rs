@@ -56,6 +56,9 @@ impl Session {
             let key = match c {
                 ' ' => Key::Space,
                 '\n' => Key::Enter,
+                // 取り消し。打鍵列に書けるようにしておく。
+                '\u{1b}' => Key::Escape,
+                '\u{8}' => Key::Backspace,
                 c => Key::Char(c),
             };
             let response = self.engine.press(key);
@@ -186,4 +189,59 @@ fn running_out_of_pages_leads_to_registration() {
         Some("かんじ"),
         "辞書登録へ進む"
     );
+}
+
+// --- 辞書登録 ------------------------------------------------------------
+
+/// 候補を出し切って辞書登録に入ったところまで進める。
+fn registering() -> Session {
+    let mut s = Session::new();
+    s.convert(UNTIL_CANDIDATE_LIST);
+    // 二ページ目まで送り、さらに送ると候補が尽きる。
+    s.type_keys("  ");
+    assert!(s.engine.registration().is_some(), "辞書登録に入っている");
+    s
+}
+
+#[test]
+fn escape_cancels_the_registration_and_returns_to_the_midashi() {
+    let mut s = registering();
+    s.type_keys("\u{1b}");
+
+    assert!(s.engine.registration().is_none(), "登録を抜ける");
+    assert_eq!(
+        s.engine.preedit().display(),
+        "▽かんじ",
+        "見出し語入力に戻る"
+    );
+    assert_eq!(s.committed, "", "何も確定しない");
+}
+
+#[test]
+fn ascii_mode_still_feeds_the_registration() {
+    let mut s = registering();
+    // `l` で半角英数へ移り、そのまま登録語を打つ。
+    s.type_keys("labc");
+
+    let view = s.engine.registration().expect("登録中のまま");
+    assert_eq!(view.buffer, "abc", "アプリへ抜けずに登録語へ溜まる");
+}
+
+#[test]
+fn nothing_typed_while_registering_reaches_the_application() {
+    let mut s = registering();
+    s.type_keys("l");
+    // 英数モードでも、登録中はすべて食べる。素通しするとアプリに
+    // 文字が入ってしまう。
+    for key in [Key::Char('a'), Key::Space, Key::Backspace, Key::Escape] {
+        assert!(s.engine.press(key).handled, "{key:?} をアプリへ渡さない");
+    }
+}
+
+#[test]
+fn ascii_mode_registration_can_be_committed() {
+    let mut s = registering();
+    s.type_keys("labc\n");
+    assert_eq!(s.committed, "abc", "登録した語が文書へ入る");
+    assert!(s.engine.registration().is_none());
 }

@@ -377,16 +377,21 @@ impl Engine {
         if key == Key::Ctrl('j') {
             return true;
         }
+        let registering = !self.registrations.is_empty();
         if !self.mode.is_kana() {
             return match key {
-                Key::Char(_) | Key::Space => self.mode == InputMode::FullAscii,
-                Key::Enter => !self.registrations.is_empty(),
+                // 登録中は英数モードでも打鍵を受け取る。**登録語を打って
+                // いるのだから、アプリへ抜けては困る。**
+                Key::Char(_) | Key::Space => self.mode == InputMode::FullAscii || registering,
+                Key::Enter | Key::Backspace | Key::Escape | Key::Ctrl('g') => registering,
                 _ => false,
             };
         }
         match key {
             Key::Char(_) | Key::Space | Key::Ctrl('g') | Key::Ctrl('q') => true,
-            Key::Ctrl(_) | Key::Escape | Key::Tab | Key::Up | Key::Down => false,
+            // 登録を取りやめるときだけ受け取る。
+            Key::Escape => registering,
+            Key::Ctrl(_) | Key::Tab | Key::Up | Key::Down => false,
             // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
             Key::Enter => !self.registrations.is_empty() || self.romaji.pending_kana().is_some(),
             // 消すものがあるときだけ受け取る。
@@ -502,7 +507,20 @@ impl Engine {
         }
 
         match key {
-            Key::Ctrl('g') => self.romaji.clear(),
+            Key::Ctrl('g') => {
+                // 打ちかけのローマ字が残っていれば、まずそれを捨てる。
+                // 何も残っていないなら、登録そのものを取りやめる。
+                //
+                // 登録中でないときは、捨てるものが無くても打鍵は食べる。
+                // `Ctrl+G` は SKK の「取り消し」であって、アプリへ渡して
+                // よいキーではない。
+                if self.romaji.is_empty() && !self.registrations.is_empty() {
+                    self.cancel_registration(out);
+                } else {
+                    self.romaji.clear();
+                }
+            }
+            Key::Escape => self.cancel_registration(out),
             Key::Ctrl('q') => {
                 self.flush_romaji(out);
                 self.mode = match self.mode {
@@ -575,8 +593,23 @@ impl Engine {
                     None => out.handled = false,
                 }
             }
-            Key::Escape | Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => out.handled = false,
+            Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => out.handled = false,
         }
+    }
+
+    /// 辞書登録を取りやめ、見出し語入力へ戻す。
+    ///
+    /// 一番内側の枠だけを畳む。入れ子になっているなら、外側の登録は
+    /// 続いている。**「直前に戻る」であって「全部やめる」ではない。**
+    ///
+    /// 登録中でなければ何もせず、打鍵はアプリへ渡す。
+    fn cancel_registration(&mut self, out: &mut Out) {
+        let Some(frame) = self.registrations.pop() else {
+            out.handled = false;
+            return;
+        };
+        self.romaji.clear();
+        self.state = State::Composing(frame.origin);
     }
 
     /// 英数モードの直接入力。かな変換を通さない。
@@ -587,11 +620,25 @@ impl Engine {
                 self.emit(&text, out);
             }
             (InputMode::FullAscii, Key::Space) => self.emit("　", out),
-            (InputMode::Ascii, Key::Enter) if !self.registrations.is_empty() => {
+            // 登録中は半角英数でも打鍵を受け取り、登録語に溜める。
+            (InputMode::Ascii, Key::Char(c)) if !self.registrations.is_empty() => {
+                self.emit(&c.to_string(), out);
+            }
+            (InputMode::Ascii, Key::Space) if !self.registrations.is_empty() => {
+                self.emit(" ", out);
+            }
+            (_, Key::Enter) if !self.registrations.is_empty() => {
                 self.finish_registration(out);
             }
-            (InputMode::FullAscii, Key::Enter) if !self.registrations.is_empty() => {
-                self.finish_registration(out);
+            (_, Key::Backspace) if !self.registrations.is_empty() => {
+                if let Some(frame) = self.registrations.last_mut()
+                    && frame.buffer.pop().is_none()
+                {
+                    out.handled = false;
+                }
+            }
+            (_, Key::Escape | Key::Ctrl('g')) if !self.registrations.is_empty() => {
+                self.cancel_registration(out);
             }
             _ => out.handled = false,
         }
