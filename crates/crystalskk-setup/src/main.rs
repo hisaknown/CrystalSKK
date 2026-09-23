@@ -20,6 +20,7 @@ use std::process::ExitCode;
 use crystalskk_tip::com::Apartment;
 use crystalskk_tip::log::Level;
 
+mod access;
 mod dictionary;
 mod elevate;
 mod install;
@@ -167,6 +168,9 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
             if report.is_console() {
                 confirm_effective_registration();
             }
+            // 辞書の許可も見直す。**導入だけして辞書を先に置いていた人**が、
+            // 隔離されたアプリで引けないままになるのを防ぐ。
+            dictionary::grant_access();
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),

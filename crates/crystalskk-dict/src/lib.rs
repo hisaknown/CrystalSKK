@@ -11,7 +11,6 @@
 pub mod encoding;
 pub mod format;
 pub mod memory;
-pub mod paths;
 pub mod user;
 
 pub use encoding::{Decoded, decode};

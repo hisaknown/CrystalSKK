@@ -17,7 +17,9 @@ use std::rc::Rc;
 
 use crystalskk_core::Engine;
 use crystalskk_core::dict::{Candidate, CandidateSource, ChainedSource, Query};
-use crystalskk_dict::{MemoryDict, UserDict, encoding, paths};
+use crystalskk_dict::{MemoryDict, UserDict, encoding};
+
+use crate::paths;
 
 use crate::log;
 

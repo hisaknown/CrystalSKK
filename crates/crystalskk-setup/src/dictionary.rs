@@ -5,7 +5,9 @@
 
 use std::process::ExitCode;
 
-use crystalskk_dict::paths;
+use crystalskk_tip::paths;
+
+use crate::access;
 
 /// 辞書を取得して、CrystalSKK が読む場所へ置く。
 pub fn fetch() -> ExitCode {
@@ -19,6 +21,8 @@ pub fn fetch() -> ExitCode {
 
     println!("取得元: {}", crystalskk_fetch::SKK_JISYO_L);
     println!("置き場: {}", path.display());
+
+    grant_access();
 
     match crystalskk_fetch::install(crystalskk_fetch::SKK_JISYO_L, &path, None) {
         Ok(Some(report)) => {
@@ -43,5 +47,24 @@ pub fn fetch() -> ExitCode {
             eprintln!("crystalskk-setup: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// 辞書の置き場所に、隔離された入れ物からの読みを許す。
+///
+/// **ストアアプリやスタートメニューの検索欄は、この許可が無いと辞書を
+/// 読めない。** 与えられなくても普通のアプリでは使えるので、失敗しても
+/// 取得そのものは続ける。
+pub fn grant_access() {
+    let Ok(directory) = paths::data_dir() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&directory) {
+        eprintln!("crystalskk-setup: 置き場所を作れません: {e}");
+        return;
+    }
+    match access::allow_app_containers(&directory) {
+        Ok(()) => println!("隔離されたアプリからも読めるようにしました。"),
+        Err(e) => eprintln!("crystalskk-setup: {e}"),
     }
 }
