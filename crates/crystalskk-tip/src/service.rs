@@ -307,7 +307,11 @@ impl TextService {
             Content::Page(_) => self.announce_list(),
             // 補完は候補の一覧ではない。システムの一覧に混ぜると、
             // アプリには「変換候補が出た」と見えてしまう。
-            Content::Registration(_) | Content::Notice(_) | Content::Completion(_) => {
+            // 注釈だけの窓も一覧ではない。一つずつ見せている候補に添える。
+            Content::Registration(_)
+            | Content::Notice(_)
+            | Content::Completion(_)
+            | Content::Annotation(_) => {
                 self.withdraw_list();
                 true
             }
@@ -578,17 +582,41 @@ impl TextService {
             }));
         }
 
-        if let Some(view) = engine.candidates().filter(|view| view.listing) {
-            let okuri = view.okuri.as_deref().unwrap_or("");
-            return Some(Content::Page(Page {
-                entries: view
-                    .page()
-                    .into_iter()
-                    .map(|(label, candidate)| (label, format!("{}{okuri}", candidate.word)))
-                    .collect(),
-                number: view.page_number() + 1,
-                count: view.page_count(),
-            }));
+        // 注釈は窓にだけ出す (ADR-0027)。入力欄には出さない。
+        let show_annotation = self
+            .settings
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.window.show_annotation);
+
+        if let Some(view) = engine.candidates() {
+            if view.listing {
+                let okuri = view.okuri.as_deref().unwrap_or("");
+                let page = view.page();
+                return Some(Content::Page(Page {
+                    entries: page
+                        .iter()
+                        .map(|(label, candidate)| (*label, format!("{}{okuri}", candidate.word)))
+                        .collect(),
+                    notes: if show_annotation {
+                        page.iter()
+                            .map(|(_, candidate)| candidate.annotation.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    number: view.page_number() + 1,
+                    count: view.page_count(),
+                }));
+            }
+            // 一つずつ見せているあいだは、その候補の注釈だけを出す。
+            // 注釈が無ければ窓は出さない。
+            let note = view
+                .candidates
+                .get(view.index)
+                .and_then(|candidate| candidate.annotation.clone())
+                .filter(|note| show_annotation && !note.is_empty());
+            return note.map(Content::Annotation);
         }
 
         // 一番下に置く。**候補の一覧が出ているあいだは、そちらが手前で

@@ -188,6 +188,8 @@ pub enum Color {
 pub struct Window {
     /// 補完の窓に、変換先と一緒に読みも出すか。
     pub show_reading: bool,
+    /// 候補の注釈を窓に出すか。
+    pub show_annotation: bool,
 }
 
 /// 読めなかった、使えなかった理由。**利用者に見せる文**である。
@@ -395,6 +397,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         },
         window: Window {
             show_reading: boolean(completion, "completion", "show_reading")?,
+            show_annotation: boolean(candidates, "candidates", "show_annotation")?,
         },
         mode_indicator: {
             let indicator = section(&doc, "mode_indicator")?;

@@ -31,10 +31,10 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps,
-    GetTextExtentPoint32W, HDC, HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint,
+    FillRect, FrameRect, GetDC, GetDeviceCaps, GetTextExtentPoint32W, HDC, HFONT, InvalidateRect,
+    LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
@@ -65,17 +65,28 @@ pub enum Content {
     Completion(Completion),
     /// 伝えたいこと。**黙って違う結果を出すより、言うほうがよい。**
     Notice(String),
+    /// 候補を一つずつ見せているあいだの、その候補の注釈。
+    ///
+    /// 注釈は入力欄には出さない。**長いことが多く、打っている場所に
+    /// 出るとうっとうしい。** 窓の幅で折り返して、全文を出す。
+    Annotation(String),
 }
 
 impl Content {
-    /// 窓に並べる行。
-    fn lines(&self) -> Vec<String> {
+    /// 窓に並べる行。注釈だけの窓は折り返すので、ここでは一行として返す。
+    fn lines(&self) -> Vec<Line> {
         match self {
             Self::Page(page) => page.lines(),
             Self::Registration(registration) => registration.lines(),
             Self::Completion(completion) => completion.lines(),
-            Self::Notice(text) => vec![format!("[{text}]")],
+            Self::Notice(text) => vec![Line::plain(format!("[{text}]"))],
+            Self::Annotation(text) => vec![Line::plain(text.clone())],
         }
+    }
+
+    /// 折り返して見せる中身か。
+    fn wraps(&self) -> bool {
+        matches!(self, Self::Annotation(_))
     }
 
     /// 反転して見せる行。無ければ `None`。
@@ -91,6 +102,28 @@ impl Content {
 
     fn is_empty(&self) -> bool {
         self.lines().is_empty()
+    }
+}
+
+/// 窓の一行。本文と、その右に薄く添える注釈。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    pub note: Option<String>,
+}
+
+impl Line {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            note: None,
+        }
+    }
+}
+
+impl PartialEq<&str> for Line {
+    fn eq(&self, other: &&str) -> bool {
+        self.note.is_none() && self.text == *other
     }
 }
 
@@ -118,13 +151,13 @@ pub struct Completion {
 }
 
 impl Completion {
-    fn lines(&self) -> Vec<String> {
+    fn lines(&self) -> Vec<Line> {
         if !self.taken {
             // 一覧と同じ「キー: 語」の形にする。押すキーがそのまま左に出る。
             return self
                 .entries
                 .first()
-                .map(|word| format!("{}: {word}", self.take_key))
+                .map(|word| Line::plain(format!("{}: {word}", self.take_key)))
                 .into_iter()
                 .collect();
         }
@@ -132,9 +165,9 @@ impl Completion {
         // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
         // しないのに、出したままにはできない。** 選んでいる候補は
         // [`Content::highlight`] が反転させる。
-        let mut lines = self.entries.clone();
+        let mut lines: Vec<Line> = self.entries.iter().map(Line::plain).collect();
         if self.count > 1 {
-            lines.push(format!("{} / {}", self.number, self.count));
+            lines.push(Line::plain(format!("{} / {}", self.number, self.count)));
         }
         lines
     }
@@ -152,13 +185,16 @@ pub struct Registration {
 }
 
 impl Registration {
-    fn lines(&self) -> Vec<String> {
+    fn lines(&self) -> Vec<Line> {
         // 入れ子の深さを括弧の数で示す。CorvusSKK と同じ見せ方で、
         // **登録の中で登録が始まったことが一目で分かる。**
         let open = "[".repeat(self.depth.max(1));
         let close = "]".repeat(self.depth.max(1));
         // 文字の入る場所を示す印。窓には本物のカーソルが無い。
-        vec![format!("{open}登録{close} {}: {}│", self.key, self.text)]
+        vec![Line::plain(format!(
+            "{open}登録{close} {}: {}│",
+            self.key, self.text
+        ))]
     }
 }
 
@@ -167,6 +203,8 @@ impl Registration {
 pub struct Page {
     /// ラベルと、その候補の表示文字列。
     pub entries: Vec<(char, String)>,
+    /// それぞれの候補の注釈。`entries` と同じ順。注釈を出さないなら空。
+    pub notes: Vec<Option<String>>,
     /// いま何ページ目か。1 から数える。
     pub number: usize,
     /// 全部で何ページか。
@@ -175,14 +213,18 @@ pub struct Page {
 
 impl Page {
     /// 窓に並べる行。最後の行はページの位置を示す。
-    fn lines(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self
+    fn lines(&self) -> Vec<Line> {
+        let mut lines: Vec<Line> = self
             .entries
             .iter()
-            .map(|(label, text)| format!("{label}: {text}"))
+            .enumerate()
+            .map(|(at, (label, text))| Line {
+                text: format!("{label}: {text}"),
+                note: self.notes.get(at).cloned().flatten(),
+            })
             .collect();
         if self.count > 1 {
-            lines.push(format!("{} / {}", self.number, self.count));
+            lines.push(Line::plain(format!("{} / {}", self.number, self.count)));
         }
         lines
     }
@@ -466,49 +508,62 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, colorref(palette.text));
 
-        let line_height = line_height(hdc);
-        let highlight = content.highlight();
-        for (index, line) in content.lines().iter().enumerate() {
-            let top = PADDING + line_height * i32::try_from(index).unwrap_or(0);
+        // 注釈だけの窓は、窓の幅で折り返して全文を出す。
+        if content.wraps() {
+            let text = content
+                .lines()
+                .into_iter()
+                .next()
+                .map(|line| line.text)
+                .unwrap_or_default();
             let mut rect = RECT {
                 left: PADDING,
-                top,
+                top: PADDING,
                 right: width - PADDING,
-                bottom: top + line_height,
+                bottom: height - PADDING,
             };
-
-            // 選んでいる行は地と文字の色を入れ替える。**記号で示すより
-            // 確かで、フォントによって見た目が変わらない。**
-            //
-            // 帯は余白いっぱいまで広げる。文字の幅だけ塗ると、行によって
-            // 帯の長さが変わってちらついて見える。
-            let selected = highlight == Some(index);
-            if selected {
-                let band = RECT {
-                    left: 1,
-                    right: width - 1,
-                    ..rect
-                };
-                let brush = CreateSolidBrush(colorref(palette.selected_background));
-                FillRect(hdc, &band, brush);
-                let _ = DeleteObject(brush.into());
-            }
-            SetTextColor(
-                hdc,
-                colorref(if selected {
-                    palette.selected_text
-                } else {
-                    palette.text
-                }),
-            );
-
-            let mut text: Vec<u16> = line.encode_utf16().collect();
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
             DrawTextW(
                 hdc,
-                &mut text,
+                &mut wide,
                 &mut rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
+        } else {
+            let line_height = line_height(hdc);
+            let highlight = content.highlight();
+            for (index, line) in content.lines().iter().enumerate() {
+                let top = PADDING + line_height * i32::try_from(index).unwrap_or(0);
+                let rect = RECT {
+                    left: PADDING,
+                    top,
+                    right: width - PADDING,
+                    bottom: top + line_height,
+                };
+
+                // 選んでいる行は地と文字の色を入れ替える。**記号で示すより
+                // 確かで、フォントによって見た目が変わらない。**
+                //
+                // 帯は余白いっぱいまで広げる。文字の幅だけ塗ると、行によって
+                // 帯の長さが変わってちらついて見える。
+                let selected = highlight == Some(index);
+                if selected {
+                    let band = RECT {
+                        left: 1,
+                        right: width - 1,
+                        ..rect
+                    };
+                    let brush = CreateSolidBrush(colorref(palette.selected_background));
+                    FillRect(hdc, &band, brush);
+                    let _ = DeleteObject(brush.into());
+                }
+                let (ink, ground) = if selected {
+                    (palette.selected_text, palette.selected_background)
+                } else {
+                    (palette.text, palette.background)
+                };
+                draw_line(hdc, line, rect, ink, ground);
+            }
         }
 
         if let (Some(previous), Some(font)) = (previous, font) {
@@ -517,6 +572,78 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
         }
     }
 }
+
+/// 一行を描く。本文のあとに、注釈を薄い色で添える。
+///
+/// 注釈は [`NOTE_WIDTH`] で切り、はみ出す分は「…」にする。**一覧の窓が
+/// 長い注釈で画面いっぱいに広がっては、候補が読めない。**
+///
+/// # Safety
+///
+/// `hdc` に書体が選ばれていること。
+unsafe fn draw_line(hdc: HDC, line: &Line, rect: RECT, ink: u32, ground: u32) {
+    // SAFETY: 呼び出し側の約束による。
+    unsafe {
+        SetTextColor(hdc, colorref(ink));
+        let mut text: Vec<u16> = line.text.encode_utf16().collect();
+        let mut area = rect;
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut area,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
+
+        let Some(note) = &line.note else {
+            return;
+        };
+        let left = rect.left + text_width(hdc, &line.text) + scaled(NOTE_GAP);
+        let mut area = RECT {
+            left,
+            right: (left + scaled(NOTE_WIDTH)).min(rect.right),
+            ..rect
+        };
+        SetTextColor(hdc, colorref(mix(ink, ground)));
+        let mut text: Vec<u16> = note.encode_utf16().collect();
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut area,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+/// 文字列の幅。
+///
+/// # Safety
+///
+/// `hdc` に書体が選ばれていること。
+unsafe fn text_width(hdc: HDC, text: &str) -> i32 {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let mut size = SIZE::default();
+    // SAFETY: 呼び出し側の約束による。
+    if unsafe { GetTextExtentPoint32W(hdc, &wide, &mut size) }.as_bool() {
+        size.cx
+    } else {
+        0
+    }
+}
+
+/// 二つの色の中間。注釈を本文より薄く見せるのに使う。
+fn mix(a: u32, b: u32) -> u32 {
+    let channel = |shift: u32| ((((a >> shift) & 0xFF) + ((b >> shift) & 0xFF)) / 2) << shift;
+    channel(16) | channel(8) | channel(0)
+}
+
+/// 本文と注釈のあいだ。
+const NOTE_GAP: i32 = 12;
+
+/// 一覧の注釈を切る幅。これを超える分は「…」にする。
+const NOTE_WIDTH: i32 = 240;
+
+/// 注釈だけの窓を折り返す幅。
+const WRAP_WIDTH: i32 = 360;
 
 /// 窓に預ける、描くものと色の組。
 struct Painted {
@@ -537,16 +664,44 @@ fn measure(content: &Content) -> (i32, i32) {
         let font = ui_font();
         let previous = font.map(|f| SelectObject(hdc, f.into()));
 
-        let line_height = line_height(hdc);
-        let mut widest = 0;
-        let lines = content.lines();
-        for line in &lines {
-            let text: Vec<u16> = line.encode_utf16().collect();
-            let mut size = SIZE::default();
-            if GetTextExtentPoint32W(hdc, &text, &mut size).as_bool() {
-                widest = widest.max(size.cx);
-            }
-        }
+        let measured = if content.wraps() {
+            // 折り返したときの大きさを、描く前に尋ねる。
+            let text = content
+                .lines()
+                .into_iter()
+                .next()
+                .map(|line| line.text)
+                .unwrap_or_default();
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: scaled(WRAP_WIDTH),
+                bottom: 0,
+            };
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut rect,
+                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
+            );
+            (rect.right - rect.left, rect.bottom - rect.top)
+        } else {
+            let line_height = line_height(hdc);
+            let lines = content.lines();
+            let widest = lines
+                .iter()
+                .map(|line| {
+                    let note = line.note.as_deref().map_or(0, |note| {
+                        scaled(NOTE_GAP) + text_width(hdc, note).min(scaled(NOTE_WIDTH))
+                    });
+                    text_width(hdc, &line.text) + note
+                })
+                .max()
+                .unwrap_or(0);
+            let rows = i32::try_from(lines.len()).unwrap_or(1);
+            (widest, line_height * rows)
+        };
 
         if let (Some(previous), Some(font)) = (previous, font) {
             SelectObject(hdc, previous);
@@ -554,8 +709,7 @@ fn measure(content: &Content) -> (i32, i32) {
         }
         ReleaseDC(None, hdc);
 
-        let rows = i32::try_from(lines.len()).unwrap_or(1);
-        (widest + PADDING * 2, line_height * rows + PADDING * 2)
+        (measured.0 + PADDING * 2, measured.1 + PADDING * 2)
     }
 }
 
@@ -672,9 +826,35 @@ mod tests {
                 .iter()
                 .map(|(label, text)| (*label, (*text).to_owned()))
                 .collect(),
+            notes: Vec::new(),
             number,
             count,
         }
+    }
+
+    #[test]
+    fn a_note_sits_beside_its_candidate() {
+        let mut page = page(&[('a', "橋"), ('s', "箸")], 1, 1);
+        page.notes = vec![Some("bridge".to_owned()), None];
+        let lines = page.lines();
+        assert_eq!(lines[0].text, "a: 橋");
+        assert_eq!(lines[0].note.as_deref(), Some("bridge"));
+        assert_eq!(lines[1], "s: 箸", "注釈の無い候補はそのまま");
+    }
+
+    #[test]
+    fn an_annotation_alone_is_wrapped_not_listed() {
+        // 一つずつ見せているあいだの注釈は、長くても全文を折り返して出す。
+        let content = Content::Annotation("とても長い注釈".repeat(20));
+        assert!(content.wraps());
+        assert!(!content.is_empty());
+        assert!(!Content::Page(page(&[('a', "橋")], 1, 1)).wraps());
+    }
+
+    #[test]
+    fn the_note_is_drawn_between_the_ink_and_the_ground() {
+        assert_eq!(mix(0xFF_FF_FF, 0x00_00_00), 0x7F_7F_7F);
+        assert_eq!(mix(0x20_40_60, 0x20_40_60), 0x20_40_60);
     }
 
     #[test]
@@ -716,7 +896,7 @@ mod tests {
             count: 1,
         })
         .lines();
-        assert!(lines.iter().all(|line| !line.contains(':')));
+        assert!(lines.iter().all(|line| !line.text.contains(':')));
     }
 
     #[test]
@@ -731,7 +911,10 @@ mod tests {
         assert_eq!(one.lines().len(), 1, "一ページしかないなら数えない");
 
         let many = page(&[('a', "漢字")], 2, 3);
-        assert_eq!(many.lines().last().map(String::as_str), Some("2 / 3"));
+        assert_eq!(
+            many.lines().last().map(|line| line.text.clone()).as_deref(),
+            Some("2 / 3")
+        );
     }
 
     #[test]
@@ -759,9 +942,9 @@ mod tests {
         })
         .lines();
         assert!(
-            line[0].starts_with("[[登録]]"),
+            line[0].text.starts_with("[[登録]]"),
             "登録の中の登録が一目で分かる: {}",
-            line[0]
+            line[0].text
         );
     }
 
