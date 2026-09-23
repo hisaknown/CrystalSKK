@@ -42,6 +42,17 @@
 //!
 //! 波線は使わない。綴り間違いの印として定着しているので、入力中の文字に
 //! 使うと「間違っている」と読まれる。
+//!
+//! # 印は出さない
+//!
+//! `▽` `▼` `*` は文書に出さず、空白に置き換える (PRD Q-09)。**状態は
+//! 下線で分かる**ので、記号まで並べると文字列が読みにくくなる。
+//!
+//! 消さずに空白を残すのは、詰めると区切りが見えなくなるため。`▽おく*り`
+//! は ` おく り` になり、送り仮名がどこから始まるかが空きで分かる。
+//!
+//! **CLI は記号のまま出す。** ターミナルに下線を引けないので、記号が唯一の
+//! 手がかりになる。同じ `Preedit` から違う見せ方をしているだけである。
 
 use windows::Win32::UI::TextServices::{
     IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
@@ -50,7 +61,7 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{BSTR, ComObject, GUID, Result, implement};
 
-use crystalskk_core::engine::Role;
+use crystalskk_core::engine::{Role, Segment};
 
 use crate::guard::guard;
 use crate::guids::{
@@ -136,6 +147,38 @@ impl Attribute {
             bAttr: windows::Win32::UI::TextServices::TF_DA_ATTR_INFO(self.kind),
         }
     }
+}
+
+/// 印 (`▽` `▼` `*`) を文書に出すときの文字。
+pub const MARKER_TEXT: &str = " ";
+
+/// 未確定の表示を、文書へ書く形に組み立てる。
+///
+/// 区切りごとに「貼る番号」と「出す文字」の組にする。ここで決まるのは
+/// 二つ。
+///
+/// - **印は空白に置き換える。** 記号は出さない
+/// - **印の見え方は続く部分に合わせる。** 印だけ違う線になると、一つの
+///   塊が途中で切れて見える
+pub fn document_segments(segments: &[Segment], atoms: Option<Atoms>) -> Vec<(u32, String)> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let role = match segment.role {
+                Role::Marker => segments
+                    .get(index + 1)
+                    .map_or(segment.role, |next| next.role),
+                role => role,
+            };
+            let atom = atoms.map_or(0, |atoms| atoms.for_role(role));
+            let text = match segment.role {
+                Role::Marker => MARKER_TEXT.to_owned(),
+                _ => segment.text.clone(),
+            };
+            (atom, text)
+        })
+        .collect()
 }
 
 /// 見え方に振られた番号。
@@ -315,6 +358,52 @@ mod tests {
             assert_eq!(tsf.crText.r#type.0, 0, "{}", attribute.description);
             assert_eq!(tsf.crBk.r#type.0, 0, "{}", attribute.description);
         }
+    }
+
+    fn segment(role: Role, text: &str) -> Segment {
+        Segment {
+            role,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_markers_become_spaces_in_the_document() {
+        // `▽おく*り` は ` おく り` になる。**記号は出さず、区切りは空きで
+        // 示す。**
+        let written = document_segments(
+            &[
+                segment(Role::Marker, "▽"),
+                segment(Role::Midashi, "おく"),
+                segment(Role::Marker, "*"),
+                segment(Role::Okuri, "り"),
+            ],
+            None,
+        );
+        let text: String = written.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(text, " おく り");
+    }
+
+    #[test]
+    fn a_marker_takes_the_look_of_what_follows_it() {
+        // 印だけ違う線になると、一つの塊が途中で切れて見える。
+        let atoms = Atoms {
+            input: 1,
+            okuri: 2,
+            converted: 3,
+        };
+        let written = document_segments(
+            &[segment(Role::Marker, "*"), segment(Role::Okuri, "り")],
+            Some(atoms),
+        );
+        assert_eq!(written[0].0, written[1].0, "印は送り仮名に合わせる");
+    }
+
+    #[test]
+    fn a_trailing_marker_keeps_its_own_look() {
+        // 続く部分が無いときは、自分の役目のまま。**落ちたりしない。**
+        let written = document_segments(&[segment(Role::Marker, "▼")], None);
+        assert_eq!(written.len(), 1);
     }
 
     #[test]

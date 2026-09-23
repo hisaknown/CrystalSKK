@@ -93,6 +93,9 @@ impl Preedit {
     }
 }
 
+/// 見出し語と送り仮名の区切りに出す印。
+pub const OKURI_MARK: &str = "*";
+
 /// 候補一覧を出すまでの変換回数。
 ///
 /// SKK は候補を**まず一つずつ**見せる。ほとんどの変換は最初の候補で
@@ -496,10 +499,17 @@ impl Engine {
                 match &c.okuri {
                     // 送り仮名を打っている最中。打ちかけのローマ字も
                     // 送り仮名の側に付く。
-                    Some(okuri) => segments.push(Segment::new(
-                        Role::Okuri,
-                        format!("*{}{}", okuri.kana, self.romaji.pending()),
-                    )),
+                    //
+                    // 区切りの `*` は**印として独立させる**。印をどう見せるか
+                    // は front end の裁量で、空白に置き換えることもできる
+                    // (PRD Q-09)。埋め込んでしまうと、その選択を奪う。
+                    Some(okuri) => {
+                        segments.push(Segment::new(Role::Marker, OKURI_MARK));
+                        segments.push(Segment::new(
+                            Role::Okuri,
+                            format!("{}{}", okuri.kana, self.romaji.pending()),
+                        ));
+                    }
                     None => {
                         if let Some(last) = segments.last_mut() {
                             last.text.push_str(self.romaji.pending());

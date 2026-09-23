@@ -34,3 +34,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0015](0015-draw-the-candidate-list-and-offer-it-too.md) | 候補一覧は自前で描き、同時に差し出す | Accepted | PRD Q-02 |
 | [0016](0016-the-dictionary-lives-in-one-process.md) | 辞書は一つのプロセスだけが持つ | Accepted | ADR-0001, ADR-0014, PRD Q-04 |
 | [0017](0017-draw-the-underlines-ourselves.md) | 下線は自分で引き、色は決めない | Accepted | ADR-0011, PRD Q-09 |
+| [0018](0018-keep-the-markers-out-of-the-document.md) | 印は文書に出さない | Accepted | ADR-0017, PRD Q-09 |
