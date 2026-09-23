@@ -341,28 +341,34 @@ fn an_empty_but_reachable_dictionary_still_registers() {
 // --- 補完 --------------------------------------------------------------
 
 /// 前方一致を返す辞書。
-struct Completing(Vec<String>);
+struct Completing(Vec<(&'static str, &'static str)>);
 
 impl CandidateSource for Completing {
-    fn lookup(&self, _query: &Query) -> Vec<Candidate> {
-        vec![Candidate::new("漢字")]
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        self.0
+            .iter()
+            .filter(|(heading, _)| *heading == query.key)
+            .map(|(_, word)| Candidate::new(*word))
+            .collect()
     }
 
     fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
         self.0
             .iter()
-            .filter(|key| key.starts_with(prefix) && key.as_str() != prefix)
+            .map(|(heading, _)| *heading)
+            .filter(|key| key.starts_with(prefix) && *key != prefix)
             .take(limit)
-            .cloned()
+            .map(str::to_owned)
             .collect()
     }
 }
 
 fn completing() -> Engine {
     Engine::new(Box::new(Completing(vec![
-        "かんじ".to_owned(),
-        "かんじゃ".to_owned(),
-        "かんき".to_owned(),
+        ("かん", "巻"),
+        ("かんじ", "漢字"),
+        ("かんじゃ", "患者"),
+        ("かんき", "寒気"),
     ])))
 }
 
@@ -425,7 +431,10 @@ fn the_window_shows_what_the_dot_would_take() {
     let mut engine = completing();
     typed(&mut engine, "Kann");
     let view = engine.completion().expect("当て推量が出ている");
-    assert_eq!(view.heading(), "かんじ");
+    // **窓に出すのは変換先。** 読みは見れば大抵分かる。
+    assert_eq!(view.current().word, "漢字");
+    assert_eq!(view.current().heading, "かんじ");
+    assert_eq!(view.entries.len(), 1, "受け取る前は一つきり");
     assert!(!view.taken, "まだ受け取っていない");
 }
 
@@ -434,7 +443,7 @@ fn the_window_follows_the_tab() {
     let mut engine = completing();
     typed(&mut engine, "Kann		");
     let view = engine.completion().expect("当て推量が出ている");
-    assert_eq!(view.heading(), "かんじゃ");
+    assert_eq!(view.current().word, "患者");
     assert!(view.taken, "Tab で当てたものは受け取り済み");
 }
 
@@ -444,9 +453,10 @@ fn walking_with_tab_shows_the_neighbours_too() {
     let mut engine = completing();
     typed(&mut engine, "Kann	");
     let view = engine.completion().expect("当て推量が出ている");
-    assert_eq!(view.page(), ["かんじ", "かんじゃ", "かんき"]);
-    assert_eq!(view.current_in_page(), 0);
-    assert_eq!(view.page_count(), 1);
+    let words: Vec<&str> = view.entries.iter().map(|e| e.word.as_str()).collect();
+    assert_eq!(words, ["漢字", "患者", "寒気"]);
+    assert_eq!(view.current, 0);
+    assert_eq!(view.count, 1);
 }
 
 #[test]
@@ -480,5 +490,8 @@ fn converting_ignores_the_guess() {
     let mut engine = completing();
     typed(&mut engine, "Kann ");
     let view = engine.candidates().expect("変換している");
-    assert_eq!(view.candidates[0].word, "漢字");
+    assert_eq!(
+        view.candidates[0].word, "巻",
+        "「かんじ」ではなく「かん」を引く"
+    );
 }

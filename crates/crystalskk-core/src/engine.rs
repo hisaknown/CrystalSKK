@@ -144,52 +144,42 @@ pub const PAGE_SIZE: usize = SELECTION_KEYS.len();
 /// 一覧に移る最初の候補の位置。
 const FIRST_LISTED: usize = UNTIL_CANDIDATE_LIST - 1;
 
+/// 補完として窓に出す一件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completed {
+    /// 見出し語。打った分も含めた全体。
+    pub heading: String,
+    /// 変換先。引けていなければ見出し語のまま。
+    pub word: String,
+}
+
 /// 補完として窓に出す内容。
+///
+/// 入っているのは**いま出すページの分だけ**である。区切るのはエンジンの
+/// 仕事で、表示側が数え直す必要はない。
 ///
 /// **動的補完のあいだ、出るのは一つきりである。** 選ぶ操作が無いので
 /// 一覧にしても仕方がない (ADR-0019)。窓は「いま `.` を打てば何になるか」
-/// を見せるだけ。
-///
-/// Tab で巡り始めたら話が違う。**次に何が来るかが見えないと、何度押せば
-/// よいか分からない。** そこからは前後を並べて出す。
+/// を見せるだけ。Tab で巡り始めたら話が違う — **次に何が来るかが見えないと、
+/// 何度押せばよいか分からない。**
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionView {
-    /// 前方一致した見出し。引いたときの並びのまま。
-    pub entries: Vec<String>,
-    /// いま当てている位置。
-    pub index: usize,
+    /// このページに出す分。
+    pub entries: Vec<Completed>,
+    /// ページの中での、当てているものの位置。
+    pub current: usize,
     /// もう受け取ったものか。Tab で当てた後は受け取り済みになる。
     pub taken: bool,
+    /// いま何ページ目か。1 から数える。
+    pub number: usize,
+    /// 全部で何ページか。
+    pub count: usize,
 }
 
 impl CompletionView {
-    /// 当てている見出し語。打った分も含めた全体。
-    pub fn heading(&self) -> &str {
-        self.entries[self.index].as_str()
-    }
-
-    /// いま出すページの見出し。
-    ///
-    /// 候補の一覧と同じ区切り方にする。**窓の高さが打鍵のたびに変わると
-    /// 落ち着かない。**
-    pub fn page(&self) -> &[String] {
-        let start = self.page_number() * PAGE_SIZE;
-        &self.entries[start..self.entries.len().min(start + PAGE_SIZE)]
-    }
-
-    /// ページの中での位置。
-    pub fn current_in_page(&self) -> usize {
-        self.index - self.page_number() * PAGE_SIZE
-    }
-
-    /// いま何ページ目か。0 から数える。
-    pub fn page_number(&self) -> usize {
-        self.index / PAGE_SIZE
-    }
-
-    /// 全部で何ページ分あるか。
-    pub fn page_count(&self) -> usize {
-        self.entries.len().div_ceil(PAGE_SIZE)
+    /// 当てている一件。
+    pub fn current(&self) -> &Completed {
+        &self.entries[self.current]
     }
 }
 
@@ -341,6 +331,11 @@ struct Completion {
     prefix: String,
     /// 前方一致した見出し。ソースが並べた順のまま。
     entries: Vec<String>,
+    /// それぞれの変換先。**窓に出す分だけ引く。**
+    ///
+    /// 一度に全部引くと、打鍵のたびに辞書を十何回も叩くことになる。
+    /// 引けていないところは `None` のまま置く。
+    words: Vec<Option<String>>,
     /// いま当てている位置。`None` なら、まだ当てていない。
     chosen: Option<usize>,
 }
@@ -595,6 +590,8 @@ impl Engine {
         }
         self.context.mode = self.mode;
         self.refresh_completion();
+        // 引き直した後に引く。巡った先のページも、ここで揃う。
+        self.resolve_completion();
 
         Response {
             handled: out.handled,
@@ -639,11 +636,65 @@ impl Engine {
         let State::Composing(comp) = &mut self.state else {
             return;
         };
-        comp.completion = (!entries.is_empty()).then_some(Completion {
+        comp.completion = (!entries.is_empty()).then(|| Completion {
             prefix,
+            words: vec![None; entries.len()],
             entries,
             chosen: None,
         });
+    }
+
+    /// 窓に出す分の変換先を引く。
+    ///
+    /// **読みではなく変換先を見せる。** 読みは見れば大抵分かるので、窓に
+    /// 出して意味があるのは変換した後の姿のほうである。
+    ///
+    /// 引くのは出す分だけ。まだ当てていなければ先頭の一つ、Tab で巡って
+    /// いればそのページ分である。
+    fn resolve_completion(&mut self) {
+        let State::Composing(comp) = &self.state else {
+            return;
+        };
+        let Some(completion) = &comp.completion else {
+            return;
+        };
+
+        let wanted: Vec<usize> = match completion.chosen {
+            None => vec![0],
+            Some(index) => {
+                let start = index / PAGE_SIZE * PAGE_SIZE;
+                (start..completion.entries.len().min(start + PAGE_SIZE)).collect()
+            }
+        };
+        let todo: Vec<(usize, String)> = wanted
+            .into_iter()
+            .filter(|at| completion.words.get(*at).is_some_and(Option::is_none))
+            .map(|at| (at, completion.entries[at].clone()))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+
+        let found: Vec<(usize, String)> = todo
+            .into_iter()
+            .filter_map(|(at, heading)| {
+                let query = Query::okuri_nashi(heading);
+                let candidate = self.dict.lookup(&query).into_iter().next()?;
+                Some((at, candidate.word))
+            })
+            .collect();
+
+        let State::Composing(comp) = &mut self.state else {
+            return;
+        };
+        let Some(completion) = &mut comp.completion else {
+            return;
+        };
+        for (at, word) in found {
+            if let Some(slot) = completion.words.get_mut(at) {
+                *slot = Some(word);
+            }
+        }
     }
 
     /// 当て推量を受け取り、変換して、確定まで進める。
@@ -755,10 +806,29 @@ impl Engine {
         if index >= completion.entries.len() {
             return None;
         }
+
+        // 受け取る前は一つきり。受け取った後はページの分を並べる。
+        let (start, end) = match completion.chosen {
+            None => (index, index + 1),
+            Some(_) => {
+                let start = index / PAGE_SIZE * PAGE_SIZE;
+                (start, completion.entries.len().min(start + PAGE_SIZE))
+            }
+        };
+        let entries = (start..end)
+            .map(|at| Completed {
+                heading: completion.entries[at].clone(),
+                word: completion.words[at]
+                    .clone()
+                    .unwrap_or_else(|| completion.entries[at].clone()),
+            })
+            .collect();
         Some(CompletionView {
-            entries: completion.entries.clone(),
-            index,
+            entries,
+            current: index - start,
             taken: completion.chosen.is_some(),
+            number: index / PAGE_SIZE + 1,
+            count: completion.entries.len().div_ceil(PAGE_SIZE),
         })
     }
 

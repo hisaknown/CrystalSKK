@@ -31,11 +31,11 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
-    CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW,
-    EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps, GetSysColor, GetTextExtentPoint32W, HDC,
-    HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC, SYS_COLOR_INDEX, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    CreateFontIndirectW, CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps, GetSysColor,
+    GetTextExtentPoint32W, HDC, HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC,
+    SYS_COLOR_INDEX, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
@@ -78,6 +78,17 @@ impl Content {
         }
     }
 
+    /// 反転して見せる行。無ければ `None`。
+    ///
+    /// **記号で示すより、地と文字の色を入れ替えるほうがよい。** 記号は
+    /// フォントによって幅も形も変わるし、語そのものと紛れる。
+    fn highlight(&self) -> Option<usize> {
+        match self {
+            Self::Completion(completion) if completion.taken => Some(completion.current),
+            _ => None,
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.lines().is_empty()
     }
@@ -85,22 +96,19 @@ impl Content {
 
 /// いま当てている補完。
 ///
-/// 動的補完のあいだは**一行しか出ない**。出る候補は一つきりで、選ぶ操作が
-/// 無いからである (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せる
-/// だけ。
+/// 出すのは**変換先**である。読みは見れば大抵分かるので、窓に出して意味が
+/// あるのは変換した後の姿のほうである。
 ///
-/// Tab で巡り始めたら、前後を並べて出す。**次に何が来るかが見えないと、
-/// 何度押せばよいか分からない。**
+/// 動的補完のあいだは一行しか出ない。出る候補は一つきりで、選ぶ操作が
+/// 無いからである (ADR-0019)。Tab で巡り始めたら前後を並べる。
 #[derive(Debug, Default, Clone)]
 pub struct Completion {
-    /// 当てている見出し語。打った分も含めた全体。
-    pub heading: String,
-    /// もう受け取ったものか。
-    pub taken: bool,
-    /// Tab で巡っているときに並べる見出し。受け取る前は使わない。
+    /// このページに出す変換先。
     pub entries: Vec<String>,
     /// ページの中での、当てているものの位置。
     pub current: usize,
+    /// もう受け取ったものか。
+    pub taken: bool,
     /// いま何ページ目か。1 から数える。
     pub number: usize,
     /// 全部で何ページか。
@@ -111,26 +119,18 @@ impl Completion {
     fn lines(&self) -> Vec<String> {
         if !self.taken {
             // 一覧と同じ「キー: 語」の形にする。押すキーがそのまま左に出る。
-            return vec![format!(
-                "{}: {}",
-                crystalskk_core::engine::COMPLETION_TAKE,
-                self.heading
-            )];
+            return self
+                .entries
+                .first()
+                .map(|word| format!("{}: {word}", crystalskk_core::engine::COMPLETION_TAKE))
+                .into_iter()
+                .collect();
         }
 
         // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
-        // しないのに、出したままにはできない。**
-        let mut lines: Vec<String> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(at, entry)| {
-                // 当てているものに印を付ける。窓には反転も色も無いので、
-                // 文字で示すほかない。
-                let mark = if at == self.current { '>' } else { ' ' };
-                format!("{mark} {entry}")
-            })
-            .collect();
+        // しないのに、出したままにはできない。** 当てているものは
+        // [`Content::highlight`] が反転させる。
+        let mut lines = self.entries.clone();
         if self.count > 1 {
             lines.push(format!("{} / {}", self.number, self.count));
         }
@@ -462,6 +462,7 @@ unsafe fn paint(hdc: HDC, content: &Content) {
         SetTextColor(hdc, system_color(COLOR_WINDOWTEXT.0));
 
         let line_height = line_height(hdc);
+        let highlight = content.highlight();
         for (index, line) in content.lines().iter().enumerate() {
             let top = PADDING + line_height * i32::try_from(index).unwrap_or(0);
             let mut rect = RECT {
@@ -470,6 +471,32 @@ unsafe fn paint(hdc: HDC, content: &Content) {
                 right: width - PADDING,
                 bottom: top + line_height,
             };
+
+            // 当てている行は地と文字の色を入れ替える。**記号で示すより
+            // 確かで、フォントによって見た目が変わらない。**
+            //
+            // 帯は余白いっぱいまで広げる。文字の幅だけ塗ると、行によって
+            // 帯の長さが変わってちらついて見える。
+            let selected = highlight == Some(index);
+            if selected {
+                let band = RECT {
+                    left: 1,
+                    right: width - 1,
+                    ..rect
+                };
+                let brush = CreateSolidBrush(system_color(COLOR_HIGHLIGHT.0));
+                FillRect(hdc, &band, brush);
+                let _ = DeleteObject(brush.into());
+            }
+            SetTextColor(
+                hdc,
+                system_color(if selected {
+                    COLOR_HIGHLIGHTTEXT.0
+                } else {
+                    COLOR_WINDOWTEXT.0
+                }),
+            );
+
             let mut text: Vec<u16> = line.encode_utf16().collect();
             DrawTextW(
                 hdc,
@@ -643,35 +670,34 @@ mod tests {
     #[test]
     fn the_guess_shows_the_key_that_takes_it() {
         let line = Content::Completion(Completion {
-            heading: "かんじ".to_owned(),
+            entries: vec!["漢字".to_owned()],
             ..Completion::default()
         })
         .lines();
-        assert_eq!(line, [".: かんじ"]);
+        assert_eq!(line, [".: 漢字"], "出すのは変換先");
     }
 
     #[test]
     fn walking_with_tab_lists_the_neighbours() {
         // 次に何が来るかが見えないと、何度押せばよいか分からない。
-        let lines = Content::Completion(Completion {
-            heading: "かんじゃ".to_owned(),
+        let content = Content::Completion(Completion {
             taken: true,
-            entries: vec!["かんじ".to_owned(), "かんじゃ".to_owned()],
+            entries: vec!["漢字".to_owned(), "患者".to_owned()],
             current: 1,
             number: 1,
             count: 1,
-        })
-        .lines();
-        assert_eq!(lines, ["  かんじ", "> かんじゃ"]);
+        });
+        assert_eq!(content.lines(), ["漢字", "患者"]);
+        // 印を足さず、行そのものを反転させる。
+        assert_eq!(content.highlight(), Some(1));
     }
 
     #[test]
     fn a_taken_guess_shows_no_key() {
         // 同じキーが同じことをしないのに、案内を出したままにはできない。
         let lines = Content::Completion(Completion {
-            heading: "かんじゃ".to_owned(),
             taken: true,
-            entries: vec!["かんじゃ".to_owned()],
+            entries: vec!["患者".to_owned()],
             current: 0,
             number: 1,
             count: 1,

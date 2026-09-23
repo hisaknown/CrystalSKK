@@ -55,36 +55,33 @@ fn page(view: &CandidateView) -> String {
 ///
 /// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
 /// 一つぶんの注釈を出す先がない。
-/// 当てている補完。
+/// 当てている補完。**出すのは変換先。** 読みは見れば大抵分かる。
 ///
-/// 受け取る前は一行。Tab で巡り始めたら前後も並べる。
+/// 受け取る前は一行。Tab で巡り始めたら前後も並べる。端末では反転が使え
+/// ないので、当てているものを括弧でくくる。
 pub fn completion(view: &CompletionView) -> String {
     if !view.taken {
         return format!(
             "{}: {}",
             crystalskk_core::engine::COMPLETION_TAKE,
-            view.heading()
+            view.current().word
         );
     }
     let page: Vec<String> = view
-        .page()
+        .entries
         .iter()
         .enumerate()
         .map(|(at, entry)| {
-            if at == view.current_in_page() {
-                format!("[{entry}]")
+            if at == view.current {
+                format!("[{}]", entry.word)
             } else {
-                entry.clone()
+                entry.word.clone()
             }
         })
         .collect();
     let mut text = page.join(" ");
-    if view.page_count() > 1 {
-        text.push_str(&format!(
-            "  ({} / {})",
-            view.page_number() + 1,
-            view.page_count()
-        ));
+    if view.count > 1 {
+        text.push_str(&format!("  ({} / {})", view.number, view.count));
     }
     text
 }
