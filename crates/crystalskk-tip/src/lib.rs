@@ -46,6 +46,7 @@ pub mod preserved;
 pub mod profile;
 pub mod registry;
 pub mod service;
+pub mod theme;
 pub mod uielement;
 
 use factory::ClassFactory;
@@ -78,6 +79,7 @@ pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_v
     }
     if reason == DLL_PROCESS_DETACH {
         candwin::unregister_class();
+        theme::unregister_class();
     }
     true.into()
 }

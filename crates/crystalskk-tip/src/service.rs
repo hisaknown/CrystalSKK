@@ -67,6 +67,9 @@ struct Activation {
     indicator_object: ComObject<ModeIndicator>,
     /// 入切の区画を見張るための受付番号。外すときに要る。
     open_close_cookie: Option<u32>,
+    /// タスクバーの明るさの変化を聞く。落とせば聞くのをやめる。
+    #[allow(dead_code, reason = "持っていること自体が役目")]
+    theme_watcher: Option<crate::theme::Watcher>,
 }
 
 /// CrystalSKK の TIP。
@@ -653,6 +656,9 @@ impl TextService_Impl {
         // 品書きで選ばれたことを受け取る。無効化のときに外す。
         let service = self.to_object();
         indicator_object.set_handler(move |command| service.on_menu(command));
+        // タスクバーの明るさが変わったら、入力モードの絵を描き直させる。
+        let follower = indicator_object.clone();
+        let theme_watcher = crate::theme::Watcher::start(move || follower.follow_theme());
         if let Err(e) = langbar::add(&thread_manager, &indicator) {
             log::error(&format!("言語バーに項目を出せなかった: {}", e.message()));
         }
@@ -672,6 +678,7 @@ impl TextService_Impl {
             indicator,
             indicator_object,
             open_close_cookie,
+            theme_watcher,
         });
 
         // 見え方の番号を取る。取れなくても入力は続くので、記録だけする。
@@ -912,6 +919,17 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         guard("OnSetFocus", || {
             self.this.drop_composition();
             self.this.engine.borrow_mut().reset();
+            // 見張りの窓が作れなかったときの備え。入力先が変わるたびに、
+            // タスクバーの明るさを確かめ直す。
+            let indicator = self
+                .this
+                .activation
+                .borrow()
+                .as_ref()
+                .map(|a| a.indicator_object.clone());
+            if let Some(indicator) = indicator {
+                indicator.follow_theme();
+            }
             if fforeground.as_bool() {
                 self.this.refresh_settings();
             }

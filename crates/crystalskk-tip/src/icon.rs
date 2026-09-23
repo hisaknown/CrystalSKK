@@ -31,11 +31,12 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreateFontW, CreateSolidBrush, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP,
-    DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE, FW_SEMIBOLD,
-    FillRect, GdiFlush, GetDC, GetDeviceCaps, HBITMAP, HDC, HFONT, LOGPIXELSY, OUT_DEFAULT_PRECIS,
-    ReleaseDC, SHIFTJIS_CHARSET, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC,
+    CreateDIBSection, CreateFontW, CreateSolidBrush, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER,
+    DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE,
+    FONT_QUALITY, FW_SEMIBOLD, FillRect, GdiFlush, GetDC, GetDeviceCaps, HBITMAP, HDC, HFONT,
+    LOGPIXELSY, OUT_DEFAULT_PRECIS, ReleaseDC, SHIFTJIS_CHARSET, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 use windows::core::{Result, w};
@@ -49,46 +50,62 @@ const BASE_DPI: i32 = 96;
 /// これ以上は大きくしない。
 const MAX_SIZE: i32 = 64;
 
-/// 地の色。暗い紺。明るい背景でも沈んで見える。
+/// 顔のアイコン (設定画面の一覧に出る絵) の地の色。暗い紺。
+///
+/// **こちらは色付きで、テーマに追従しない。** 一覧の絵は導入のときに
+/// 一度登録するだけで、テーマに合わせて差し替える口が無い。
 const BACKGROUND: COLORREF = COLORREF(0x00_55_3A_2B);
 
 /// 文字の色。
 const FOREGROUND: COLORREF = COLORREF(0x00_FF_FF_FF);
 
-/// モードの文字を描いたアイコンを作る。
+/// モードの文字を描いたアイコンを作る。**単色で、地は透明。**
+///
+/// 色 (`0xRRGGBB`) はタスクバーの明るさに合わせて渡す
+/// ([`crate::theme::Theme::ink`])。Windows 標準の IME と同じく、明るい
+/// タスクバーには黒、暗いタスクバーには白で出る。
 ///
 /// 返したアイコンは呼び出し側が [`windows::Win32::UI::WindowsAndMessaging::DestroyIcon`]
 /// で解放する。言語バーはそう扱う。
-pub fn render(label: &str) -> Result<HICON> {
+pub fn render(label: &str, ink: u32) -> Result<HICON> {
     let size = icon_size();
+    let Some(coverage) = glyph_coverage(label, size) else {
+        return Err(windows::core::Error::from(
+            windows::Win32::Foundation::E_FAIL,
+        ));
+    };
+    // 濃さをそのまま透過度にし、色はすべて同じにする。
+    let pixels: Vec<u32> = coverage
+        .iter()
+        .map(|alpha| (u32::from(*alpha) << 24) | (ink & 0x00FF_FFFF))
+        .collect();
+    let icon = icon_from_pixels(&pixels, size);
+    match &icon {
+        Ok(_) => crate::log::trace(&format!("アイコンを作った ({size} 画素, 「{label}」)")),
+        Err(e) => crate::log::error(&format!("アイコンを作れなかった: {}", e.message())),
+    }
+    icon
+}
 
-    // SAFETY: 以下は GDI の定める手順どおりで、作ったものはすべて
-    // この関数の中で後始末する。
+/// 画素から `HICON` を作る。上の行が先、一画素 `0xAARRGGBB`。
+fn icon_from_pixels(pixels: &[u32], size: i32) -> Result<HICON> {
+    // SAFETY: GDI の手順どおりで、作ったものはすべてこの関数の中で後始末する。
     unsafe {
         let screen = GetDC(None);
         let memory = CreateCompatibleDC(Some(screen));
-
         let mut bits: *mut c_void = std::ptr::null_mut();
         let color = create_surface(memory, size, &mut bits);
-        let color = match color {
-            Ok(color) => color,
-            Err(e) => {
-                let _ = DeleteDC(memory);
-                ReleaseDC(None, screen);
-                return Err(e);
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, screen);
+        let color = color?;
+
+        if !bits.is_null() {
+            let count = (size * size).max(0) as usize;
+            let target = std::slice::from_raw_parts_mut(bits.cast::<u32>(), count);
+            for (slot, pixel) in target.iter_mut().zip(pixels) {
+                *slot = *pixel;
             }
-        };
-
-        let previous = SelectObject(memory, color.into());
-        draw(memory, size, label);
-        SelectObject(memory, previous);
-
-        // GDI の描画は溜められてから実行される。画素へ直接触る前に
-        // 吐き出させないと、まだ描かれていないものを読むことになる。
-        let _ = GdiFlush();
-
-        // GDI は透過情報を書かないので、全面を不透明にする。
-        fill_alpha(bits, size);
+        }
 
         // 覆い。32 ビットの色を使うので全面を「隠さない」= 0 にする。
         //
@@ -105,18 +122,69 @@ pub fn render(label: &str) -> Result<HICON> {
             hbmColor: color,
         };
         let icon = CreateIconIndirect(&info);
-        match &icon {
-            Ok(_) => crate::log::trace(&format!("アイコンを作った ({size} 画素, 「{label}」)")),
-            Err(e) => crate::log::error(&format!("アイコンを作れなかった: {}", e.message())),
-        }
 
         // アイコンは中身を写して作られるので、こちらの絵は捨ててよい。
         let _ = DeleteObject(color.into());
         let _ = DeleteObject(mask.into());
+        icon
+    }
+}
+
+/// 文字の濃さを一画素一バイトで取り出す。上の行が先。
+///
+/// GDI は透過の情報を書かないので、黒地に白で描いて、赤の値を濃さと
+/// して読む。**ClearType は使わない。** 色のにじみが濃さに混ざる。
+fn glyph_coverage(label: &str, size: i32) -> Option<Vec<u8>> {
+    // SAFETY: GDI の手順どおりで、作ったものはこの関数の中で後始末する。
+    unsafe {
+        let screen = GetDC(None);
+        let memory = CreateCompatibleDC(Some(screen));
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let surface = create_surface(memory, size, &mut bits).ok();
+
+        let coverage = surface.and_then(|surface| {
+            let previous = SelectObject(memory, surface.into());
+            let area = RECT {
+                left: 0,
+                top: 0,
+                right: size,
+                bottom: size,
+            };
+            let black = CreateSolidBrush(COLORREF(0));
+            FillRect(memory, &area, black);
+            let _ = DeleteObject(black.into());
+
+            let font = mode_font(size, ANTIALIASED_QUALITY);
+            let previous_font = SelectObject(memory, font.into());
+            SetBkMode(memory, TRANSPARENT);
+            SetTextColor(memory, COLORREF(0x00FF_FFFF));
+            let mut text: Vec<u16> = label.encode_utf16().collect();
+            let mut area = area;
+            DrawTextW(
+                memory,
+                &mut text,
+                &mut area,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+            );
+            SelectObject(memory, previous_font);
+            let _ = DeleteObject(font.into());
+            SelectObject(memory, previous);
+            let _ = GdiFlush();
+
+            let taken = (!bits.is_null()).then(|| {
+                let count = (size * size).max(0) as usize;
+                std::slice::from_raw_parts(bits.cast::<u32>(), count)
+                    .iter()
+                    .map(|pixel| ((pixel >> 16) & 0xFF) as u8)
+                    .collect()
+            });
+            let _ = DeleteObject(surface.into());
+            taken
+        });
+
         let _ = DeleteDC(memory);
         ReleaseDC(None, screen);
-
-        icon
+        coverage
     }
 }
 
@@ -279,7 +347,7 @@ unsafe fn draw(dc: HDC, size: i32, label: &str) {
         FillRect(dc, &area, background);
         let _ = DeleteObject(background.into());
 
-        let font = mode_font(size);
+        let font = mode_font(size, DEFAULT_QUALITY);
         let previous = SelectObject(dc, font.into());
 
         SetBkMode(dc, TRANSPARENT);
@@ -303,7 +371,7 @@ unsafe fn draw(dc: HDC, size: i32, label: &str) {
 ///
 /// 仮名を含むので、仮名を持つ字体を頼む。無ければ Windows が similar な
 /// ものを選ぶ。
-fn mode_font(size: i32) -> HFONT {
+fn mode_font(size: i32, quality: FONT_QUALITY) -> HFONT {
     // SAFETY: 大きさと種別を渡して字体を頼むだけ。
     unsafe {
         CreateFontW(
@@ -319,7 +387,7 @@ fn mode_font(size: i32) -> HFONT {
             SHIFTJIS_CHARSET,
             OUT_DEFAULT_PRECIS,
             windows::Win32::Graphics::Gdi::CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY,
+            quality,
             FF_DONTCARE.0.into(),
             w!("Yu Gothic UI"),
         )
@@ -424,5 +492,36 @@ mod tests {
     #[test]
     fn an_empty_icon_needs_no_mask() {
         assert_eq!(mask_len(0), 0);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn the_glyph_has_ink_and_the_corners_are_clear() {
+        // 地は透明、文字の部分だけに濃さがある。**全面が塗られていたら、
+        // タスクバーに四角が出る。**
+        let size = 32;
+        let coverage = glyph_coverage("あ", size).expect("描ける");
+        let at = |x: i32, y: i32| coverage[(y * size + x) as usize];
+        assert_eq!(at(0, 0), 0, "左上は透明");
+        assert_eq!(at(size - 1, size - 1), 0, "右下は透明");
+        assert!(coverage.iter().any(|a| *a == 255), "濃いところがある");
+        assert!(coverage.iter().any(|a| *a > 0 && *a < 255), "縁はなめらか");
+        if std::env::var_os("SHOW_GLYPH").is_some() {
+            for y in 0..size {
+                let row: String = (0..size)
+                    .map(|x| match at(x, y) {
+                        0 => ' ',
+                        1..=85 => '.',
+                        86..=170 => '+',
+                        _ => '#',
+                    })
+                    .collect();
+                println!("{row}");
+            }
+        }
     }
 }

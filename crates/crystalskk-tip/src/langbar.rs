@@ -48,6 +48,8 @@ pub struct ModeIndicator {
     sinks: RefCell<Vec<(u32, ITfLangBarItemSink)>>,
     /// 次に配る受付番号。
     next_cookie: RefCell<u32>,
+    /// いま描いているタスクバーの明るさ。
+    theme: std::cell::Cell<crate::theme::Theme>,
     /// 品書きで選ばれたことを渡す先。有効化されている間だけ入る。
     ///
     /// 渡す先は TIP 本体で、本体もこの表示を持っている。**無効化のときに
@@ -75,7 +77,19 @@ impl ModeIndicator {
             shown: RefCell::new(None),
             sinks: RefCell::new(Vec::new()),
             next_cookie: RefCell::new(1),
+            theme: std::cell::Cell::new(crate::theme::Theme::current()),
             handler: RefCell::new(None),
+        }
+    }
+
+    /// タスクバーの明るさを読み直し、変わっていれば描き直させる。
+    ///
+    /// テーマが変わったときと、入力先が変わったときに呼ぶ。
+    pub fn follow_theme(&self) {
+        let theme = crate::theme::Theme::current();
+        if self.theme.replace(theme) != theme {
+            log::write(&format!("タスクバーの明るさに合わせて描き直す ({theme:?})"));
+            self.notify(TF_LBI_ICON);
         }
     }
 
@@ -120,6 +134,12 @@ impl ModeIndicator {
         }
         *self.shown.borrow_mut() = shown;
 
+        // 変化を知らせないと、言語バーは古い表示のままになる。
+        self.notify(TF_LBI_STATUS | TF_LBI_TEXT | TF_LBI_ICON);
+    }
+
+    /// 言語バーに描き直させる。
+    fn notify(&self, what: u32) {
         // 知らせる相手を複製してから呼ぶ。借用したまま外へ出ると、
         // 呼んだ先から戻ってきたときに借用が重なってパニックになる。
         let sinks: Vec<ITfLangBarItemSink> = self
@@ -128,12 +148,10 @@ impl ModeIndicator {
             .iter()
             .map(|(_, sink)| sink.clone())
             .collect();
-
-        // 変化を知らせないと、言語バーは古い表示のままになる。
         for sink in sinks {
             // SAFETY: 相手から預かった受け口をそのまま呼ぶ。
             unsafe {
-                let _ = sink.OnUpdate(TF_LBI_STATUS | TF_LBI_TEXT | TF_LBI_ICON);
+                let _ = sink.OnUpdate(what);
             }
         }
     }
@@ -251,7 +269,9 @@ impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
     /// 返したアイコンは言語バー側が解放する。呼ばれるたびに作り直すのは
     /// そのため。拡大率が変わっても追随できる利点もある。
     fn GetIcon(&self) -> Result<HICON> {
-        guard("GetIcon", || icon::render(self.this.label()))
+        guard("GetIcon", || {
+            icon::render(self.this.label(), self.this.theme.get().ink())
+        })
     }
 
     fn GetText(&self) -> Result<BSTR> {
