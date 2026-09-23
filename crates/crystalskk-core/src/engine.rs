@@ -489,6 +489,15 @@ impl Engine {
         self.context = context;
     }
 
+    /// カーソルの前後の文章を差し替える。取れなければ `None`。
+    ///
+    /// **直近の確定文字列は残す。** それはエンジンが自分で覚えているもので、
+    /// 前の文章が取れないときの代わりになる。
+    pub fn set_surroundings(&mut self, preceding: Option<String>, following: Option<String>) {
+        self.context.preceding_text = preceding;
+        self.context.following_text = following;
+    }
+
     /// 辞書登録の入れ子の深さ。0 なら登録中ではない。
     pub fn registration_depth(&self) -> usize {
         self.registrations.len()
@@ -1346,7 +1355,7 @@ impl Engine {
 
         let query = query_of(&comp);
 
-        let mut candidates = self.dict.lookup(&query);
+        let mut candidates = self.dict.lookup_for_conversion(&query, &self.context);
         self.ranker.rank(&self.context, &query, &mut candidates);
 
         if candidates.is_empty() {

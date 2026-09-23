@@ -81,6 +81,18 @@ pub trait CandidateSource {
     /// 並び順の最終決定は [`Ranker`] が行うので、ここでは順位付けに悩まなくてよい。
     fn lookup(&self, query: &Query) -> Vec<Candidate>;
 
+    /// 変換のために引く。周辺情報を添える。
+    ///
+    /// 周辺情報を並びに生かせるソース (候補をプロセスの外で引き、そこで
+    /// 並べるもの) だけが上書きする。既定は [`Self::lookup`] と同じ。
+    ///
+    /// **エンジンが使うのは変換のときだけである。** 補完の見せ方や語の
+    /// 有無を確かめるときは [`Self::lookup`] を使い、並べる手間をかけない。
+    fn lookup_for_conversion(&self, query: &Query, context: &Context) -> Vec<Candidate> {
+        let _ = context;
+        self.lookup(query)
+    }
+
     /// 前方一致する見出しを返す。補完に使う。
     ///
     /// 並びはソースに任せる。**使った語を先に出すのは、それを知っている
@@ -119,8 +131,51 @@ pub struct Context {
     pub recent_commits: Vec<String>,
     /// カーソル前のテキスト。取得できなければ `None`。
     pub preceding_text: Option<String>,
+    /// カーソル後のテキスト。取得できなければ `None`。
+    ///
+    /// 文章の末尾に書き足していくのがふつうなので、取れても空のことが多い。
+    pub following_text: Option<String>,
     /// 入力先アプリケーションの識別子。取得できなければ `None`。
     pub application: Option<String>,
+}
+
+impl Context {
+    /// カーソル前の文章を、末尾から `max_chars` 文字まで。
+    ///
+    /// **取れなければ直近の確定文字列で代える。** 周辺テキストを返さない
+    /// アプリでも、この入力で確定したものは分かっている。
+    pub fn text_before(&self, max_chars: usize) -> String {
+        let text = match &self.preceding_text {
+            Some(text) => text.clone(),
+            None => self
+                .recent_commits
+                .iter()
+                .rev()
+                .map(String::as_str)
+                .collect(),
+        };
+        last_chars(&text, max_chars).to_owned()
+    }
+
+    /// カーソル後の文章を、先頭から `max_chars` 文字まで。取れなければ空。
+    pub fn text_after(&self, max_chars: usize) -> String {
+        let text = self.following_text.as_deref().unwrap_or_default();
+        match text.char_indices().nth(max_chars) {
+            Some((end, _)) => text[..end].to_owned(),
+            None => text.to_owned(),
+        }
+    }
+}
+
+/// 末尾から `max_chars` 文字。
+fn last_chars(text: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+    match text.char_indices().rev().nth(max_chars - 1) {
+        Some((start, _)) => &text[start..],
+        None => text,
+    }
 }
 
 /// 候補の提示順を決めるもの。
@@ -203,6 +258,37 @@ impl CandidateSource for ChainedSource {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn the_text_before_is_cut_from_its_end() {
+        let context = Context {
+            preceding_text: Some("今日は会議の".to_owned()),
+            ..Context::default()
+        };
+        assert_eq!(context.text_before(3), "会議の");
+        assert_eq!(context.text_before(100), "今日は会議の");
+        assert_eq!(context.text_before(0), "");
+    }
+
+    #[test]
+    fn the_text_after_is_cut_from_its_start() {
+        let context = Context {
+            following_text: Some("を務めた。".to_owned()),
+            ..Context::default()
+        };
+        assert_eq!(context.text_after(3), "を務め");
+        assert_eq!(context.text_after(100), "を務めた。");
+        assert_eq!(Context::default().text_after(5), "");
+    }
+
+    #[test]
+    fn recent_commits_stand_in_oldest_first() {
+        let context = Context {
+            recent_commits: vec!["会議の".to_owned(), "今日は".to_owned()],
+            ..Context::default()
+        };
+        assert_eq!(context.text_before(100), "今日は会議の");
+    }
 
     struct Fixed(HashMap<String, Vec<Candidate>>);
 
