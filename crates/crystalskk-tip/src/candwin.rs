@@ -85,30 +85,56 @@ impl Content {
 
 /// いま当てている補完。
 ///
-/// **一行しか出ない。** 出る候補は一つきりで、選ぶ操作が無いからである
-/// (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せるだけ。
+/// 動的補完のあいだは**一行しか出ない**。出る候補は一つきりで、選ぶ操作が
+/// 無いからである (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せる
+/// だけ。
+///
+/// Tab で巡り始めたら、前後を並べて出す。**次に何が来るかが見えないと、
+/// 何度押せばよいか分からない。**
 #[derive(Debug, Default, Clone)]
 pub struct Completion {
     /// 当てている見出し語。打った分も含めた全体。
     pub heading: String,
     /// もう受け取ったものか。
     pub taken: bool,
+    /// Tab で巡っているときに並べる見出し。受け取る前は使わない。
+    pub entries: Vec<String>,
+    /// ページの中での、当てているものの位置。
+    pub current: usize,
+    /// いま何ページ目か。1 から数える。
+    pub number: usize,
+    /// 全部で何ページか。
+    pub count: usize,
 }
 
 impl Completion {
     fn lines(&self) -> Vec<String> {
-        if self.taken {
-            // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
-            // しないのに、出したままにはできない。**
-            vec![self.heading.clone()]
-        } else {
+        if !self.taken {
             // 一覧と同じ「キー: 語」の形にする。押すキーがそのまま左に出る。
-            vec![format!(
+            return vec![format!(
                 "{}: {}",
                 crystalskk_core::engine::COMPLETION_TAKE,
                 self.heading
-            )]
+            )];
         }
+
+        // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
+        // しないのに、出したままにはできない。**
+        let mut lines: Vec<String> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(at, entry)| {
+                // 当てているものに印を付ける。窓には反転も色も無いので、
+                // 文字で示すほかない。
+                let mark = if at == self.current { '>' } else { ' ' };
+                format!("{mark} {entry}")
+            })
+            .collect();
+        if self.count > 1 {
+            lines.push(format!("{} / {}", self.number, self.count));
+        }
+        lines
     }
 }
 
@@ -618,21 +644,40 @@ mod tests {
     fn the_guess_shows_the_key_that_takes_it() {
         let line = Content::Completion(Completion {
             heading: "かんじ".to_owned(),
-            taken: false,
+            ..Completion::default()
         })
         .lines();
         assert_eq!(line, [".: かんじ"]);
     }
 
     #[test]
-    fn a_taken_guess_shows_no_key() {
-        // 同じキーが同じことをしないのに、案内を出したままにはできない。
-        let line = Content::Completion(Completion {
+    fn walking_with_tab_lists_the_neighbours() {
+        // 次に何が来るかが見えないと、何度押せばよいか分からない。
+        let lines = Content::Completion(Completion {
             heading: "かんじゃ".to_owned(),
             taken: true,
+            entries: vec!["かんじ".to_owned(), "かんじゃ".to_owned()],
+            current: 1,
+            number: 1,
+            count: 1,
         })
         .lines();
-        assert_eq!(line, ["かんじゃ"]);
+        assert_eq!(lines, ["  かんじ", "> かんじゃ"]);
+    }
+
+    #[test]
+    fn a_taken_guess_shows_no_key() {
+        // 同じキーが同じことをしないのに、案内を出したままにはできない。
+        let lines = Content::Completion(Completion {
+            heading: "かんじゃ".to_owned(),
+            taken: true,
+            entries: vec!["かんじゃ".to_owned()],
+            current: 0,
+            number: 1,
+            count: 1,
+        })
+        .lines();
+        assert!(lines.iter().all(|line| !line.contains(':')));
     }
 
     #[test]

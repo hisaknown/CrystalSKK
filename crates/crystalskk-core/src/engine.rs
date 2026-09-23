@@ -146,14 +146,51 @@ const FIRST_LISTED: usize = UNTIL_CANDIDATE_LIST - 1;
 
 /// 補完として窓に出す内容。
 ///
-/// **出るのは一つきりである。** 一覧にしないのは、選ぶ操作が無いから
-/// である (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せるだけ。
+/// **動的補完のあいだ、出るのは一つきりである。** 選ぶ操作が無いので
+/// 一覧にしても仕方がない (ADR-0019)。窓は「いま `.` を打てば何になるか」
+/// を見せるだけ。
+///
+/// Tab で巡り始めたら話が違う。**次に何が来るかが見えないと、何度押せば
+/// よいか分からない。** そこからは前後を並べて出す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionView {
-    /// 当てている見出し語。打った分も含めた全体。
-    pub heading: String,
+    /// 前方一致した見出し。引いたときの並びのまま。
+    pub entries: Vec<String>,
+    /// いま当てている位置。
+    pub index: usize,
     /// もう受け取ったものか。Tab で当てた後は受け取り済みになる。
     pub taken: bool,
+}
+
+impl CompletionView {
+    /// 当てている見出し語。打った分も含めた全体。
+    pub fn heading(&self) -> &str {
+        self.entries[self.index].as_str()
+    }
+
+    /// いま出すページの見出し。
+    ///
+    /// 候補の一覧と同じ区切り方にする。**窓の高さが打鍵のたびに変わると
+    /// 落ち着かない。**
+    pub fn page(&self) -> &[String] {
+        let start = self.page_number() * PAGE_SIZE;
+        &self.entries[start..self.entries.len().min(start + PAGE_SIZE)]
+    }
+
+    /// ページの中での位置。
+    pub fn current_in_page(&self) -> usize {
+        self.index - self.page_number() * PAGE_SIZE
+    }
+
+    /// いま何ページ目か。0 から数える。
+    pub fn page_number(&self) -> usize {
+        self.index / PAGE_SIZE
+    }
+
+    /// 全部で何ページ分あるか。
+    pub fn page_count(&self) -> usize {
+        self.entries.len().div_ceil(PAGE_SIZE)
+    }
 }
 
 /// 候補ウィンドウに出す内容。
@@ -715,8 +752,12 @@ impl Engine {
         };
         let completion = comp.completion.as_ref()?;
         let index = completion.chosen.unwrap_or(0);
+        if index >= completion.entries.len() {
+            return None;
+        }
         Some(CompletionView {
-            heading: completion.entries.get(index)?.clone(),
+            entries: completion.entries.clone(),
+            index,
             taken: completion.chosen.is_some(),
         })
     }
@@ -1126,9 +1167,13 @@ impl Engine {
 
     /// `q` でカタカナに確定したことを、辞書に覚えさせる。
     ///
-    /// **その見出し語が辞書にあるときだけ覚える。** 「あ」を打って `q` と
-    /// したものまで覚えていては、辞書が使い捨ての語で埋まる。辞書に載って
-    /// いる見出し語なら、次は space でも同じカタカナが出てほしい。
+    /// **そのカタカナが、その見出し語の候補として辞書にあるときだけ覚える。**
+    /// 見出し語があるだけでは足りない。「かんじ」は辞書にあるが「カンジ」は
+    /// 候補に無いので、覚えれば**辞書に無い語を作ってしまう**。
+    ///
+    /// 「ぱそこん /パソコン/」のように、カタカナがそのまま候補になっている
+    /// 語は多い。そこで `q` を使ったなら、次は space でも同じものが出て
+    /// ほしい。覚えるのはその並べ替えであって、新しい語ではない。
     ///
     /// 送り仮名があるときは覚えない。カタカナにするのは送り仮名まで含めた
     /// 全体なので (「おくり」→「オクリ」)、送りを別に持つ候補の形に
@@ -1138,7 +1183,7 @@ impl Engine {
             return;
         }
         let query = query_of(comp);
-        if self.dict.lookup(&query).is_empty() {
+        if !self.dict.lookup(&query).iter().any(|c| c.word == text) {
             return;
         }
         out.events.push(Event::Learn {

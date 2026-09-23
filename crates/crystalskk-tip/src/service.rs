@@ -412,8 +412,12 @@ impl TextService {
         // 重なることもない。
         let completion = engine.completion()?;
         Some(Content::Completion(Completion {
-            heading: completion.heading,
+            heading: completion.heading().to_owned(),
             taken: completion.taken,
+            entries: completion.page().to_vec(),
+            current: completion.current_in_page(),
+            number: completion.page_number() + 1,
+            count: completion.page_count(),
         }))
     }
 

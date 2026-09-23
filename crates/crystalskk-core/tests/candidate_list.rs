@@ -425,7 +425,7 @@ fn the_window_shows_what_the_dot_would_take() {
     let mut engine = completing();
     typed(&mut engine, "Kann");
     let view = engine.completion().expect("当て推量が出ている");
-    assert_eq!(view.heading, "かんじ");
+    assert_eq!(view.heading(), "かんじ");
     assert!(!view.taken, "まだ受け取っていない");
 }
 
@@ -434,8 +434,19 @@ fn the_window_follows_the_tab() {
     let mut engine = completing();
     typed(&mut engine, "Kann		");
     let view = engine.completion().expect("当て推量が出ている");
-    assert_eq!(view.heading, "かんじゃ");
+    assert_eq!(view.heading(), "かんじゃ");
     assert!(view.taken, "Tab で当てたものは受け取り済み");
+}
+
+#[test]
+fn walking_with_tab_shows_the_neighbours_too() {
+    // **次に何が来るかが見えないと、何度押せばよいか分からない。**
+    let mut engine = completing();
+    typed(&mut engine, "Kann	");
+    let view = engine.completion().expect("当て推量が出ている");
+    assert_eq!(view.page(), ["かんじ", "かんじゃ", "かんき"]);
+    assert_eq!(view.current_in_page(), 0);
+    assert_eq!(view.page_count(), 1);
 }
 
 #[test]

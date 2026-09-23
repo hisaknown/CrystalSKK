@@ -51,6 +51,7 @@ impl Session {
             ("ほん", &["本"][..]),
             ("skk", &["SKK"][..]),
             ("ことば", &["言葉"][..]),
+            ("ぱそこん", &["パソコン", "パソ魂"][..]),
         ]);
         Self {
             engine: Engine::new(Box::new(dict)),
@@ -315,23 +316,33 @@ fn q_commits_the_midashi_as_katakana() {
 }
 
 #[test]
-fn a_known_heading_learns_its_katakana() {
-    // **辞書に載っている見出し語なら、次は space でも同じカタカナが出て
-    // ほしい。** そのために覚えておく。
+fn a_katakana_that_is_already_a_candidate_is_learned() {
+    // **並べ替えであって、新しい語ではない。** 次は space でも同じものが
+    // 先に出てほしい。
     let mut s = Session::new();
-    s.type_keys("Kanjiq");
+    s.type_keys("Pasokonq");
+    assert_eq!(s.committed, "パソコン");
     assert_eq!(
         s.events,
         [Event::Learn {
-            query: Query::okuri_nashi("かんじ"),
-            word: "カンジ".into()
+            query: Query::okuri_nashi("ぱそこん"),
+            word: "パソコン".into()
         }]
     );
 }
 
 #[test]
+fn a_katakana_that_is_not_a_candidate_is_not_learned() {
+    // 「かんじ」は辞書にあるが「カンジ」は候補に無い。覚えれば**辞書に
+    // 無い語を作ってしまう。**
+    let mut s = Session::new();
+    s.type_keys("Kanjiq");
+    assert_eq!(s.committed, "カンジ");
+    assert!(s.events.is_empty());
+}
+
+#[test]
 fn an_unknown_heading_learns_nothing() {
-    // 打ち捨てのかなまで覚えていては、辞書が使い捨ての語で埋まる。
     let mut s = Session::new();
     s.type_keys("Nanikaq");
     assert_eq!(s.committed, "ナニカ");

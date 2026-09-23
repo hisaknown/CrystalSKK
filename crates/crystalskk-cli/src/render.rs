@@ -55,17 +55,38 @@ fn page(view: &CandidateView) -> String {
 ///
 /// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
 /// 一つぶんの注釈を出す先がない。
-/// 当てている補完。**一つきりなので、一行で足りる。**
+/// 当てている補完。
+///
+/// 受け取る前は一行。Tab で巡り始めたら前後も並べる。
 pub fn completion(view: &CompletionView) -> String {
-    if view.taken {
-        view.heading.clone()
-    } else {
-        format!(
+    if !view.taken {
+        return format!(
             "{}: {}",
             crystalskk_core::engine::COMPLETION_TAKE,
-            view.heading
-        )
+            view.heading()
+        );
     }
+    let page: Vec<String> = view
+        .page()
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| {
+            if at == view.current_in_page() {
+                format!("[{entry}]")
+            } else {
+                entry.clone()
+            }
+        })
+        .collect();
+    let mut text = page.join(" ");
+    if view.page_count() > 1 {
+        text.push_str(&format!(
+            "  ({} / {})",
+            view.page_number() + 1,
+            view.page_count()
+        ));
+    }
+    text
 }
 
 pub fn annotation(view: &CandidateView) -> Option<&str> {
