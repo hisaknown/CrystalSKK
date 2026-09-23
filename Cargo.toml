@@ -5,6 +5,7 @@ members = [
     "crates/crystalskk-core",
     "crates/crystalskk-dict",
     "crates/crystalskk-ipc",
+    "crates/crystalskk-lm",
     "crates/crystalskk-settings",
     "crates/crystalskk-server",
     "crates/crystalskk-fetch",

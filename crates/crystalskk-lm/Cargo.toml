@@ -1,0 +1,22 @@
+[package]
+name = "crystalskk-lm"
+description = "Orders conversion candidates with a small language model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+libloading = "0.9"
+# 正規表現に C の onig を使わず、語彙の学習 (C++ の esaxx) も持ち込まない。
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+
+# llama.cpp の DLL を直に呼ぶため、このクレートは unsafe を許す。
+# 触れるのは `llama` モジュールだけに閉じる。
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "warn"
