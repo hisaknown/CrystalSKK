@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crystalskk_core::Engine;
-use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+use crystalskk_core::dict::{Candidate, CandidateSource, Context, Query};
 use crystalskk_ipc::{Request, Response};
 use crystalskk_server::client;
 
@@ -55,6 +55,9 @@ pub struct ServerSource {
     /// サーバに届かなかったときと、届いたが引けなかったとき (辞書を取得
     /// している最中など) がある。どちらも「辞書に無い」とは違う。
     trouble: std::cell::RefCell<Option<String>>,
+    /// 変換のときにサーバへ見せる、カーソルの前と後の文字数。サーバが
+    /// 候補を並べ替えない設定なら `None` で、前後の文章は送らない。
+    reach: std::cell::Cell<Option<(usize, usize)>>,
 }
 
 impl ServerSource {
@@ -91,12 +94,10 @@ impl ServerSource {
         *self.trouble.borrow_mut() = trouble;
         candidates
     }
-}
 
-impl CandidateSource for ServerSource {
-    fn lookup(&self, query: &Query) -> Vec<Candidate> {
-        let request = Request::Search(query.clone());
-        match client::ask(&request) {
+    /// 候補を頼む。居なければ起こして、もう一度だけ頼む。
+    fn ask_for_candidates(&self, request: &Request) -> Vec<Candidate> {
+        match client::ask(request) {
             Ok(response) => return self.answer(response),
             Err(e) => log::write(&format!("辞書サーバが居ません ({e})。起こします")),
         }
@@ -106,7 +107,7 @@ impl CandidateSource for ServerSource {
             *self.trouble.borrow_mut() = Some(UNREACHABLE_NOTICE.to_owned());
             return Vec::new();
         }
-        match client::ask(&request) {
+        match client::ask(request) {
             Ok(response) => {
                 log::write("辞書サーバが起きました");
                 self.answer(response)
@@ -117,6 +118,27 @@ impl CandidateSource for ServerSource {
                 Vec::new()
             }
         }
+    }
+}
+
+impl CandidateSource for ServerSource {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        self.ask_for_candidates(&Request::Search(query.clone()))
+    }
+
+    /// 変換のために引く。サーバが並べ替える設定なら、前後の文章を添える。
+    ///
+    /// **並べ替えないなら前後の文章は送らない。** 使われない文章を
+    /// パイプに流すことはない。
+    fn lookup_for_conversion(&self, query: &Query, context: &Context) -> Vec<Candidate> {
+        let Some((before, after)) = self.reach.get() else {
+            return self.lookup(query);
+        };
+        self.ask_for_candidates(&Request::Convert {
+            query: query.clone(),
+            before: context.text_before(before),
+            after: context.text_after(after),
+        })
     }
 
     /// 前方一致する見出しを返す。補完に使う。
@@ -157,11 +179,28 @@ impl SharedSource {
     pub fn notice(&self) -> Option<String> {
         self.0.notice()
     }
+
+    /// 並べ替えの設定を受け取る。変換のときに前後の文章を何文字送るかが
+    /// 決まる。
+    pub fn set_ranking(&self, ranker: &crystalskk_settings::Ranker) {
+        self.0
+            .reach
+            .set(ranker.enabled.then_some((ranker.before, ranker.after)));
+    }
+
+    /// 前後の文章を読むべきか。サーバが並べ替えない設定なら読まない。
+    pub fn wants_surroundings(&self) -> bool {
+        self.0.reach.get().is_some()
+    }
 }
 
 impl CandidateSource for SharedSource {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         self.0.lookup(query)
+    }
+
+    fn lookup_for_conversion(&self, query: &Query, context: &Context) -> Vec<Candidate> {
+        self.0.lookup_for_conversion(query, context)
     }
 
     fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {

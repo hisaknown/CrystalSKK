@@ -32,7 +32,7 @@ use windows::core::{
     BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
 };
 
-use crystalskk_core::engine::Event;
+use crystalskk_core::engine::{Event, Marker};
 use crystalskk_core::{Engine, InputMode};
 
 use crate::candwin::{CandidateWindow, Completion, Content, Page, Registration};
@@ -528,6 +528,7 @@ impl TextService {
         match dict::fetch_settings() {
             Ok(settings) => {
                 self.engine.borrow_mut().configure(settings.engine.clone());
+                self.source.set_ranking(&settings.ranker);
                 *self.settings.borrow_mut() = Some(settings);
                 if self.settings_problem.borrow_mut().take().is_some() {
                     log::write("設定を受け取れるようになりました");
@@ -538,6 +539,38 @@ impl TextService {
                 *self.settings_problem.borrow_mut() = Some(problem);
             }
         }
+    }
+
+    /// カーソルの前後の文章を読み、エンジンに渡す (ADR-0030)。
+    ///
+    /// 読むのは見出し語を打っているあいだ (▽) だけである。変換はそこから
+    /// しか始まらない。送り仮名の最後の一打で変換が始まることもあるので、
+    /// 打鍵を選ばずに読む。**辞書サーバが並べ替えない設定なら読まない。**
+    fn read_surroundings(&self, context: &ITfContext, client_id: u32) {
+        if !self.source.wants_surroundings() {
+            return;
+        }
+        if self.engine.borrow().preedit().marker != Marker::Composing {
+            return;
+        }
+        let Some((before, after)) = self
+            .settings
+            .borrow()
+            .as_ref()
+            .map(|s| (s.ranker.before, s.ranker.after))
+        else {
+            return;
+        };
+        let composition = self
+            .composition
+            .borrow()
+            .as_ref()
+            .map(|(_, composition)| composition.clone());
+        let found = edit::surroundings(context, client_id, composition.as_ref(), before, after);
+        let (preceding, following) = found.unzip();
+        self.engine
+            .borrow_mut()
+            .set_surroundings(preceding, following);
     }
 
     /// まだ設定を受け取れていなければ、尋ね直す。
@@ -910,6 +943,7 @@ impl TextService_Impl {
             return false.into();
         };
 
+        self.this.read_surroundings(context, client_id);
         let response = self.this.engine.borrow_mut().press(key);
         // 組み立てる前に段階を見る。記録しないと決まっているなら、
         // 打鍵のたびに文字列を作る手間も要らない。

@@ -29,13 +29,18 @@ use std::mem::ManuallyDrop;
 
 use windows::Win32::Foundation::{E_FAIL, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
+use windows::Win32::System::Variant::{
+    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4, VT_UNKNOWN, VariantClear,
+};
 use windows::Win32::UI::TextServices::{
-    GUID_PROP_ATTRIBUTE, ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
-    ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
-    TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
-    TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
+    GUID_PROP_ATTRIBUTE, GUID_PROP_INPUTSCOPE, IS_ALPHANUMERIC_PIN, IS_NUMERIC_PASSWORD,
+    IS_NUMERIC_PIN, IS_PASSWORD, IS_PRIVATE, ITfComposition, ITfCompositionSink, ITfContext,
+    ITfContextComposition, ITfEditSession, ITfEditSession_Impl, ITfInputScope,
+    ITfInsertAtSelection, ITfRange, InputScope, TF_AE_NONE, TF_ANCHOR_END, TF_ANCHOR_START,
+    TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE, TF_ES_SYNC,
+    TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE, TfAnchor,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
 use windows::core::{ComObject, Interface, Result, implement};
@@ -287,6 +292,147 @@ impl ITfEditSession_Impl for Read_Impl {
             }
             Ok(())
         })
+    }
+}
+
+/// カーソルの前後の文章。変換の候補を並べる手がかりにする (ADR-0030)。
+///
+/// 開いている composition があれば、**その外側**を読む。中身は打っている
+/// 見出し語で、文章ではない。無ければ選択範囲の外側を読む。
+///
+/// **パスワードの入力欄と、プライベートな場面 (ブラウザのシークレット窓など)
+/// では読まない。** そこでは前後とも空を返す。`None` (読めなかった) を返すと、
+/// エンジンは直近の確定文字列を代わりに使ってしまう。
+///
+/// 読めなかったときは `None` で、変換はいつもどおり進む。
+///
+/// 打鍵の処理中なので同期で読む。
+pub fn surroundings(
+    context: &ITfContext,
+    client_id: u32,
+    composition: Option<&ITfComposition>,
+    before: usize,
+    after: usize,
+) -> Option<(String, String)> {
+    let found = std::rc::Rc::new(RefCell::new(None));
+    let slot = found.clone();
+    let composition = composition.cloned();
+    let session = ComObject::new(Read {
+        context: context.clone(),
+        then: RefCell::new(Some(Box::new(move |context: &ITfContext, ec| {
+            *slot.borrow_mut() =
+                read_surroundings(context, ec, composition.as_ref(), before, after);
+        }))),
+    });
+    let requested: ITfEditSession = session.to_interface();
+    // SAFETY: 文脈と識別子は TSF から受け取ったもの。
+    let result =
+        unsafe { context.RequestEditSession(client_id, &requested, TF_ES_SYNC | TF_ES_READ) };
+    if let Err(e) = result.and_then(|r| r.ok()) {
+        log::trace(&format!("前後の文章を読めない: {}", e.message()));
+    }
+    found.take()
+}
+
+fn read_surroundings(
+    context: &ITfContext,
+    ec: u32,
+    composition: Option<&ITfComposition>,
+    before: usize,
+    after: usize,
+) -> Option<(String, String)> {
+    // SAFETY: 編集権はこの呼び出しのためのもの。
+    let anchor = unsafe {
+        match composition {
+            Some(composition) => composition.GetRange().ok()?,
+            None => {
+                let mut selections = [TF_SELECTION::default()];
+                let mut fetched = 0u32;
+                context
+                    .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selections, &mut fetched)
+                    .ok()?;
+                let [selection] = selections;
+                ManuallyDrop::into_inner(selection.range).filter(|_| fetched == 1)?
+            }
+        }
+    };
+    if is_private(context, ec, &anchor) {
+        return Some((String::new(), String::new()));
+    }
+    let before = text_beside(ec, &anchor, TF_ANCHOR_START, -(i32::try_from(before).ok()?))?;
+    let after = text_beside(ec, &anchor, TF_ANCHOR_END, i32::try_from(after).ok()?)?;
+    Some((before, after))
+}
+
+/// `anchor` の端から `count` 文字 (負なら前へ) の文字列。
+fn text_beside(ec: u32, anchor: &ITfRange, edge: TfAnchor, count: i32) -> Option<String> {
+    if count == 0 {
+        return Some(String::new());
+    }
+    // SAFETY: 編集権はこの呼び出しのためのもの。範囲は複製してから動かす。
+    unsafe {
+        let range = anchor.Clone().ok()?;
+        range.Collapse(ec, edge).ok()?;
+        let mut moved = 0;
+        if count < 0 {
+            range
+                .ShiftStart(ec, count, &mut moved, std::ptr::null())
+                .ok()?;
+        } else {
+            range
+                .ShiftEnd(ec, count, &mut moved, std::ptr::null())
+                .ok()?;
+        }
+        // 数えるのは UTF-16 の単位なので、余裕をもって受ける。
+        let mut buffer = vec![0u16; count.unsigned_abs() as usize * 2 + 2];
+        let mut got = 0u32;
+        range.GetText(ec, 0, &mut buffer, &mut got).ok()?;
+        buffer.truncate(got as usize);
+        Some(String::from_utf16_lossy(&buffer))
+    }
+}
+
+/// 読んではいけない入力欄か。パスワード、暗証番号、プライベートな場面。
+///
+/// 入力欄の種類を教えないアプリもある。分からなければ読んでよいとする。
+/// CorvusSKK も同じ手順でプライベートな場面を見分けている。
+fn is_private(context: &ITfContext, ec: u32, range: &ITfRange) -> bool {
+    const PRIVATE: [InputScope; 5] = [
+        IS_PASSWORD,
+        IS_NUMERIC_PASSWORD,
+        IS_NUMERIC_PIN,
+        IS_ALPHANUMERIC_PIN,
+        IS_PRIVATE,
+    ];
+    // SAFETY: 編集権はこの呼び出しのためのもの。受け取った配列は約束どおり
+    // CoTaskMemFree で返し、値は VariantClear で片付ける。
+    unsafe {
+        let Ok(property) = context.GetAppProperty(&GUID_PROP_INPUTSCOPE) else {
+            return false;
+        };
+        let Ok(mut value) = property.GetValue(ec, range) else {
+            return false;
+        };
+        let scope = if value.Anonymous.Anonymous.vt == VT_UNKNOWN {
+            (*value.Anonymous.Anonymous.Anonymous.punkVal)
+                .as_ref()
+                .and_then(|unknown| unknown.cast::<ITfInputScope>().ok())
+        } else {
+            None
+        };
+        let mut private = false;
+        if let Some(scope) = scope {
+            let mut scopes: *mut InputScope = std::ptr::null_mut();
+            let mut count = 0u32;
+            if scope.GetInputScopes(&mut scopes, &mut count).is_ok() && !scopes.is_null() {
+                private = std::slice::from_raw_parts(scopes, count as usize)
+                    .iter()
+                    .any(|s| PRIVATE.contains(s));
+                CoTaskMemFree(Some(scopes as *const _));
+            }
+        }
+        let _ = VariantClear(&mut value);
+        private
     }
 }
 
