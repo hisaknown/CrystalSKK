@@ -91,6 +91,9 @@ pub const ICON_NAME: &str = "crystalskk.ico";
 pub fn install_server(source: &Path, directory: &Path) -> io::Result<bool> {
     let destination = directory.join(crate::server::SERVER_NAME);
     let stopped = crate::server::stop();
+    // 止めたので、前に退けたサーバはもう誰も動かしていないはずである。
+    // 入れ替えるたびに一つずつ退けるので、片付けないと溜まっていく。
+    sweep_retired(directory);
 
     if let Err(busy) = std::fs::copy(source, &destination) {
         // まだ握られている。改名なら通るので退ける。
@@ -189,7 +192,7 @@ fn write_icon(directory: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
-/// 使用中の DLL を別名へ退ける。
+/// 使用中の DLL や辞書サーバを別名へ退ける。
 ///
 /// 読み込まれていても改名はできる。掴んでいるプロセスは実体を見ており、
 /// 名前を見ているわけではない。
@@ -205,20 +208,33 @@ pub(crate) fn retire(destination: &Path) -> io::Result<()> {
 }
 
 /// 退けた残骸を消す。使用中なら消せないので、黙って見逃す。
+///
+/// TIP の DLL も辞書サーバも、入れ替えるときに使用中なら退ける
+/// ([`retire`])。どちらの残骸もここで片付ける。
 fn sweep_retired(directory: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(DLL_NAME) && name.contains(RETIRED_SUFFIX) {
+        if is_retired(&entry.file_name().to_string_lossy()) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// 退けた DLL の名前に挟む印。
+/// [`retire`] が退けたものの名前か。`<元の名前>.old-<時刻>` の形をしている。
+///
+/// 元の名前まで照らす。同じ場所にある、たまたま `old-` を含むだけの
+/// ファイルは消さない。
+fn is_retired(name: &str) -> bool {
+    [DLL_NAME, crate::server::SERVER_NAME].iter().any(|base| {
+        name.strip_prefix(base)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|rest| rest.starts_with(RETIRED_SUFFIX))
+    })
+}
+
+/// 退けたものの名前に挟む印。
 const RETIRED_SUFFIX: &str = "old-";
 
 /// 削除する。`purge` が真なら写した DLL も消す。
@@ -312,11 +328,7 @@ mod tests {
         std::fs::read_dir(directory)
             .expect("読める")
             .flatten()
-            .filter(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with(DLL_NAME) && name.contains(RETIRED_SUFFIX)
-            })
+            .filter(|e| is_retired(&e.file_name().to_string_lossy()))
             .count()
     }
 
@@ -357,6 +369,52 @@ mod tests {
 
         assert_eq!(retired_count(&dir), 0);
         assert!(dll.exists(), "使っているものは消さない");
+    }
+
+    #[test]
+    fn sweeping_removes_retired_servers_but_leaves_the_server() {
+        // 辞書サーバも入れ替えのたびに退けられる。**片付けないと溜まる。**
+        let dir = scratch("sweep-server");
+        let server = dir.join(crate::server::SERVER_NAME);
+        std::fs::write(dir.join("crystalskk-server.exe.old-1790128010"), "古い").expect("置ける");
+        std::fs::write(dir.join("crystalskk-server.exe.old-1790128145"), "古い").expect("置ける");
+        std::fs::write(&server, "新しい").expect("置ける");
+        assert_eq!(retired_count(&dir), 2);
+
+        sweep_retired(&dir);
+
+        assert_eq!(retired_count(&dir), 0);
+        assert!(server.exists(), "使っているものは消さない");
+    }
+
+    #[test]
+    fn sweeping_leaves_files_that_only_look_old() {
+        let dir = scratch("sweep-strangers");
+        for name in [
+            "notes.old-1.txt",
+            "crystalskk.ico",
+            "crystalskk_tip.dllold-1",
+            "log.on",
+        ] {
+            std::fs::write(dir.join(name), "中身").expect("置ける");
+        }
+
+        sweep_retired(&dir);
+
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("読める").count(),
+            4,
+            "どれも消さない"
+        );
+    }
+
+    #[test]
+    fn what_retire_leaves_is_recognised_as_retired() {
+        assert!(is_retired("crystalskk_tip.dll.old-1790147371"));
+        assert!(is_retired("crystalskk-server.exe.old-1790168724"));
+        assert!(!is_retired("crystalskk_tip.dll"));
+        assert!(!is_retired("crystalskk-server.exe"));
+        assert!(!is_retired("other.dll.old-1"));
     }
 
     #[test]
