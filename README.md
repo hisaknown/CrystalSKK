@@ -84,6 +84,12 @@ cargo build --workspace --release
 cargo run -p crystalskk-setup --release -- install
 ```
 
+変換の候補を前後の文章から並べる言語モデル ([ADR-0030](docs/adr/0030-rank-candidates-with-a-small-language-model-in-the-server.md)) も、導入のときに一緒に置かれる。モデル一式は `tools/ranker-model` で作る ([uv](https://docs.astral.sh/uv/) が要る)。作り直しても同じものになり、導入はハッシュを確かめてから `target/ranker-model/out` のものを写す。llama.cpp の DLL は導入のときに公式のリリースから取得する ([ADR-0031](docs/adr/0031-ship-the-ranker-model-with-the-program.md))。どちらも揃わなければ、並べ替えが効かないだけで変換はできる。使うかどうかは設定ファイルの `[ranker]` で決める。
+
+```bash
+cd tools/ranker-model && uv run build.py
+```
+
 使う辞書は設定ファイルの `dictionaries.sources` に並べる (既定は L 辞書)。URL なら辞書サーバが裏で取得し、起動のたびに更新を確かめる。複数並べると、一つの辞書であるかのように並べた順で引く ([ADR-0022](docs/adr/0022-read-the-listed-dictionaries-as-one.md))。いま取り直したいとき、何が起きたかを見たいときは次を打つ。権限は要らない。
 
 ```bash
