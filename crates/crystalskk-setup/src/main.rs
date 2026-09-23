@@ -171,9 +171,9 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
             if report.is_console() {
                 confirm_effective_registration();
             }
-            // 辞書の許可も見直す。**導入だけして辞書を先に置いていた人**が、
-            // 隔離されたアプリで引けないままになるのを防ぐ。
-            dictionary::grant_access();
+            // かつて辞書に与えた許可を外す。**辞書サーバができて要らなく
+            // なった** (ADR-0016) ので、与えたままにしておく理由がない。
+            dictionary::revoke_access();
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),

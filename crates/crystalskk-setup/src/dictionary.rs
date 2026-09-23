@@ -24,9 +24,9 @@ pub fn fetch() -> ExitCode {
 
     let outcome = crystalskk_fetch::install(crystalskk_fetch::SKK_JISYO_L, &path, None);
 
-    // 許可は**置いたあとで**与える。先に与えても、置き換えられた
-    // ファイルは新しく作られるので引き継がれない。
-    grant_access();
+    // 取り下げは**置いたあとで**。置き換えられたファイルは新しく作られる
+    // ので、先に外しても意味がない。
+    revoke_access();
 
     match outcome {
         Ok(Some(report)) => {
@@ -54,12 +54,13 @@ pub fn fetch() -> ExitCode {
     }
 }
 
-/// 辞書の置き場所に、隔離された入れ物からの読みを許す。
+/// かつて辞書に与えた、隔離された入れ物からの読みを取り下げる。
 ///
-/// **ストアアプリやスタートメニューの検索欄は、この許可が無いと辞書を
-/// 読めない。** 与えられなくても普通のアプリでは使えるので、失敗しても
-/// 取得そのものは続ける。
-pub fn grant_access() {
+/// **辞書サーバができて要らなくなった** (ADR-0016)。読むのはサーバだけで、
+/// サーバは隔離された入れ物の外にいる。
+///
+/// 外せなくても入力はできるので、失敗しても先へ進む。
+pub fn revoke_access() {
     let Ok(directory) = paths::data_dir() else {
         return;
     };
@@ -67,13 +68,11 @@ pub fn grant_access() {
         eprintln!("crystalskk-setup: 置き場所を作れません: {e}");
         return;
     }
-    // 読ませるのは辞書だけ。診断の記録は同じ場所にあるが、挙げない。
-    let readable = [paths::system_dictionary(), paths::user_dictionary()]
+    let files = [paths::system_dictionary(), paths::user_dictionary()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    match access::allow_app_containers(&directory, &readable) {
-        Ok(()) => println!("隔離されたアプリからも読めるようにしました。"),
-        Err(e) => eprintln!("crystalskk-setup: {e}"),
+    if let Err(e) = access::revoke_app_containers(&directory, &files) {
+        eprintln!("crystalskk-setup: {e}");
     }
 }
