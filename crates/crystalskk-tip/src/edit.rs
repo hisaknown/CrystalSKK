@@ -27,7 +27,9 @@
 use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 
-use windows::Win32::Foundation::{E_FAIL, HWND, RECT};
+use windows::Win32::Foundation::{E_FAIL, HWND, POINT, RECT};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use windows::Win32::UI::TextServices::{
     GUID_PROP_ATTRIBUTE, ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
@@ -35,6 +37,7 @@ use windows::Win32::UI::TextServices::{
     TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READ, TF_ES_READWRITE,
     TF_ES_SYNC, TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
 use windows::core::{ComObject, Interface, Result, implement};
 
 use crate::guard::guard;
@@ -118,7 +121,8 @@ impl ITfEditSession_Impl for Update_Impl {
             // 窓の置き場所を、composition が開いているうちに尋ねる。
             *this.extent.borrow_mut() = composition
                 .as_ref()
-                .and_then(|opened| text_extent(&this.context, ec, opened));
+                .and_then(|opened| text_extent(&this.context, ec, opened))
+                .or_else(system_caret);
             *this.owner.borrow_mut() = owner_window(&this.context);
 
             *this.composition.borrow_mut() = composition;
@@ -220,7 +224,7 @@ pub fn caret(
     then: impl FnOnce(RECT, Option<HWND>) + 'static,
 ) {
     read(context, client_id, move |context, ec| {
-        if let Some(rect) = caret_extent(context, ec) {
+        if let Some(rect) = caret_extent(context, ec).or_else(system_caret) {
             then(rect, owner_window(context));
         }
     });
@@ -237,7 +241,7 @@ pub fn composition_extent(
     then: impl FnOnce(RECT) + 'static,
 ) {
     read(context, client_id, move |context, ec| {
-        if let Some(rect) = text_extent(context, ec, &composition) {
+        if let Some(rect) = text_extent(context, ec, &composition).or_else(system_caret) {
             then(rect);
         }
     });
@@ -309,6 +313,54 @@ fn caret_extent(context: &ITfContext, ec: u32) -> Option<RECT> {
         let mut clipped = windows::core::BOOL::default();
         view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
         usable_caret(rect).then_some(rect)
+    }
+}
+
+/// Windows が覚えているキャレットの位置 (画面座標)。
+///
+/// TSF で位置を尋ねても答えないアプリのための予備である。**文字を書く
+/// アプリの多くは、TSF に答えなくてもキャレットは作っている** (読み上げ
+/// ソフトなどがそれを見る)。キャレットの置き場所はアプリ次第で、未確定の
+/// 文字列の先頭ではなく末尾のことが多いが、何も出ないよりはよい。
+///
+/// 位置はこのスレッドのものを尋ねる。TIP は入力先アプリのスレッドで
+/// 動いている。
+fn system_caret() -> Option<RECT> {
+    let mut info = GUITHREADINFO {
+        cbSize: u32::try_from(size_of::<GUITHREADINFO>()).unwrap_or(0),
+        ..Default::default()
+    };
+    // SAFETY: 大きさを正しく告げた構造体へ書かせる。どれも尋ねるだけ。
+    unsafe {
+        GetGUIThreadInfo(GetCurrentThreadId(), &mut info).ok()?;
+        if info.hwndCaret.is_invalid() {
+            return None;
+        }
+        let rect = info.rcCaret;
+        let mut top_left = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let mut bottom_right = POINT {
+            x: rect.right,
+            y: rect.bottom,
+        };
+        if !ClientToScreen(info.hwndCaret, &mut top_left).as_bool()
+            || !ClientToScreen(info.hwndCaret, &mut bottom_right).as_bool()
+        {
+            return None;
+        }
+        let rect = RECT {
+            left: top_left.x,
+            top: top_left.y,
+            right: bottom_right.x,
+            bottom: bottom_right.y,
+        };
+        let usable = rect.bottom > rect.top;
+        if usable {
+            log::trace("TSF から位置が取れないので、キャレットの位置を使う");
+        }
+        usable.then_some(rect)
     }
 }
 
