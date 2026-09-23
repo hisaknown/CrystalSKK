@@ -137,6 +137,22 @@ fn page_start(index: usize) -> usize {
     FIRST_LISTED + (index - FIRST_LISTED) / PAGE_SIZE * PAGE_SIZE
 }
 
+/// 辞書登録中の様子。
+///
+/// 登録は枠を積んで表す (ADR-0002) ので、入れ子になりうる。ここに出すのは
+/// **一番内側の枠**で、`depth` がいくつ積まれているかを示す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationView {
+    /// 登録しようとしている見出し語。
+    pub key: String,
+    /// 送り仮名。あれば見出しに添えて見せる。
+    pub okuri: Option<String>,
+    /// これまでに溜まった語。
+    pub buffer: String,
+    /// 積まれている枠の数。1 なら入れ子ではない。
+    pub depth: usize,
+}
+
 /// エンジンの外側へ伝える副作用。
 ///
 /// ユーザー辞書への書き込みはサーバープロセスの仕事なので、エンジンは
@@ -303,6 +319,20 @@ impl Engine {
     /// 辞書登録の入れ子の深さ。0 なら登録中ではない。
     pub fn registration_depth(&self) -> usize {
         self.registrations.len()
+    }
+
+    /// 辞書登録中なら、その一番内側の様子。
+    ///
+    /// 登録中の入力は**文書には入らない**。確定した文字列はこの枠に溜まる
+    /// ので、利用者に見せるにはここから取る必要がある。
+    pub fn registration(&self) -> Option<RegistrationView> {
+        let frame = self.registrations.last()?;
+        Some(RegistrationView {
+            key: frame.query.key.clone(),
+            okuri: frame.query.okuri.clone(),
+            buffer: frame.buffer.clone(),
+            depth: self.registrations.len(),
+        })
     }
 
     /// 入力の途中経過をすべて捨て、直接入力に戻す。

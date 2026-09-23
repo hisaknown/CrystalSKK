@@ -27,7 +27,7 @@ use windows::core::{
 use crystalskk_core::engine::Event;
 use crystalskk_core::{Engine, InputMode};
 
-use crate::candwin::{CandidateWindow, Page};
+use crate::candwin::{CandidateWindow, Content, Page, Registration};
 use crate::dict::SharedUserDict;
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
@@ -82,8 +82,14 @@ pub struct TextService {
     ///
     /// 打鍵をまたいで持ち越す。開いていなければ `None`。
     composition: RefCell<Option<(ITfContext, ITfComposition)>>,
-    /// 候補の一覧を出す小窓。出す段階になるまで作らない。
+    /// 候補の一覧と辞書登録を出す小窓。出す段階になるまで作らない。
     candidates: CandidateWindow,
+    /// 最後に分かった、未確定の文字列の画面上の位置。
+    ///
+    /// 辞書登録中は文書に何も書かないので、位置を尋ねる相手がいない。
+    /// **直前まで書いていた場所のそばに出すのが、いちばん近い当て推量**
+    /// になる。
+    anchor: RefCell<Option<windows::Win32::Foundation::RECT>>,
 }
 
 impl Default for TextService {
@@ -101,6 +107,7 @@ impl TextService {
             user_dictionary,
             composition: RefCell::new(None),
             candidates: CandidateWindow::new(),
+            anchor: RefCell::new(None),
         }
     }
 
@@ -220,27 +227,56 @@ impl TextService {
         compartment::publish_mode(&thread_manager, client_id, mode);
     }
 
-    /// 候補の一覧を、いまの状態に合わせる。
+    /// 小窓を、いまの状態に合わせる。
     ///
     /// 出すかどうかはエンジンが決めている。ここは「出せと言われたら出す」
     /// だけで、**何回目の変換かといった判断をこちらへ持ち込まない**。
     ///
-    /// `anchor` は未確定の文字列の画面上の位置。取れなかったときは窓を
-    /// 出さない。**見当違いの場所に出すくらいなら、出さないほうがよい。**
-    fn show_candidates(&self, anchor: Option<windows::Win32::Foundation::RECT>) {
-        let view = self.engine.borrow().candidates();
-        let Some(view) = view.filter(|view| view.listing) else {
-            self.candidates.hide();
-            return;
-        };
-        let Some(anchor) = anchor else {
-            log::trace("未確定の位置が分からないので候補の窓を出さない");
-            self.candidates.hide();
-            return;
-        };
+    /// `extent` は未確定の文字列の画面上の位置。取れたら覚えておき、
+    /// 取れなかったときは最後に分かった場所を使う。辞書登録中は文書に
+    /// 何も書かないので、尋ねても返ってこない。
+    fn show_window(&self, extent: Option<windows::Win32::Foundation::RECT>) {
+        if extent.is_some() {
+            *self.anchor.borrow_mut() = extent;
+        }
 
+        let Some(content) = self.window_content() else {
+            self.candidates.hide();
+            return;
+        };
+        let Some(anchor) = *self.anchor.borrow() else {
+            log::trace("出す場所が分からないので小窓を出さない");
+            self.candidates.hide();
+            return;
+        };
+        self.candidates.show(&content, anchor);
+    }
+
+    /// いま小窓に出すもの。出すものが無ければ `None`。
+    ///
+    /// 辞書登録を先に見る。登録中は候補の選択も入れ子で起きうるが、
+    /// **利用者にとって手前にあるのは登録のほう**である。
+    fn window_content(&self) -> Option<Content> {
+        let engine = self.engine.borrow();
+
+        if let Some(registration) = engine.registration() {
+            let key = match &registration.okuri {
+                Some(okuri) => format!("{}{okuri}", registration.key),
+                None => registration.key.clone(),
+            };
+            // 溜まった語と、いま打ちかけの文字列を繋いで見せる。
+            // 打ちかけの分を落とすと、打った字が消えたように見える。
+            let text = format!("{}{}", registration.buffer, engine.preedit().display());
+            return Some(Content::Registration(Registration {
+                key,
+                text,
+                depth: registration.depth,
+            }));
+        }
+
+        let view = engine.candidates().filter(|view| view.listing)?;
         let okuri = view.okuri.as_deref().unwrap_or("");
-        let page = Page {
+        Some(Content::Page(Page {
             entries: view
                 .page()
                 .into_iter()
@@ -248,8 +284,7 @@ impl TextService {
                 .collect(),
             number: view.page_number() + 1,
             count: view.page_count(),
-        };
-        self.candidates.show(&page, anchor);
+        }))
     }
 
     /// 入力方式が切であることを表示に出す。
@@ -421,7 +456,15 @@ impl TextService_Impl {
         // 見え方を今の状態に合わせる。書けなくても、エンジンの状態は
         // もう進んでいる。ここで慌てても直せないので、食べたことだけは
         // 正しく伝える。
-        let preedit = response.preedit.display();
+        //
+        // **辞書登録中は文書に何も書かない。** 登録語として打っている文字は
+        // 登録の枠に溜まるものであって、文書に入るものではない。途中の
+        // ローマ字だけが文書に現れては、どこへ打っているのか分からなくなる。
+        let preedit = if response.preedit.registering.is_some() {
+            String::new()
+        } else {
+            response.preedit.display()
+        };
         let sink: ITfCompositionSink = self.to_interface();
         // 借用を編集セッションより長く持たない。呼んだ先から戻って
         // こられると、借用が重なってパニックになる。
@@ -439,7 +482,7 @@ impl TextService_Impl {
                 *self.this.composition.borrow_mut() =
                     applied.composition.map(|c| (context.clone(), c));
                 log::trace("文書へ反映した");
-                self.this.show_candidates(applied.extent);
+                self.this.show_window(applied.extent);
             }
             Err(e) => {
                 log::error(&format!("文書へ反映できなかった: {}", e.message()));

@@ -42,6 +42,55 @@ use windows::core::{PCWSTR, w};
 use crate::guard::guard;
 use crate::log;
 
+/// 窓に出すもの。
+///
+/// 候補の一覧と辞書登録は、**同じ一枚の窓を使い分ける**。どちらも
+/// 「いま入力している場所のそばに出す、数行の案内」であって、二枚に
+/// 分ける理由がない。CorvusSKK も同じ窓に出している。
+#[derive(Debug, Clone)]
+pub enum Content {
+    /// 候補の一覧。
+    Page(Page),
+    /// 辞書登録の入力欄。
+    Registration(Registration),
+}
+
+impl Content {
+    /// 窓に並べる行。
+    fn lines(&self) -> Vec<String> {
+        match self {
+            Self::Page(page) => page.lines(),
+            Self::Registration(registration) => registration.lines(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines().is_empty()
+    }
+}
+
+/// 辞書登録の様子。
+#[derive(Debug, Default, Clone)]
+pub struct Registration {
+    /// 登録しようとしている見出し語。送り仮名があれば含める。
+    pub key: String,
+    /// これまでに溜まった語と、いま入力中の文字列を繋げたもの。
+    pub text: String,
+    /// 積まれている枠の数。入れ子の深さを括弧の数で示す。
+    pub depth: usize,
+}
+
+impl Registration {
+    fn lines(&self) -> Vec<String> {
+        // 入れ子の深さを括弧の数で示す。CorvusSKK と同じ見せ方で、
+        // **登録の中で登録が始まったことが一目で分かる。**
+        let open = "[".repeat(self.depth.max(1));
+        let close = "]".repeat(self.depth.max(1));
+        // 文字の入る場所を示す印。窓には本物のカーソルが無い。
+        vec![format!("{open}登録{close} {}: {}│", self.key, self.text)]
+    }
+}
+
 /// 一覧に出す一ページ。
 #[derive(Debug, Default, Clone)]
 pub struct Page {
@@ -54,10 +103,6 @@ pub struct Page {
 }
 
 impl Page {
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// 窓に並べる行。最後の行はページの位置を示す。
     fn lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self
@@ -94,11 +139,11 @@ impl CandidateWindow {
         }
     }
 
-    /// 一ページを出す。`anchor` は未確定の文字列の画面上の矩形。
+    /// 窓に一つ出す。`anchor` は未確定の文字列の画面上の矩形。
     ///
     /// 出せなくても入力は続く。失敗は記録するだけにする。
-    pub fn show(&self, page: &Page, anchor: RECT) {
-        if page.is_empty() {
+    pub fn show(&self, content: &Content, anchor: RECT) {
+        if content.is_empty() {
             self.hide();
             return;
         }
@@ -108,16 +153,16 @@ impl CandidateWindow {
 
         // 描く中身を窓に預ける。描画はいつ来るか分からないので、
         // 窓自身が持っていなければならない。
-        let stored = Box::into_raw(Box::new(page.clone()));
+        let stored = Box::into_raw(Box::new(content.clone()));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
             let previous = SetWindowLongPtrW(hwnd, GWLP_USERDATA, stored as isize);
             if previous != 0 {
-                drop(Box::from_raw(previous as *mut Page));
+                drop(Box::from_raw(previous as *mut Content));
             }
         }
 
-        let (width, height) = measure(page);
+        let (width, height) = measure(content);
         let (x, y) = place(anchor, width, height);
         // 中身が変われば描き直す。大きさが同じままでも中身は違いうるので、
         // 動かしただけで描き直されるとは限らない。
@@ -273,9 +318,9 @@ unsafe extern "system" fn window_proc(
                 unsafe {
                     let mut ps = PAINTSTRUCT::default();
                     let hdc = BeginPaint(hwnd, &mut ps);
-                    let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Page;
-                    if let Some(page) = stored.as_ref() {
-                        paint(hdc, page);
+                    let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Content;
+                    if let Some(content) = stored.as_ref() {
+                        paint(hdc, content);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -288,7 +333,7 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 let stored = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if stored != 0 {
-                    drop(Box::from_raw(stored as *mut Page));
+                    drop(Box::from_raw(stored as *mut Content));
                 }
             }
             LRESULT(0)
@@ -303,13 +348,13 @@ unsafe extern "system" fn window_proc(
 /// # Safety
 ///
 /// `hdc` が描画中のものであること。
-unsafe fn paint(hdc: HDC, page: &Page) {
+unsafe fn paint(hdc: HDC, content: &Content) {
     // SAFETY: 呼び出し側の約束による。作ったものはこの関数の中で片付ける。
     unsafe {
         let font = ui_font();
         let previous = font.map(|f| SelectObject(hdc, f.into()));
 
-        let (width, height) = measure(page);
+        let (width, height) = measure(content);
         let area = RECT {
             left: 0,
             top: 0,
@@ -330,7 +375,7 @@ unsafe fn paint(hdc: HDC, page: &Page) {
         SetTextColor(hdc, system_color(COLOR_WINDOWTEXT.0));
 
         let line_height = line_height(hdc);
-        for (index, line) in page.lines().iter().enumerate() {
+        for (index, line) in content.lines().iter().enumerate() {
             let top = PADDING + line_height * i32::try_from(index).unwrap_or(0);
             let mut rect = RECT {
                 left: PADDING,
@@ -355,7 +400,7 @@ unsafe fn paint(hdc: HDC, page: &Page) {
 }
 
 /// 窓の大きさを測る。
-fn measure(page: &Page) -> (i32, i32) {
+fn measure(content: &Content) -> (i32, i32) {
     // SAFETY: 画面の DC を借りて測り、すぐ返す。
     unsafe {
         let hdc = GetDC(None);
@@ -364,7 +409,7 @@ fn measure(page: &Page) -> (i32, i32) {
 
         let line_height = line_height(hdc);
         let mut widest = 0;
-        let lines = page.lines();
+        let lines = content.lines();
         for line in &lines {
             let text: Vec<u16> = line.encode_utf16().collect();
             let mut size = SIZE::default();
@@ -525,7 +570,33 @@ mod tests {
 
     #[test]
     fn an_empty_page_has_nothing_to_draw() {
-        assert!(page(&[], 1, 1).is_empty());
+        assert!(Content::Page(page(&[], 1, 1)).is_empty());
+    }
+
+    #[test]
+    fn registration_shows_the_key_and_what_has_been_typed() {
+        let line = Content::Registration(Registration {
+            key: "かんじ".to_owned(),
+            text: "漢字".to_owned(),
+            depth: 1,
+        })
+        .lines();
+        assert_eq!(line, vec!["[登録] かんじ: 漢字│"]);
+    }
+
+    #[test]
+    fn nesting_is_shown_by_the_brackets() {
+        let line = Content::Registration(Registration {
+            key: "かんじ".to_owned(),
+            text: String::new(),
+            depth: 2,
+        })
+        .lines();
+        assert!(
+            line[0].starts_with("[[登録]]"),
+            "登録の中の登録が一目で分かる: {}",
+            line[0]
+        );
     }
 
     #[test]
