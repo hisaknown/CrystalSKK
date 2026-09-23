@@ -43,13 +43,17 @@
 //! 波線は使わない。綴り間違いの印として定着しているので、入力中の文字に
 //! 使うと「間違っている」と読まれる。
 //!
-//! # 印は出さない
+//! # 印は出さず、区切りだけ残す
 //!
-//! `▽` `▼` `*` は文書に出さず、空白に置き換える (PRD Q-09)。**状態は
-//! 下線で分かる**ので、記号まで並べると文字列が読みにくくなる。
+//! `▽` `▼` `*` は文書に出さない (PRD Q-09)。**状態は下線で分かる**ので、
+//! 記号まで並べると文字列が読みにくくなる。
 //!
-//! 消さずに空白を残すのは、詰めると区切りが見えなくなるため。`▽おく*り`
-//! は ` おく り` になり、送り仮名がどこから始まるかが空きで分かる。
+//! ただし二つは役目が違う。
+//!
+//! - **`▽` `▼` は状態を表す。** 下線が同じことを言っているので、何も
+//!   出さない。空白を置くと、書いている文が一文字ぶん右へずれる
+//! - **`*` は境を示す。** 下線の点線と破線は見分けが付きにくいので、
+//!   空白で区切りを見せる
 //!
 //! **CLI は記号のまま出す。** ターミナルに下線を引けないので、記号が唯一の
 //! 手がかりになる。同じ `Preedit` から違う見せ方をしているだけである。
@@ -122,15 +126,15 @@ pub const ALL: &[Attribute] = &[INPUT, OKURI, CONVERTED];
 
 /// 区切りの役目に対する見え方。
 ///
-/// 印 (`▽` `▼`) は**続く部分に合わせる**。印だけ違う線になると、一つの
+/// 印と区切りは**続く部分に合わせる**。そこだけ違う線になると、一つの
 /// 塊が途中で切れて見える。合わせる相手は呼ぶ側が渡す。
 pub fn for_role(role: Role) -> Attribute {
     match role {
         Role::Midashi => INPUT,
         Role::Okuri => OKURI,
-        // 印を単独で渡されたときは、変換中として扱う。`▽` は続く見出し語に
-        // 合わせて上書きされる。
-        Role::Candidate | Role::Marker => CONVERTED,
+        // 単独で渡されたときは変換中として扱う。続く部分があれば、
+        // そちらに合わせて上書きされる。
+        Role::Candidate | Role::Marker | Role::Separator => CONVERTED,
     }
 }
 
@@ -149,8 +153,16 @@ impl Attribute {
     }
 }
 
-/// 印 (`▽` `▼` `*`) を文書に出すときの文字。
-pub const MARKER_TEXT: &str = " ";
+/// 状態の印 (`▽` `▼`) を文書に出すときの文字。
+///
+/// 出さない。下線が同じことを言っている。
+pub const MARKER_TEXT: &str = "";
+
+/// 区切り (`*`) を文書に出すときの文字。
+///
+/// 空白を置く。**下線の模様だけでは、見出し語と送り仮名の境が見分け
+/// にくい。**
+pub const SEPARATOR_TEXT: &str = " ";
 
 /// 未確定の表示を、文書へ書く形に組み立てる。
 ///
@@ -166,7 +178,7 @@ pub fn document_segments(segments: &[Segment], atoms: Option<Atoms>) -> Vec<(u32
         .enumerate()
         .map(|(index, segment)| {
             let role = match segment.role {
-                Role::Marker => segments
+                Role::Marker | Role::Separator => segments
                     .get(index + 1)
                     .map_or(segment.role, |next| next.role),
                 role => role,
@@ -174,6 +186,7 @@ pub fn document_segments(segments: &[Segment], atoms: Option<Atoms>) -> Vec<(u32
             let atom = atoms.map_or(0, |atoms| atoms.for_role(role));
             let text = match segment.role {
                 Role::Marker => MARKER_TEXT.to_owned(),
+                Role::Separator => SEPARATOR_TEXT.to_owned(),
                 _ => segment.text.clone(),
             };
             (atom, text)
@@ -368,20 +381,27 @@ mod tests {
     }
 
     #[test]
-    fn the_markers_become_spaces_in_the_document() {
-        // `▽おく*り` は ` おく り` になる。**記号は出さず、区切りは空きで
-        // 示す。**
+    fn the_markers_leave_and_the_separator_becomes_a_space() {
+        // `▽おく*り` は `おく り` になる。**状態の印は消し、境だけ残す。**
         let written = document_segments(
             &[
                 segment(Role::Marker, "▽"),
                 segment(Role::Midashi, "おく"),
-                segment(Role::Marker, "*"),
+                segment(Role::Separator, "*"),
                 segment(Role::Okuri, "り"),
             ],
             None,
         );
         let text: String = written.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(text, " おく り");
+        assert_eq!(text, "おく り");
+    }
+
+    #[test]
+    fn the_text_does_not_shift_when_conversion_starts() {
+        // 印に空白を置くと、書いている文が一文字ぶん右へずれる。
+        let written = document_segments(&[segment(Role::Marker, "▽")], None);
+        let text: String = written.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(text.is_empty(), "印は場所を取らない");
     }
 
     #[test]
@@ -393,10 +413,10 @@ mod tests {
             converted: 3,
         };
         let written = document_segments(
-            &[segment(Role::Marker, "*"), segment(Role::Okuri, "り")],
+            &[segment(Role::Separator, "*"), segment(Role::Okuri, "り")],
             Some(atoms),
         );
-        assert_eq!(written[0].0, written[1].0, "印は送り仮名に合わせる");
+        assert_eq!(written[0].0, written[1].0, "区切りは送り仮名に合わせる");
     }
 
     #[test]
@@ -408,7 +428,13 @@ mod tests {
 
     #[test]
     fn every_role_has_a_look() {
-        for role in [Role::Marker, Role::Midashi, Role::Okuri, Role::Candidate] {
+        for role in [
+            Role::Marker,
+            Role::Separator,
+            Role::Midashi,
+            Role::Okuri,
+            Role::Candidate,
+        ] {
             let attribute = for_role(role);
             assert!(ALL.contains(&attribute), "{role:?}");
         }

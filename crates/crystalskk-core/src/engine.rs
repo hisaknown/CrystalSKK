@@ -41,8 +41,13 @@ impl Marker {
 /// どこからが送り仮名かを外から言えない。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// `▽` `▼` の印。
+    /// `▽` `▼` の印。状態を表す。
     Marker,
+    /// 見出し語と送り仮名の区切り (`*`)。
+    ///
+    /// 印とは別の役目である。**状態を表すのではなく、境を示す。** 片方だけ
+    /// を出す、という選び方ができるように分けてある (ADR-0018)。
+    Separator,
     /// 見出し語。打っている最中のもの。
     Midashi,
     /// 送り仮名。区切りの `*` を含む。
@@ -504,7 +509,7 @@ impl Engine {
                     // は front end の裁量で、空白に置き換えることもできる
                     // (PRD Q-09)。埋め込んでしまうと、その選択を奪う。
                     Some(okuri) => {
-                        segments.push(Segment::new(Role::Marker, OKURI_MARK));
+                        segments.push(Segment::new(Role::Separator, OKURI_MARK));
                         segments.push(Segment::new(
                             Role::Okuri,
                             format!("{}{}", okuri.kana, self.romaji.pending()),
@@ -892,6 +897,25 @@ impl Engine {
     }
 
     /// 送り仮名が一文字確定したら変換に進む。そうでなければ入力を続ける。
+    /// 候補選択をやめ、見出し語入力へ戻す。
+    ///
+    /// **送り仮名は見出し語に溶かす。** 区切りを残したまま戻ると、続きを
+    /// 打つのに一度消さなければならない。`▽な*く` から取り消したとき、
+    /// `▽なく` として続けられるほうが素直である。
+    ///
+    /// ddskk も CorvusSKK も既定でこうする。ddskk の
+    /// `skk-delete-okuri-when-quit` は nil が既定で、docstring がそのまま
+    /// 書いている — 「▽な*く -> ▼泣く -> C-g -> ▽なく」。
+    ///
+    /// 送り仮名ごと消す作法もある (ddskk では非 nil、CorvusSKK では
+    /// `DelOkuriCncl`)。どちらも既定ではない。
+    fn back_to_composing(&mut self, mut comp: Composing) {
+        if let Some(okuri) = comp.okuri.take() {
+            comp.midashi.push_str(&okuri.kana);
+        }
+        self.state = State::Composing(comp);
+    }
+
     fn convert_if_okuri_complete(&mut self, comp: Composing) {
         let ready = comp.okuri.as_ref().is_some_and(|o| !o.kana.is_empty());
         if ready && self.romaji.is_empty() {
@@ -992,12 +1016,12 @@ impl Engine {
                     sel.index -= 1;
                     self.state = State::Selecting(sel);
                 } else {
-                    self.state = State::Composing(sel.origin);
+                    self.back_to_composing(sel.origin);
                 }
             }
             Key::Enter | Key::Ctrl('j') => self.commit_selection(sel, out),
             Key::Ctrl('g') | Key::Backspace | Key::Escape => {
-                self.state = State::Composing(sel.origin);
+                self.back_to_composing(sel.origin);
             }
             Key::Char(c) if sel.listing() && SELECTION_KEYS.contains(&c) => {
                 self.choose_from_page(sel, c, out);
