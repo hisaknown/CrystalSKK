@@ -12,13 +12,16 @@
 
 use std::cell::RefCell;
 
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::TextServices::GUID_COMPARTMENT_KEYBOARD_OPENCLOSE;
 use windows::Win32::UI::TextServices::{
-    ITfCompartmentEventSink, ITfCompartmentEventSink_Impl, ITfComposition, ITfCompositionSink,
-    ITfCompositionSink_Impl, ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr,
-    ITfLangBarItem, ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
-    ITfTextInputProcessorEx_Impl, ITfThreadMgr,
+    IEnumTfDisplayAttributeInfo, ITfCompartmentEventSink, ITfCompartmentEventSink_Impl,
+    ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
+    ITfDisplayAttributeInfo, ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl,
+    ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfTextInputProcessor,
+    ITfTextInputProcessor_Impl, ITfTextInputProcessorEx, ITfTextInputProcessorEx_Impl,
+    ITfThreadMgr,
 };
 use windows::core::{
     BOOL, ComObject, GUID, IUnknown, IUnknownImpl, Interface, Ref, Result, implement,
@@ -69,7 +72,8 @@ struct Activation {
     ITfTextInputProcessor,
     ITfKeyEventSink,
     ITfCompositionSink,
-    ITfCompartmentEventSink
+    ITfCompartmentEventSink,
+    ITfDisplayAttributeProvider
 )]
 pub struct TextService {
     /// 有効化されている間だけ中身が入る。
@@ -96,6 +100,10 @@ pub struct TextService {
     /// **直前まで書いていた場所のそばに出すのが、いちばん近い当て推量**
     /// になる。
     anchor: RefCell<Option<windows::Win32::Foundation::RECT>>,
+    /// 見え方に振られた番号。有効化のときに一度取る。
+    ///
+    /// 取れなければ既定の下線のままになるだけで、入力は続く。
+    atoms: RefCell<Option<crate::display::Atoms>>,
     /// システムへ申告している候補一覧。出していない間は `None`。
     ///
     /// **アプリが自分で描くと言うことがある。** そのときは自前の窓を
@@ -121,6 +129,7 @@ impl TextService {
             candidates: CandidateWindow::new(),
             owner: RefCell::new(None),
             anchor: RefCell::new(None),
+            atoms: RefCell::new(None),
             announced: RefCell::new(None),
         }
     }
@@ -510,6 +519,12 @@ impl TextService_Impl {
             open_close_cookie,
         });
 
+        // 見え方の番号を取る。取れなくても入力は続くので、記録だけする。
+        match crate::display::Atoms::register() {
+            Ok(atoms) => *self.this.atoms.borrow_mut() = Some(atoms),
+            Err(e) => log::error(&format!("表示属性を登録できません: {}", e.message())),
+        }
+
         // 切られていたら、入にする。**SKK では入が常態** (ADR-0013) で、
         // 切ったままでは `Ctrl+J` すら届かない。入って半角英数なら、打鍵の
         // 意味は切のときと変わらないので、邪魔にもならない。
@@ -571,10 +586,22 @@ impl TextService_Impl {
         // **辞書登録中は文書に何も書かない。** 登録語として打っている文字は
         // 登録の枠に溜まるものであって、文書に入るものではない。途中の
         // ローマ字だけが文書に現れては、どこへ打っているのか分からなくなる。
-        let preedit = if response.preedit.registering.is_some() {
-            String::new()
+        //
+        // 区切りごとに見え方の番号を添える。**どう見せるかは
+        // [`crate::display`] が決め、貼るのは [`crate::edit`] がやる。**
+        let preedit: Vec<(u32, String)> = if response.preedit.registering.is_some() {
+            Vec::new()
         } else {
-            response.preedit.display()
+            let atoms = *self.this.atoms.borrow();
+            response
+                .preedit
+                .segments
+                .iter()
+                .map(|segment| {
+                    let atom = atoms.map_or(0, |atoms| atoms.for_role(segment.role));
+                    (atom, segment.text.clone())
+                })
+                .collect()
         };
         let sink: ITfCompositionSink = self.to_interface();
         // 借用を編集セッションより長く持たない。呼んだ先から戻って
@@ -657,6 +684,39 @@ impl ITfCompositionSink_Impl for TextService_Impl {
             self.this.composition.borrow_mut().take();
             self.this.engine.borrow_mut().reset();
             Ok(())
+        })
+    }
+}
+
+impl ITfDisplayAttributeProvider_Impl for TextService_Impl {
+    /// 名乗る見え方を並べて渡す。
+    ///
+    /// アプリはこれを見て、貼られた番号が何を意味するかを知る。
+    fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
+        guard("EnumDisplayAttributeInfo", || {
+            let list = ComObject::new(crate::display::AttributeEnum::default());
+            Ok(list.to_interface())
+        })
+    }
+
+    /// 一つを名指しで渡す。
+    // TSF が決めた形なので、生のポインタを受けるしかない。中では
+    // 確かめてから使う。
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の口の形が決まっている"
+    )]
+    fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
+        guard("GetDisplayAttributeInfo", || {
+            // SAFETY: TSF が渡す GUID への参照で、この呼び出しの間は有効。
+            let Some(guid) = (unsafe { guid.as_ref() }) else {
+                return Err(E_INVALIDARG.into());
+            };
+            let Some(attribute) = crate::display::by_guid(guid) else {
+                return Err(E_INVALIDARG.into());
+            };
+            let info = ComObject::new(crate::display::AttributeInfo::new(attribute));
+            Ok(info.to_interface())
         })
     }
 }

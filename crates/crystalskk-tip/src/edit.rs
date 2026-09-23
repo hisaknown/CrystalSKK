@@ -15,14 +15,23 @@
 //!
 //! 開いたままの composition は打鍵をまたいで持ち越す必要があるため、
 //! 呼ぶ側が預かる。このモジュールは受け取って、新しい状態を返す。
+//!
+//! # 見え方は区切りごとに貼る
+//!
+//! 未確定の文字列は一本ではない。見出し語、送り仮名、候補と役目が違い、
+//! **それぞれに違う見え方を付けたい** (ADR-0017)。
+//!
+//! ここは「どう見せるか」を知らない。渡された番号を、渡された長さぶんの
+//! 範囲に貼るだけである。**何をどう見せるかは [`crate::display`] が決める。**
 
 use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 
 use windows::Win32::Foundation::{E_FAIL, HWND, RECT};
+use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
 use windows::Win32::UI::TextServices::{
-    ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
-    ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
+    GUID_PROP_ATTRIBUTE, ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition,
+    ITfEditSession, ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
     TF_ANCHOR_START, TF_DEFAULT_SELECTION, TF_ES_ASYNCDONTCARE, TF_ES_READWRITE, TF_ES_SYNC,
     TF_IAS_QUERYONLY, TF_SELECTION, TF_SELECTIONSTYLE,
 };
@@ -39,8 +48,8 @@ pub struct Update {
     sink: ITfCompositionSink,
     /// 今回確定する文字列。
     commit: Vec<u16>,
-    /// 今回見せる未確定の文字列。
-    preedit: Vec<u16>,
+    /// 今回見せる未確定の文字列。区切りごとに、貼る番号と中身の組。
+    preedit: Vec<(u32, Vec<u16>)>,
     /// 入る前に開いていた composition。出るときに新しい状態を書き戻す。
     composition: RefCell<Option<ITfComposition>>,
     /// 未確定の文字列が画面上で占める矩形。
@@ -80,11 +89,19 @@ impl ITfEditSession_Impl for Update_Impl {
             }
 
             // 未確定の文字列は、書いて開いたままにする。
-            if !this.preedit.is_empty() {
+            let preedit: Vec<u16> = this
+                .preedit
+                .iter()
+                .flat_map(|(_, text)| text.iter().copied())
+                .collect();
+            if !preedit.is_empty() {
                 let opened = open_if_needed(&this.context, ec, &this.sink, composition.take())?;
                 // SAFETY: 同上。
                 unsafe {
-                    write_into(&this.context, ec, &opened, &this.preedit)?;
+                    write_into(&this.context, ec, &opened, &preedit)?;
+                    // 書いたあとで貼る。**書く前に貼っても、書き換えで
+                    // 消える。**
+                    let _ = mark_segments(&this.context, ec, &opened, &this.preedit);
                 }
                 log::trace("未確定の文字列を書いた");
                 composition = Some(opened);
@@ -107,6 +124,70 @@ impl ITfEditSession_Impl for Update_Impl {
             *this.composition.borrow_mut() = composition;
             Ok(())
         })
+    }
+}
+
+/// 区切りごとに見え方の番号を貼る。
+///
+/// 貼れなくても入力は続く。下線の見え方が既定に戻るだけである。
+///
+/// # Safety
+///
+/// `ec` が書き込み可能な編集権であり、`composition` がこの文脈のもので
+/// あること。
+unsafe fn mark_segments(
+    context: &ITfContext,
+    ec: u32,
+    composition: &ITfComposition,
+    segments: &[(u32, Vec<u16>)],
+) -> Result<()> {
+    // SAFETY: 呼び出し側の約束による。
+    unsafe {
+        let property = context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+        let whole = composition.GetRange()?;
+
+        // 先頭から順に、区切りの長さぶんだけ切り出して貼る。
+        let cursor = whole.Clone()?;
+        cursor.Collapse(ec, TF_ANCHOR_START)?;
+        for (atom, text) in segments {
+            let length = i32::try_from(text.len()).unwrap_or(0);
+            if length == 0 {
+                continue;
+            }
+
+            let piece = cursor.Clone()?;
+            let mut moved = 0;
+            piece.ShiftEnd(ec, length, &mut moved, std::ptr::null())?;
+            if moved == 0 {
+                break;
+            }
+            property.SetValue(ec, &piece, &integer(*atom as i32))?;
+
+            let mut advanced = 0;
+            cursor.ShiftStart(ec, moved, &mut advanced, std::ptr::null())?;
+            if advanced == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 整数を入れた値を作る。
+///
+/// `VARIANT` は共用体の入れ子なので、組み立ててから包む。
+fn integer(value: i32) -> VARIANT {
+    let inner = VARIANT_0_0 {
+        vt: VT_I4,
+        wReserved1: 0,
+        wReserved2: 0,
+        wReserved3: 0,
+        Anonymous: VARIANT_0_0_0 { lVal: value },
+    };
+    VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: ManuallyDrop::new(inner),
+        },
     }
 }
 
@@ -290,10 +371,11 @@ pub fn update(
     client_id: u32,
     sink: &ITfCompositionSink,
     commit: &str,
-    preedit: &str,
+    preedit: &[(u32, String)],
     composition: Option<ITfComposition>,
 ) -> Result<Applied> {
-    if commit.is_empty() && preedit.is_empty() && composition.is_none() {
+    let empty = preedit.iter().all(|(_, text)| text.is_empty());
+    if commit.is_empty() && empty && composition.is_none() {
         return Ok(Applied::default());
     }
 
@@ -301,7 +383,10 @@ pub fn update(
         context: context.clone(),
         sink: sink.clone(),
         commit: commit.encode_utf16().collect(),
-        preedit: preedit.encode_utf16().collect(),
+        preedit: preedit
+            .iter()
+            .map(|(atom, text)| (*atom, text.encode_utf16().collect()))
+            .collect(),
         composition: RefCell::new(composition),
         extent: RefCell::new(None),
         owner: RefCell::new(None),

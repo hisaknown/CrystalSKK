@@ -30,6 +30,7 @@ pub mod candwin;
 pub mod com;
 pub mod compartment;
 pub mod dict;
+pub mod display;
 pub mod edit;
 pub mod factory;
 pub mod guard;

@@ -11,7 +11,7 @@
 
 use std::io;
 
-use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
+use windows::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
@@ -108,23 +108,7 @@ pub fn ask(name: &str, request: &str, wait_ms: u32) -> io::Result<String> {
 
     // SAFETY: 名前はこの関数で用意したもの。開いた持ち手は必ず閉じる。
     unsafe {
-        if !WaitNamedPipeW(&wide, wait_ms).as_bool() {
-            return Err(io::Error::other("辞書サーバが待っていません"));
-        }
-
-        let handle = CreateFileW(
-            &wide,
-            FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            // **サーバにこちらの身分を借りさせない。** TIP は他人のプロセス
-            // の中で動くので、なりすましの踏み台にされては困る。
-            FILE_FLAGS_AND_ATTRIBUTES(SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0),
-            None,
-        )
-        .map_err(|e: windows::core::Error| io::Error::other(e.message()))?;
-        let handle = OwnedHandle(handle);
+        let handle = OwnedHandle(connect(&wide, wait_ms)?);
 
         let mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
         SetNamedPipeHandleState(handle.0, Some(&mode), None, None)
@@ -132,6 +116,55 @@ pub fn ask(name: &str, request: &str, wait_ms: u32) -> io::Result<String> {
 
         write_message(handle.0, request)?;
         read_message(handle.0)
+    }
+}
+
+/// 繋がるまで試す。
+///
+/// **一度きりでは足りない。** サーバは一件ずつ順に答えるので、別のアプリが
+/// 話している間は「使用中」で断られる。答えるのは一瞬なので、待てばすぐ
+/// 空く。
+///
+/// `WaitNamedPipeW` は「空きができた」ことしか言わない。**その空きを別の
+/// 誰かが先に取ることがある**ので、取れるまで繰り返す。MSDN が示す作法も
+/// これである。
+///
+/// # Safety
+///
+/// `name` が有効な文字列であること。
+unsafe fn connect(name: &HSTRING, wait_ms: u32) -> io::Result<HANDLE> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(u64::from(wait_ms));
+    loop {
+        // SAFETY: 呼び出し側の約束による。
+        let opened = unsafe {
+            CreateFileW(
+                name,
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                // **サーバにこちらの身分を借りさせない。** TIP は他人の
+                // プロセスの中で動くので、なりすましの踏み台にされては困る。
+                FILE_FLAGS_AND_ATTRIBUTES(SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0),
+                None,
+            )
+        };
+        match opened {
+            Ok(handle) => return Ok(handle),
+            Err(e) if e.code() != windows::core::HRESULT::from(ERROR_PIPE_BUSY) => {
+                return Err(io::Error::other(e.message()));
+            }
+            Err(_) => {}
+        }
+
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::other("辞書サーバが取り込み中です"));
+        }
+        // SAFETY: 呼び出し側の約束による。空くまで待つ。
+        unsafe {
+            let _ = WaitNamedPipeW(name, u32::try_from(left.as_millis()).unwrap_or(u32::MAX));
+        }
     }
 }
 

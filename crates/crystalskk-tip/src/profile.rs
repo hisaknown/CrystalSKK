@@ -16,8 +16,8 @@
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
-    CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, GUID_TFCAT_TIP_KEYBOARD,
-    GUID_TFCAT_TIPCAP_COMLESS, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+    CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles, GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+    GUID_TFCAT_TIP_KEYBOARD, GUID_TFCAT_TIPCAP_COMLESS, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
     GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT, GUID_TFCAT_TIPCAP_SECUREMODE,
     GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT, GUID_TFCAT_TIPCAP_UIELEMENTENABLED, ITfCategoryMgr,
     ITfInputProcessorProfileMgr,
@@ -88,9 +88,6 @@ const ICON_INDEX: u32 = 0;
 ///
 /// ここに無い能力は「持っていない」と見なされる。表示が出ない、
 /// 選べない、といった症状の多くはここの漏れで説明がつく。
-///
-/// 表示属性 (下線) の分類は、実装してから足す。できないことを
-/// 名乗っても仕方がない。
 const CATEGORIES: &[GUID] = &[
     // キーボードから入力する TIP である。これが無いと言語バーに出ない。
     GUID_TFCAT_TIP_KEYBOARD,
@@ -108,6 +105,10 @@ const CATEGORIES: &[GUID] = &[
     GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
     // トレイの入力表示に対応する。
     GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+    // 未確定の文字の見え方を自分で決める ([`crate::display`])。
+    // **実装してから名乗った。** 名乗るだけだと、TSF がその口を呼びに来て
+    // 失敗する (ADR-0011)。
+    GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
 ];
 
 /// 終端の NUL を含まない UTF-16 列。`RegisterProfile` は長さで受け取る。

@@ -35,24 +35,61 @@ impl Marker {
     }
 }
 
+/// 未確定の表示を成す一区切りの役目。
+///
+/// 表示属性 (下線の引き方) はこれごとに変わる。**一本の文字列にしてしまうと、
+/// どこからが送り仮名かを外から言えない。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// `▽` `▼` の印。
+    Marker,
+    /// 見出し語。打っている最中のもの。
+    Midashi,
+    /// 送り仮名。区切りの `*` を含む。
+    Okuri,
+    /// 選ばれている候補。
+    Candidate,
+}
+
+/// 未確定の表示の一区切り。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub role: Role,
+    pub text: String,
+}
+
+impl Segment {
+    fn new(role: Role, text: impl Into<String>) -> Self {
+        Self {
+            role,
+            text: text.into(),
+        }
+    }
+}
+
 /// 未確定の表示状態。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Preedit {
     pub marker: Marker,
-    /// 印を含まない本体。
-    pub text: String,
+    /// 印を含めた区切りの並び。
+    ///
+    /// 繋げれば表示文字列になる ([`Self::display`])。分かれているのは、
+    /// **区切りごとに違う表示属性を付けるため**である。
+    pub segments: Vec<Segment>,
     /// 辞書登録中なら、登録しようとしている辞書キー。
     pub registering: Option<String>,
 }
 
 impl Preedit {
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.marker == Marker::None && self.registering.is_none()
+        self.segments.iter().all(|s| s.text.is_empty())
+            && self.marker == Marker::None
+            && self.registering.is_none()
     }
 
     /// 印を含めた表示文字列。
     pub fn display(&self) -> String {
-        format!("{}{}", self.marker.prefix(), self.text)
+        self.segments.iter().map(|s| s.text.as_str()).collect()
     }
 }
 
@@ -448,27 +485,47 @@ impl Engine {
         match &self.state {
             State::Direct => Preedit {
                 marker: Marker::None,
-                text: self.romaji.pending().to_owned(),
+                segments: vec![Segment::new(Role::Midashi, self.romaji.pending())],
                 registering,
             },
             State::Composing(c) => {
-                let mut text = c.midashi.clone();
-                if let Some(okuri) = &c.okuri {
-                    text.push('*');
-                    text.push_str(&okuri.kana);
+                let mut segments = vec![
+                    Segment::new(Role::Marker, Marker::Composing.prefix()),
+                    Segment::new(Role::Midashi, c.midashi.clone()),
+                ];
+                match &c.okuri {
+                    // 送り仮名を打っている最中。打ちかけのローマ字も
+                    // 送り仮名の側に付く。
+                    Some(okuri) => segments.push(Segment::new(
+                        Role::Okuri,
+                        format!("*{}{}", okuri.kana, self.romaji.pending()),
+                    )),
+                    None => {
+                        if let Some(last) = segments.last_mut() {
+                            last.text.push_str(self.romaji.pending());
+                        }
+                    }
                 }
-                text.push_str(self.romaji.pending());
                 Preedit {
                     marker: Marker::Composing,
-                    text,
+                    segments,
                     registering,
                 }
             }
             State::Selecting(s) => {
-                let text = s.candidates[s.index].to_text(s.query.okuri.as_deref());
+                let candidate = &s.candidates[s.index];
+                let mut segments = vec![
+                    Segment::new(Role::Marker, Marker::Selecting.prefix()),
+                    Segment::new(Role::Candidate, candidate.word.clone()),
+                ];
+                // 送り仮名は候補の後ろに付く。**確定しているので、
+                // 打っている最中の見出し語とは見え方を変えたい。**
+                if let Some(okuri) = &s.query.okuri {
+                    segments.push(Segment::new(Role::Okuri, okuri.clone()));
+                }
                 Preedit {
                     marker: Marker::Selecting,
-                    text,
+                    segments,
                     registering,
                 }
             }
