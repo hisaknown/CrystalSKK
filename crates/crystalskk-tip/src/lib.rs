@@ -43,6 +43,7 @@ pub mod preserved;
 pub mod profile;
 pub mod registry;
 pub mod service;
+pub mod uielement;
 
 use factory::ClassFactory;
 use guids::CLSID_CRYSTALSKK;

@@ -32,6 +32,7 @@ use crate::dict::SharedUserDict;
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
 use crate::langbar::ModeIndicator;
+use crate::uielement::{self, Announced, ListSnapshot};
 use crate::{compartment, dict, edit, keys, langbar, log, preserved};
 
 /// 入力方式が入にされた直後の入力モード。
@@ -90,6 +91,11 @@ pub struct TextService {
     /// **直前まで書いていた場所のそばに出すのが、いちばん近い当て推量**
     /// になる。
     anchor: RefCell<Option<windows::Win32::Foundation::RECT>>,
+    /// システムへ申告している候補一覧。出していない間は `None`。
+    ///
+    /// **アプリが自分で描くと言うことがある。** そのときは自前の窓を
+    /// 出さず、中身だけを渡す。
+    announced: RefCell<Option<Announced>>,
 }
 
 impl Default for TextService {
@@ -108,6 +114,7 @@ impl TextService {
             composition: RefCell::new(None),
             candidates: CandidateWindow::new(),
             anchor: RefCell::new(None),
+            announced: RefCell::new(None),
         }
     }
 
@@ -241,15 +248,98 @@ impl TextService {
         }
 
         let Some(content) = self.window_content() else {
+            self.withdraw_list();
             self.candidates.hide();
             return;
         };
+
+        // 候補の一覧はシステムへも差し出す。アプリが自分で描くと言えば、
+        // 自前の窓は出さない。辞書登録には差し出す口が無いので、
+        // 自前の窓だけで出す。
+        let ours_to_draw = match &content {
+            Content::Page(_) => self.announce_list(),
+            Content::Registration(_) => {
+                self.withdraw_list();
+                true
+            }
+        };
+        if !ours_to_draw {
+            self.candidates.hide();
+            return;
+        }
+
         let Some(anchor) = *self.anchor.borrow() else {
             log::trace("出す場所が分からないので小窓を出さない");
             self.candidates.hide();
             return;
         };
         self.candidates.show(&content, anchor);
+    }
+
+    /// 候補一覧をシステムへ差し出す。返るのは自前の窓を出してよいか。
+    ///
+    /// すでに差し出しているなら中身を入れ替えるだけにする。**打鍵のたびに
+    /// 申告し直すと、アプリから見て一覧が消えては現れることになる。**
+    fn announce_list(&self) -> bool {
+        let Some(thread_manager) = self.thread_manager() else {
+            return true;
+        };
+        let snapshot = self.list_snapshot();
+        // SAFETY: 焦点を尋ねるだけ。取れなくても差し支えない。
+        let documents = unsafe { thread_manager.GetFocus() }.ok();
+
+        let mut announced = self.announced.borrow_mut();
+        match announced.as_ref() {
+            Some(existing) => {
+                existing.update(&thread_manager, snapshot, documents);
+                existing.ours_to_draw()
+            }
+            None => match uielement::begin(&thread_manager, snapshot, documents) {
+                Some(fresh) => {
+                    let ours = fresh.ours_to_draw();
+                    *announced = Some(fresh);
+                    ours
+                }
+                // 差し出せなくても自前の窓では出せる。普通のアプリでは
+                // それで困らない。
+                None => true,
+            },
+        }
+    }
+
+    /// 差し出していた一覧を取り下げる。
+    fn withdraw_list(&self) {
+        let Some(announced) = self.announced.borrow_mut().take() else {
+            return;
+        };
+        let Some(thread_manager) = self.thread_manager() else {
+            return;
+        };
+        announced.end(&thread_manager);
+    }
+
+    /// システムへ渡す一覧の中身。
+    ///
+    /// 渡すのは**一覧に載る候補だけ**である。一つずつ見せていた分まで
+    /// 入れると、ページの区切りが合わなくなる。
+    fn list_snapshot(&self) -> ListSnapshot {
+        let engine = self.engine.borrow();
+        let Some(view) = engine.candidates() else {
+            return ListSnapshot::default();
+        };
+        let okuri = view.okuri.as_deref().unwrap_or("");
+        let listed: Vec<String> = view
+            .listed()
+            .iter()
+            .map(|candidate| format!("{}{okuri}", candidate.word))
+            .collect();
+        ListSnapshot {
+            items: listed,
+            selection: u32::try_from(view.page_number() * crystalskk_core::engine::PAGE_SIZE)
+                .unwrap_or(0),
+            page_size: u32::try_from(crystalskk_core::engine::PAGE_SIZE).unwrap_or(1),
+            current_page: u32::try_from(view.page_number()).unwrap_or(0),
+        }
     }
 
     /// いま小窓に出すもの。出すものが無ければ `None`。
@@ -307,6 +397,7 @@ impl TextService {
     /// 候補の窓も一緒に畳む。**未確定の文字列が消えたのに一覧だけ残ると、
     /// どこに対する候補なのか分からなくなる。**
     fn drop_composition(&self) {
+        self.withdraw_list();
         self.candidates.hide();
         self.drop_composition_only();
     }
@@ -323,6 +414,7 @@ impl TextService {
     }
 
     fn deactivate(&self) -> Result<()> {
+        self.withdraw_list();
         self.drop_composition();
         self.candidates.close();
         self.user_dictionary.save();

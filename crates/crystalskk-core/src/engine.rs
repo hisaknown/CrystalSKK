@@ -112,6 +112,15 @@ impl CandidateView {
             .collect()
     }
 
+    /// 一覧に載る候補。
+    ///
+    /// **最初の数件は載らない。** そこは一つずつ見せる段階で、一覧には
+    /// 現れない。外へ渡すときにこれを混ぜると、ページの区切りが合わなく
+    /// なる。
+    pub fn listed(&self) -> &[Candidate] {
+        self.candidates.get(FIRST_LISTED..).unwrap_or(&[])
+    }
+
     /// いま何ページ目か。0 から数える。
     pub fn page_number(&self) -> usize {
         if !self.listing {

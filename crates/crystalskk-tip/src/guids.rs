@@ -33,6 +33,10 @@ pub const GUID_PRESERVED_KEY_ON: GUID = GUID::from_u128(0x0a1c4f62_6d8e_4b3a_9c5
 /// 入力方式を切にする横取りキーの GUID。
 pub const GUID_PRESERVED_KEY_OFF: GUID = GUID::from_u128(0x5e8b2d09_47a1_4c6f_b3d2_8f1a6c05e2b4);
 
+/// 候補一覧としてシステムへ差し出す口の GUID。
+pub const GUID_CANDIDATE_LIST_ELEMENT: GUID =
+    GUID::from_u128(0x2f7b8c14_9d63_4a05_b1e8_37c0a64df592);
+
 /// 言語バーと設定画面に出る名前。
 pub const PROFILE_DESCRIPTION: &str = "CrystalSKK";
 

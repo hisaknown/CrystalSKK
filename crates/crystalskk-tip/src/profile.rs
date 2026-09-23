@@ -96,7 +96,9 @@ const CATEGORIES: &[GUID] = &[
     GUID_TFCAT_TIP_KEYBOARD,
     // ログオン画面のような、安全が要る場面でも動ける。
     GUID_TFCAT_TIPCAP_SECUREMODE,
-    // 候補一覧などの UI を、システム側に扱わせられる。
+    // 候補一覧を、システム側に扱わせられる ([`crate::uielement`])。
+    // 名乗るからには差し出す口が要る。**無いものを名乗ると、呼ばれて
+    // 失敗する。**
     GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
     // 入力モードを区画で伝える (ADR-0010)。トレイの表示はこれを見る。
     GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
