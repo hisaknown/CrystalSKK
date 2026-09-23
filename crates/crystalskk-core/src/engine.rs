@@ -865,6 +865,13 @@ impl Engine {
         self.ranker.rank(&self.context, &query, &mut candidates);
 
         if candidates.is_empty() {
+            if !self.dict.available() {
+                // 引けなかっただけで、無いとは限らない。**見出し語入力の
+                // まま留める。** ここで登録を始めると、知っているはずの語を
+                // 「辞書に無い」と言われたうえ、登録すれば辞書が汚れる。
+                self.state = State::Composing(comp);
+                return;
+            }
             self.start_registration(query, comp, None);
         } else {
             self.state = State::Selecting(Selecting {

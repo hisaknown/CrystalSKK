@@ -357,13 +357,16 @@ impl TextService {
     /// 辞書登録を先に見る。登録中は候補の選択も入れ子で起きうるが、
     /// **利用者にとって手前にあるのは登録のほう**である。
     fn window_content(&self) -> Option<Content> {
-        // 辞書サーバに届かなかったなら、まずそれを言う。**「その語は辞書に
-        // ない」と見分けがつかないまま進ませない。**
-        if self.source.was_unreachable() {
+        let engine = self.engine.borrow();
+
+        // 辞書サーバに届かなかったことを言う。**「その語は辞書に無い」と
+        // 見分けがつかないまま進ませない。**
+        //
+        // 見出し語を入力している間だけ出す。確定すれば消える — 知らせを
+        // 閉じる手立てを別に覚えてもらう必要がない。
+        if self.source.was_unreachable() && !engine.preedit().is_empty() {
             return Some(Content::Notice(UNREACHABLE_NOTICE.to_owned()));
         }
-
-        let engine = self.engine.borrow();
 
         if let Some(registration) = engine.registration() {
             let key = match &registration.okuri {

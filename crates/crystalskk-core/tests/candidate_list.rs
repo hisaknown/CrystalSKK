@@ -288,3 +288,52 @@ fn ascii_mode_registration_can_be_committed() {
     assert_eq!(s.committed, "abc", "登録した語が文書へ入る");
     assert!(s.engine.registration().is_none());
 }
+
+// --- 辞書に届かないとき --------------------------------------------------
+
+/// 引けない辞書。サーバが落ちている場面を写す。
+struct Unreachable;
+
+impl CandidateSource for Unreachable {
+    fn lookup(&self, _query: &Query) -> Vec<Candidate> {
+        Vec::new()
+    }
+
+    fn available(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn an_unreachable_dictionary_does_not_start_a_registration() {
+    // **「候補が無い」と「引けなかった」は別である。** 引けなかっただけで
+    // 登録を始めると、知っているはずの語を「辞書に無い」と言われたうえ、
+    // そのまま登録すれば辞書が汚れる。
+    let mut engine = Engine::new(Box::new(Unreachable));
+    for key in "Kanji ".chars() {
+        engine.press(match key {
+            ' ' => Key::Space,
+            c => Key::Char(c),
+        });
+    }
+
+    assert!(engine.registration().is_none(), "登録を始めない");
+    assert_eq!(
+        engine.preedit().display(),
+        "▽かんじ",
+        "見出し語入力のまま留まる"
+    );
+}
+
+#[test]
+fn an_empty_but_reachable_dictionary_still_registers() {
+    // こちらは本当に無い場合。登録へ進むのが正しい。
+    let mut engine = Engine::new(Box::new(ManyDict::with_candidates(0)));
+    for key in "Kanji ".chars() {
+        engine.press(match key {
+            ' ' => Key::Space,
+            c => Key::Char(c),
+        });
+    }
+    assert!(engine.registration().is_some(), "辞書に無いなら登録へ");
+}

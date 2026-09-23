@@ -9,8 +9,20 @@
 //! なれば書き手も二つになり、**学習が壊れる**。めったに通らない道は腐り
 //! もする。
 //!
-//! 代わりに、繋がらないことを**隠さない**。「辞書に無い」と「引けなかった」
-//! が混ざると、利用者からは「候補がおかしい」としか見えなくなる。
+//! # まず自分で起こす
+//!
+//! 繋がらなかったとき、利用者に「サーバを起こしてください」と言っても
+//! 始まらない。**どうすればいいか分からないものを見せるのは、知らせでは
+//! なく行き止まりである。**
+//!
+//! だから、引く前に居るかを見て、居なければ起こす。CorvusSKK も引くたびに
+//! `_StartManager()` を呼んでいる。たいていの場面ではこれで直り、利用者は
+//! 何も見ない。
+//!
+//! 起こせない場面もある。隔離された入れ物の中からはプロセスを作れない。
+//! そのときだけ、繋がらないことを**隠さずに言う**。「辞書に無い」と
+//! 「引けなかった」が混ざると、利用者からは「候補がおかしい」としか
+//! 見えなくなる。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,13 +32,16 @@ use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_ipc::{Request, Response};
 use crystalskk_server::client;
 
-use crate::log;
+use crate::{launch, log};
 
 /// 繋がらなかったときに出す知らせ。
 ///
 /// **候補が空なのは「辞書に無い」からだ、と思わせない。** 引けなかったのか
 /// 辞書に無かったのかが混ざると、利用者には「候補がおかしい」としか見えない。
-pub const UNREACHABLE_NOTICE: &str = "辞書に繋がりません";
+///
+/// 起こし直しても駄目だったときにしか出ない。**出るからには、利用者に
+/// できることを書く。**
+pub const UNREACHABLE_NOTICE: &str = "辞書に繋がりません (別のアプリを開くと直ることがあります)";
 
 /// 辞書サーバを候補の出どころとして使う。
 ///
@@ -52,22 +67,48 @@ impl ServerSource {
 
 impl CandidateSource for ServerSource {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
-        match client::ask(&Request::Search(query.clone())) {
+        let request = Request::Search(query.clone());
+        match client::ask(&request) {
             Ok(Response::Ok(candidates)) => {
+                self.unreachable.set(false);
+                return candidates;
+            }
+            Ok(Response::Error(reason)) => {
+                // 答えは返っている。居ないわけではないので、起こしても
+                // 意味がない。
+                log::error(&format!("辞書サーバが断りました: {reason}"));
+                self.unreachable.set(true);
+                return Vec::new();
+            }
+            Err(e) => log::write(&format!("辞書サーバが居ません ({e})。起こします")),
+        }
+
+        // 居なかった。起こして、もう一度だけ尋ねる。
+        if !launch::server() {
+            self.unreachable.set(true);
+            return Vec::new();
+        }
+        match client::ask(&request) {
+            Ok(Response::Ok(candidates)) => {
+                log::write("辞書サーバが起きました");
                 self.unreachable.set(false);
                 candidates
             }
-            Ok(Response::Error(reason)) => {
-                log::error(&format!("辞書サーバが断りました: {reason}"));
-                self.unreachable.set(true);
-                Vec::new()
-            }
-            Err(e) => {
-                log::error(&format!("辞書サーバに繋がりません: {e}"));
+            _ => {
+                log::error("起こしても辞書サーバに繋がりません");
                 self.unreachable.set(true);
                 Vec::new()
             }
         }
+    }
+
+    /// いま引ける状態か。
+    ///
+    /// 直近の引き方が届いていれば引ける。**届かなかったことをエンジンへ
+    /// 伝えるのがここの役目**で、伝わらないと「候補が無い」と見分けが
+    /// つかず、辞書登録が始まってしまう。
+    fn available(&self) -> bool {
+        !self.unreachable.get()
     }
 }
 
@@ -88,6 +129,10 @@ impl SharedSource {
 impl CandidateSource for SharedSource {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         self.0.lookup(query)
+    }
+
+    fn available(&self) -> bool {
+        self.0.available()
     }
 }
 
