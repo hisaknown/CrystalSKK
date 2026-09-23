@@ -991,9 +991,9 @@ mod tests {
     }
 
     #[test]
-    fn the_ranker_is_off_in_the_template() {
+    fn the_ranker_is_on_in_the_template() {
         let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
-        assert!(!ranker.enabled);
+        assert!(ranker.enabled);
         assert_eq!(ranker.weight, Weight(1.0));
         assert_eq!((ranker.before, ranker.after), (100, 5));
     }
