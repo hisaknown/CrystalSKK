@@ -46,6 +46,7 @@ fn dict() -> Dict {
         ("かんじ", vec!["漢字".to_owned(), "感じ".to_owned()]),
         ("かんじゃ", vec!["患者".to_owned()]),
         ("たくさん", (1..=20).map(|n| format!("候補{n}")).collect()),
+        ("う゛ぁいおりん", vec!["ヴァイオリン".to_owned()]),
     ])
 }
 
@@ -166,4 +167,18 @@ fn dynamic_completion_works_with_the_shipped_values() {
         .map(|s| s.text);
     assert_eq!(guess.as_deref(), Some("じ"), "二文字で補完候補が出る");
     assert_eq!(press_all(&mut engine, &take.to_string()), "漢字");
+}
+
+#[test]
+fn vu_is_written_the_way_the_dictionaries_write_it() {
+    // SKK の辞書は、ひらがなの ヴ を う゛ と書く。**打った見出しが辞書の
+    // 見出しと一致しなければ、引けない。**
+    let mut engine = configured();
+    assert_eq!(press_all(&mut engine, "Vaiorinn \n"), "ヴァイオリン");
+
+    // カタカナにすれば ヴ になる (ウ゛ にはならない)。
+    let mut engine = configured();
+    assert_eq!(press_all(&mut engine, "Vaiorinnq"), "ヴァイオリン");
+    let mut engine = configured();
+    assert_eq!(press_all(&mut engine, "qvu"), "ヴ");
 }

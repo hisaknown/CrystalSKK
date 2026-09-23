@@ -72,6 +72,9 @@ pub enum Source {
     /// 手元のファイルを直に読む。書かれたままの場所で、相対なら設定
     /// ファイルと同じ場所から解く ([`Source::resolve`])。
     File(String),
+    /// 元の辞書に載っているカタカナ語を、語自身の読みで引けるようにした
+    /// 辞書 (ADR-0023)。元の辞書は URL かファイル。
+    Katakana(Box<Source>),
 }
 
 impl Source {
@@ -84,9 +87,22 @@ impl Source {
         }
     }
 
+    /// 元の在りか。派生した辞書なら、元の辞書の在りか。
+    pub fn base(&self) -> &Self {
+        match self {
+            Self::Katakana(from) => from.base(),
+            _ => self,
+        }
+    }
+
+    /// カタカナ語の辞書として作るものか。
+    pub fn is_katakana(&self) -> bool {
+        matches!(self, Self::Katakana(_))
+    }
+
     /// ファイルなら、設定ファイルの置き場所から見た場所。URL なら `None`。
     pub fn resolve(&self, settings_directory: &Path) -> Option<PathBuf> {
-        let Self::File(written) = self else {
+        let Self::File(written) = self.base() else {
             return None;
         };
         let written = Path::new(written);
@@ -98,9 +114,12 @@ impl Source {
     }
 
     /// 書かれたままの姿。知らせに使う。
-    pub fn as_written(&self) -> &str {
+    pub fn as_written(&self) -> String {
         match self {
-            Self::Url(text) | Self::File(text) => text,
+            Self::Url(text) | Self::File(text) => text.clone(),
+            Self::Katakana(from) => {
+                format!("{{ katakana_from = \"{}\" }}", from.as_written())
+            }
         }
     }
 }
@@ -527,12 +546,21 @@ fn one_char(table: &Table, section: &str, key: &str) -> Result<char, Error> {
 }
 
 /// 辞書の並び。空でもよい (ユーザー辞書だけで使う)。
+///
+/// 一つひとつは在りかの文字列か、`{ katakana_from = "在りか" }`。
 fn sources(table: &Table) -> Result<Vec<Source>, Error> {
     let wrong = || {
         Error::new(
-            "dictionaries.sources は文字列の並びで書いてください \
+            "dictionaries.sources は在りかの並びで書いてください \
              (例: [\"https://…/SKK-JISYO.L\"])",
         )
+    };
+    let place = |text: &str| {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(Error::new("dictionaries.sources に空の在りかがあります"));
+        }
+        Ok(Source::parse(text))
     };
     let array = value(table, "dictionaries", "sources")?
         .as_array()
@@ -540,11 +568,28 @@ fn sources(table: &Table) -> Result<Vec<Source>, Error> {
     array
         .iter()
         .map(|item| {
-            let text = item.as_str().ok_or_else(wrong)?.trim();
-            if text.is_empty() {
-                return Err(Error::new("dictionaries.sources に空の文字列があります"));
+            if let Some(text) = item.as_str() {
+                return place(text);
             }
-            Ok(Source::parse(text))
+            let Some(derived) = item.as_inline_table() else {
+                return Err(wrong());
+            };
+            // 知らない書き方は、推し量らずに断る。
+            let keys: Vec<&str> = derived.iter().map(|(key, _)| key).collect();
+            if keys != ["katakana_from"] {
+                return Err(Error::new(format!(
+                    "dictionaries.sources の {{ {} }} は分かりません \
+                     (書けるのは {{ katakana_from = \"在りか\" }})",
+                    keys.join(", ")
+                )));
+            }
+            let from = derived
+                .get("katakana_from")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    Error::new("dictionaries.sources の katakana_from には在りかを書いてください")
+                })?;
+            Ok(Source::Katakana(Box::new(place(from)?)))
         })
         .collect()
 }
@@ -721,21 +766,62 @@ mod tests {
     }
 
     #[test]
-    fn the_template_lists_the_l_dictionary() {
+    fn the_template_lists_the_l_dictionary_and_its_katakana_words() {
         let settings = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap();
+        let l = Source::Url(
+            "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L".to_owned(),
+        );
         assert_eq!(
             settings.dictionaries,
-            [Source::Url(
-                "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L".to_owned()
-            )]
+            [l.clone(), Source::Katakana(Box::new(l))]
         );
     }
 
     #[test]
+    fn a_derived_dictionary_names_where_it_comes_from() {
+        let source = Source::Katakana(Box::new(Source::File("my.dict".to_owned())));
+        assert_eq!(source.base(), &Source::File("my.dict".to_owned()));
+        assert!(source.is_katakana());
+        assert_eq!(
+            source.resolve(Path::new("D:/settings")),
+            Some(Path::new("D:/settings").join("my.dict"))
+        );
+        assert_eq!(source.as_written(), "{ katakana_from = \"my.dict\" }");
+    }
+
+    #[test]
+    fn an_unknown_way_of_deriving_is_refused() {
+        let with = |entry: &str| {
+            let start = TEMPLATE.find("sources = [").unwrap();
+            let end = TEMPLATE[start..].find("\n]").unwrap() + start + 2;
+            format!(
+                "{}sources = [{entry}]{}",
+                &TEMPLATE[..start],
+                &TEMPLATE[end..]
+            )
+        };
+        for broken in [
+            "{ hiragana_from = \"a\" }",
+            "{ katakana_from = 1 }",
+            "{ katakana_from = \"a\", extra = 1 }",
+        ] {
+            let error = parse(&with(broken), ROMAJI_TEMPLATE).expect_err(broken);
+            assert!(
+                error.to_string().contains("dictionaries.sources"),
+                "{error}"
+            );
+        }
+        assert!(parse(&with("{ katakana_from = \"a.dict\" }"), ROMAJI_TEMPLATE).is_ok());
+    }
+
+    #[test]
     fn urls_and_files_are_told_apart() {
-        let user = TEMPLATE.replace(
-            "    \"https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L\",\n",
-            "    \"HTTPS://example.com/a\",\n    \"my.dict\",\n    \"C:/dicts/b.dict\",\n",
+        let start = TEMPLATE.find("sources = [").unwrap();
+        let end = TEMPLATE[start..].find("\n]").unwrap() + start + 2;
+        let user = format!(
+            "{}sources = [\"HTTPS://example.com/a\", \"my.dict\", \"C:/dicts/b.dict\"]{}",
+            &TEMPLATE[..start],
+            &TEMPLATE[end..]
         );
         let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(
@@ -757,10 +843,9 @@ mod tests {
     #[test]
     fn no_dictionaries_is_a_choice() {
         // ユーザー辞書だけで使うこともできる。
-        let user = TEMPLATE.replace(
-            "    \"https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L\",\n",
-            "",
-        );
+        let start = TEMPLATE.find("sources = [").unwrap();
+        let end = TEMPLATE[start..].find("\n]").unwrap() + start + 2;
+        let user = format!("{}sources = []{}", &TEMPLATE[..start], &TEMPLATE[end..]);
         assert!(
             parse(&user, ROMAJI_TEMPLATE)
                 .unwrap()
@@ -777,7 +862,7 @@ mod tests {
             "sources = [\"\"]",
         ] {
             let start = TEMPLATE.find("sources = [").unwrap();
-            let end = TEMPLATE[start..].find(']').unwrap() + start + 1;
+            let end = TEMPLATE[start..].find("\n]").unwrap() + start + 2;
             let user = format!("{}{broken}{}", &TEMPLATE[..start], &TEMPLATE[end..]);
             let error = parse(&user, ROMAJI_TEMPLATE).expect_err(broken);
             assert!(

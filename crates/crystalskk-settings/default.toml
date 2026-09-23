@@ -48,9 +48,15 @@ labels = "asdfjkl"
 # ファイルの場所を書くと、それを直に読みます。この設定ファイルと同じ
 # 場所からの相対で書けます。
 #
+# { katakana_from = "…" } と書くと、その辞書に載っているカタカナ語を拾い、
+# 語自身の読みで引ける辞書を作ります。L 辞書では、たとえば ヴァイオリン は
+# violin の下にしか無く、読みで打っても出てきません。作るのは読み込むとき
+# なので、元の辞書が更新されれば一緒に作り直されます。
+#
 # 辞書にはそれぞれの使用許諾があります。SKK-JISYO.L は GPL です。
 sources = [
     "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L",
+    { katakana_from = "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L" },
 ]
 
 [romaji]

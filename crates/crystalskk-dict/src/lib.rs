@@ -8,6 +8,7 @@
 //! 入力自体は続けられなければならない (PRD N-09)。解釈できない行は
 //! 読み飛ばし、件数だけ [`LoadReport`] で報告する。
 
+pub mod derive;
 pub mod encoding;
 pub mod format;
 pub mod memory;

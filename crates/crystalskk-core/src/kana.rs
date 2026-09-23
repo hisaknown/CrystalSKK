@@ -3,14 +3,27 @@
 //! すべて純粋関数。入力モードによる出し分けは [`crate::mode`] が行う。
 
 /// ひらがなをカタカナに変換する。ひらがな以外はそのまま通す。
+///
+/// `う゛` (う + 濁点) は `ヴ` にする。SKK の辞書はひらがなの `ヴ` を
+/// `う゛` と書く慣習で、ローマ字でもそう打つ。一字ずつ写すと `ウ゛` に
+/// なってしまう。
 pub fn to_katakana(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        // 濁点が直前の ウ に掛かるなら、まとめて ヴ にする。濁点は
+        // 独立したもの (U+309B) も、合成用のもの (U+3099) もありうる。
+        if matches!(c, '\u{309B}' | '\u{3099}') && out.ends_with('ウ') {
+            out.pop();
+            out.push('ヴ');
+            continue;
+        }
+        out.push(match c {
             // ぁ(U+3041)〜ゖ(U+3096) は ァ(U+30A1)〜ヶ(U+30F6) と同じ並び。
             'ぁ'..='ゖ' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
             _ => c,
-        })
-        .collect()
+        });
+    }
+    out
 }
 
 /// カタカナをひらがなに変換する。カタカナ以外はそのまま通す。
@@ -90,6 +103,16 @@ mod tests {
         // ヴ にはひらがな ゔ (U+3094) が対応する。
         assert_eq!(to_hiragana("ヴ"), "ゔ");
         assert_eq!(to_katakana("ゔ"), "ヴ");
+    }
+
+    #[test]
+    fn u_with_a_dakuten_becomes_vu() {
+        // SKK の辞書はひらがなの ヴ を う゛ と書く。
+        assert_eq!(to_katakana("う゛ぁいおりん"), "ヴァイオリン");
+        assert_eq!(to_katakana("う\u{3099}"), "ヴ", "合成用の濁点でも");
+        assert_eq!(to_halfwidth_katakana("う゛ぁ"), "ｳﾞｧ");
+        // 濁点がウに掛からないなら、そのまま。
+        assert_eq!(to_katakana("か゛"), "カ゛");
     }
 
     #[test]

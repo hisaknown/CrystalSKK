@@ -48,9 +48,22 @@ pub fn fetch() -> ExitCode {
     }
 
     let mut failed = false;
+    let mut fetched: Vec<String> = Vec::new();
     for source in sources {
         println!();
-        match source {
+        if source.is_katakana() {
+            // 作るのは辞書サーバが読み込むとき。ここでは元の辞書を揃える。
+            println!(
+                "カタカナ語の辞書: {} から作ります",
+                source.base().as_written()
+            );
+        }
+        // 同じ辞書は二度取らない。
+        if fetched.contains(&source.base().as_written()) {
+            continue;
+        }
+        fetched.push(source.base().as_written());
+        match source.base() {
             Source::Url(url) => {
                 let path = match crystalskk_fetch::cache_path(&cache, url) {
                     Ok(path) => path,
@@ -80,7 +93,7 @@ pub fn fetch() -> ExitCode {
                     }
                 }
             }
-            Source::File(_) => {
+            Source::File(_) | Source::Katakana(_) => {
                 let path = source
                     .resolve(&directory)
                     .expect("ファイルの在りかは必ず解ける");

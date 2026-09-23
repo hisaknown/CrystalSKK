@@ -18,13 +18,14 @@
 //! 違えて辞書登録が始まるのを防ぐ。** 二度目からは、読み直しているあいだも
 //! 前の辞書で答える。
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::SystemTime;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
-use crystalskk_dict::{MemoryDict, encoding};
+use crystalskk_dict::{MemoryDict, derive, encoding};
 use crystalskk_settings::Source;
 
 /// URL から取ってきて、手元の場所に置く。変わっていれば真。
@@ -73,14 +74,21 @@ struct Entry {
     written: String,
     path: PathBuf,
     url: Option<String>,
+    /// 読んだ辞書からカタカナ語の辞書を作るか (ADR-0023)。
+    katakana: bool,
     /// 読んだときのファイルの時刻。変わっていれば読み直す。
     stamp: Option<SystemTime>,
 }
 
 impl Entry {
     /// 時刻を除いた、どこから読むかだけの形。
-    fn place(&self) -> (&str, &Path, Option<&str>) {
-        (&self.written, &self.path, self.url.as_deref())
+    fn place(&self) -> (&str, &Path, Option<&str>, bool) {
+        (
+            &self.written,
+            &self.path,
+            self.url.as_deref(),
+            self.katakana,
+        )
     }
 }
 
@@ -232,15 +240,18 @@ impl Library {
     }
 
     /// 在りかを、読む場所に解く。
+    ///
+    /// 派生した辞書は、元の辞書の在りかを読む。取得も置き場所も元の辞書と
+    /// 同じなので、並びに両方あっても取るのは一度で済む。
     fn locate(&self, source: &Source, settings_directory: &Path) -> Result<Entry, String> {
-        let written = source.as_written().to_owned();
-        let (path, url) = match source {
+        let written = source.as_written();
+        let (path, url) = match source.base() {
             Source::Url(url) => {
                 let path = crystalskk_fetch::cache_path(&self.cache, url)
                     .map_err(|e| format!("{written}: {e}"))?;
                 (path, Some(url.clone()))
             }
-            Source::File(_) => {
+            _ => {
                 let path = source
                     .resolve(settings_directory)
                     .expect("ファイルの在りかは必ず解ける");
@@ -252,6 +263,7 @@ impl Library {
             written,
             path,
             url,
+            katakana: source.is_katakana(),
             stamp,
         })
     }
@@ -295,11 +307,17 @@ impl Library {
 fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outcome {
     let mut shelves = Vec::new();
     let mut problems = Vec::new();
+    // 同じファイルは一度だけ取って、一度だけ読む。L 辞書とそこから作る
+    // カタカナ語の辞書は、同じファイルを読む。
+    let mut fetched: Vec<PathBuf> = Vec::new();
+    let mut texts: HashMap<PathBuf, String> = HashMap::new();
 
     for entry in &mut entries {
         if let Some(url) = &entry.url
+            && !fetched.contains(&entry.path)
             && (check_updates || !entry.path.exists())
         {
+            fetched.push(entry.path.clone());
             match fetch(url, &entry.path) {
                 Ok(true) => eprintln!("crystalskk-server: 辞書を取得しました: {url}"),
                 Ok(false) => {}
@@ -309,16 +327,25 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
             }
         }
 
-        match fs::read(&entry.path) {
-            Ok(bytes) => {
-                let decoded = encoding::decode(&bytes);
-                let (dict, _) = MemoryDict::parse(&decoded.text);
-                shelves.push(Shelf {
-                    name: entry.written.clone(),
-                    dict,
-                });
+        if !texts.contains_key(&entry.path) {
+            match fs::read(&entry.path) {
+                Ok(bytes) => {
+                    let decoded = encoding::decode(&bytes);
+                    texts.insert(entry.path.clone(), decoded.text);
+                }
+                Err(e) => problems.push(format!("{} を読めません: {e}", entry.written)),
             }
-            Err(e) => problems.push(format!("{} を読めません: {e}", entry.written)),
+        }
+        if let Some(text) = texts.get(&entry.path) {
+            let (dict, _) = if entry.katakana {
+                MemoryDict::parse(&derive::katakana_words(text))
+            } else {
+                MemoryDict::parse(text)
+            };
+            shelves.push(Shelf {
+                name: entry.written.clone(),
+                dict,
+            });
         }
         entry.stamp = modified(&entry.path);
     }
@@ -490,6 +517,53 @@ mod tests {
                 .iter()
                 .any(|p| p.contains("example.com/far"))
         );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn katakana_words_are_found_by_their_own_reading() {
+        // ヴァイオリン は violin の下にしか無い。派生した辞書なら読みで引ける。
+        let directory = scratch("katakana");
+        fs::write(
+            directory.join("l.dict"),
+            "violin /ヴァイオリン/バイオリン/\nぱそこん /パソコン/\n",
+        )
+        .unwrap();
+        let base = Source::File(directory.join("l.dict").display().to_string());
+        let mut library = Library::new(directory.join("cache"), refuse);
+        library.configure(
+            &[base.clone(), Source::Katakana(Box::new(base))],
+            &directory,
+        );
+        library.settle();
+
+        assert_eq!(
+            words(&library.lookup(&Query::okuri_nashi("う゛ぁいおりん"))),
+            ["ヴァイオリン"]
+        );
+        // 元の辞書にもある語は、一度だけ出る。
+        assert_eq!(
+            words(&library.lookup(&Query::okuri_nashi("ぱそこん"))),
+            ["パソコン"]
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_dictionary_and_its_katakana_words_are_fetched_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counting(url: &str, path: &Path) -> Result<bool, String> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            pretend(url, path)
+        }
+
+        let directory = scratch("fetched-once");
+        let mut library = Library::new(directory.join("cache"), counting);
+        let l = Source::Url("https://example.com/l".to_owned());
+        library.configure(&[l.clone(), Source::Katakana(Box::new(l))], &directory);
+        library.settle();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         let _ = fs::remove_dir_all(&directory);
     }
 
