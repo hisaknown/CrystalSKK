@@ -230,8 +230,13 @@ impl Selecting {
 #[derive(Debug, Clone)]
 struct Registration {
     query: Query,
-    /// 登録を取りやめたときに戻る先。
+    /// 登録をやめたときに戻る先。
     origin: Composing,
+    /// 登録を取りやめたときに戻る、候補選択の状態。
+    ///
+    /// 辞書を引いて一件も無かったときは候補選択を経ていないので `None`。
+    /// **取りやめは「直前へ戻る」であり、直前は候補選択の最後である。**
+    resume: Option<Selecting>,
     /// 登録語として溜まった文字列。
     buffer: String,
 }
@@ -597,7 +602,12 @@ impl Engine {
         }
     }
 
-    /// 辞書登録を取りやめ、見出し語入力へ戻す。
+    /// 辞書登録を取りやめ、直前の状態へ戻す。
+    ///
+    /// 戻る先は**候補選択の最後**である。候補を送り切って登録に入ったの
+    /// だから、取りやめれば送り切る前に立っていた場所へ返るのが素直で、
+    /// 見出し語入力まで巻き戻すのは一段行き過ぎになる。辞書に一件も
+    /// 無くて登録に入ったときだけ、戻る先が見出し語入力になる。
     ///
     /// 一番内側の枠だけを畳む。入れ子になっているなら、外側の登録は
     /// 続いている。**「直前に戻る」であって「全部やめる」ではない。**
@@ -609,7 +619,10 @@ impl Engine {
             return;
         };
         self.romaji.clear();
-        self.state = State::Composing(frame.origin);
+        self.state = match frame.resume {
+            Some(selecting) => State::Selecting(selecting),
+            None => State::Composing(frame.origin),
+        };
     }
 
     /// 英数モードの直接入力。かな変換を通さない。
@@ -843,7 +856,7 @@ impl Engine {
         self.ranker.rank(&self.context, &query, &mut candidates);
 
         if candidates.is_empty() {
-            self.start_registration(query, comp);
+            self.start_registration(query, comp, None);
         } else {
             self.state = State::Selecting(Selecting {
                 query,
@@ -870,8 +883,15 @@ impl Engine {
                     sel.index = next;
                     self.state = State::Selecting(sel);
                 } else {
-                    // 候補を出し切ったら辞書登録へ。
-                    self.start_registration(sel.query, sel.origin);
+                    // 候補を出し切ったら辞書登録へ。取りやめたときに
+                    // 戻れるよう、**最後に見ていたところ**を控えておく。
+                    // 一覧が出ていたなら最後のページ、出ていなかったなら
+                    // 最後の一件。`page_start` がどちらも言い当てる。
+                    let resume = Selecting {
+                        index: page_start(sel.candidates.len().saturating_sub(1)),
+                        ..sel.clone()
+                    };
+                    self.start_registration(sel.query, sel.origin, Some(resume));
                 }
             }
             Key::Char('x') | Key::Up => {
@@ -942,11 +962,12 @@ impl Engine {
 
     // --- 辞書登録 ------------------------------------------------------
 
-    fn start_registration(&mut self, query: Query, origin: Composing) {
+    fn start_registration(&mut self, query: Query, origin: Composing, resume: Option<Selecting>) {
         self.romaji.clear();
         self.registrations.push(Registration {
             query,
             origin,
+            resume,
             buffer: String::new(),
         });
         self.state = State::Direct;

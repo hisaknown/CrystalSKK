@@ -25,7 +25,12 @@ const HOW_MANY: usize = 15;
 
 impl ManyDict {
     fn new() -> Self {
-        let words: Vec<Candidate> = (1..=HOW_MANY)
+        Self::with_candidates(HOW_MANY)
+    }
+
+    /// 候補の数を決めて作る。一覧が開く前に尽きる場合を試すのに使う。
+    fn with_candidates(how_many: usize) -> Self {
+        let words: Vec<Candidate> = (1..=how_many)
             .map(|n| Candidate::new(format!("候補{n}")))
             .collect();
         Self(HashMap::from([("かんじ".to_owned(), words)]))
@@ -45,8 +50,16 @@ struct Session {
 
 impl Session {
     fn new() -> Self {
+        Self::with_dict(ManyDict::new())
+    }
+
+    fn with_candidates(how_many: usize) -> Self {
+        Self::with_dict(ManyDict::with_candidates(how_many))
+    }
+
+    fn with_dict(dict: ManyDict) -> Self {
         Self {
-            engine: Engine::new(Box::new(ManyDict::new())),
+            engine: Engine::new(Box::new(dict)),
             committed: String::new(),
         }
     }
@@ -204,17 +217,47 @@ fn registering() -> Session {
 }
 
 #[test]
-fn escape_cancels_the_registration_and_returns_to_the_midashi() {
+fn escape_returns_to_the_last_page_of_candidates() {
     let mut s = registering();
     s.type_keys("\u{1b}");
 
     assert!(s.engine.registration().is_none(), "登録を抜ける");
-    assert_eq!(
-        s.engine.preedit().display(),
-        "▽かんじ",
-        "見出し語入力に戻る"
-    );
     assert_eq!(s.committed, "", "何も確定しない");
+
+    // 送り切る前に立っていた場所 — 最後のページ — へ返る。
+    let view = s.engine.candidates().expect("候補選択に戻っている");
+    assert!(view.listing, "一覧が出たままになる");
+    assert_eq!(
+        view.page().first().map(|(_, c)| c.word.as_str()),
+        Some("候補12"),
+        "最後のページの先頭"
+    );
+}
+
+#[test]
+fn escape_returns_to_the_last_candidate_when_the_list_never_opened() {
+    // 候補が少なく、一覧が開く前に尽きる場合。
+    let mut s = Session::with_candidates(2);
+    s.convert(3);
+    assert!(s.engine.registration().is_some(), "候補を出し切って登録へ");
+
+    s.type_keys("\u{1b}");
+    let view = s.engine.candidates().expect("候補選択に戻っている");
+    assert!(!view.listing, "一覧は出ていない");
+    assert_eq!(view.index, 1, "最後の候補を選んでいる");
+    assert_eq!(s.engine.preedit().display(), "▼候補2");
+}
+
+#[test]
+fn escape_returns_to_the_midashi_when_the_dictionary_had_nothing() {
+    // 辞書に一件も無いときは候補選択を経ていない。戻る先は見出し語入力。
+    let mut s = Session::with_candidates(0);
+    s.convert(1);
+    assert!(s.engine.registration().is_some(), "引けずに登録へ");
+
+    s.type_keys("\u{1b}");
+    assert!(s.engine.candidates().is_none(), "戻る候補が無い");
+    assert_eq!(s.engine.preedit().display(), "▽かんじ");
 }
 
 #[test]
