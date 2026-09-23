@@ -62,6 +62,8 @@ pub struct Settings {
     pub window: Window,
     /// カーソルのそばに出す入力モードの絵。
     pub mode_indicator: ModeIndicator,
+    /// 候補の窓と、カーソルのそばの窓の色。
+    pub colors: Colors,
     /// 引く辞書。並べた順に引く。**使うのは辞書サーバだけ。**
     pub dictionaries: Vec<Source>,
 }
@@ -135,6 +137,50 @@ pub struct ModeIndicator {
     pub on_focus: bool,
     /// 出しておく時間 (ミリ秒)。
     pub duration_ms: u32,
+}
+
+/// 候補の窓と、カーソルのそばの窓の色。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Colors {
+    /// 明るい組と暗い組の、どちらを使うか。
+    pub theme: ThemeChoice,
+    pub light: ColorSet,
+    pub dark: ColorSet,
+}
+
+/// どちらの組を使うか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// アプリの明るさ (Windows の「アプリ モード」) に合わせる。
+    Auto,
+    Light,
+    Dark,
+}
+
+/// 一組の色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorSet {
+    /// 地。
+    pub background: Color,
+    /// 文字。
+    pub text: Color,
+    /// 枠。
+    pub border: Color,
+    /// 選んでいる行の地 (反転の帯)。
+    pub selected_background: Color,
+    /// 選んでいる行の文字。
+    pub selected_text: Color,
+}
+
+/// 一つの色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    /// Windows の標準の色。役目ごとに決まっている。
+    System,
+    /// Windows のアクセントカラー。
+    Accent,
+    /// `0xRRGGBB`。
+    Rgb(u32),
 }
 
 /// 窓の見せ方。エンジンは知らなくてよい値。
@@ -217,56 +263,106 @@ pub fn fill(user: Option<&str>) -> Result<Filled, Error> {
     let template = template();
     let mut doc = parse_document(user)?;
     let mut added = Vec::new();
-
-    for (section, item) in template.as_table() {
-        let Some(wanted) = item.as_table() else {
-            continue;
-        };
-        match doc.get_mut(section) {
-            None => {
-                // 節ごと無い。注記を付けて節ごと足す。
-                let mut table = wanted.clone();
-                let prefix = decor_text(table.decor().prefix());
-                table
-                    .decor_mut()
-                    .set_prefix(format!("\n{}{}", added_note(), prefix.trim_start()));
-                // 雛形での位置を持ち込むと、利用者の節と順番が混ざる。
-                table.set_position(None);
-                doc.insert(section, Item::Table(table));
-                added.extend(wanted.iter().map(|(key, _)| format!("{section}.{key}")));
-            }
-            Some(Item::Table(present)) => {
-                for (key, value) in wanted {
-                    if present.contains_key(key) {
-                        continue;
-                    }
-                    let (template_key, _) = wanted
-                        .get_key_value(key)
-                        .expect("いま数え上げた項目なので必ずある");
-                    let mut new_key = template_key.clone();
-                    let prefix = decor_text(new_key.leaf_decor().prefix());
-                    new_key.leaf_decor_mut().set_prefix(format!(
-                        "\n{}{}",
-                        added_note(),
-                        prefix.trim_start()
-                    ));
-                    present.insert_formatted(&new_key, value.clone());
-                    added.push(format!("{section}.{key}"));
-                }
-            }
-            Some(_) => {
-                return Err(Error::new(format!(
-                    "{section} は節として書いてください ([{section}])"
-                )));
-            }
-        }
-    }
+    fill_table(doc.as_table_mut(), template.as_table(), "", &mut added)?;
 
     Ok(Filled {
         text: doc.to_string(),
         added,
         created: false,
     })
+}
+
+/// `wanted` にあって `present` に無い項目を足す。**入れ子の節にも降りる**
+/// (`[colors.light]` の中の一項目が無い、など)。
+///
+/// 足した項目には注記と雛形の説明を添える。利用者の書いたものには触れない。
+fn fill_table(
+    present: &mut Table,
+    wanted: &Table,
+    path: &str,
+    added: &mut Vec<String>,
+) -> Result<(), Error> {
+    for (key, value) in wanted {
+        let here = join(path, key);
+        match (present.get_mut(key), value) {
+            (None, Item::Table(table)) => {
+                // 節ごと無い。注記を付けて節ごと足す。
+                let mut table = table.clone();
+                let prefix = last_paragraph(&decor_text(table.decor().prefix()));
+                table
+                    .decor_mut()
+                    .set_prefix(format!("\n{}{prefix}", added_note()));
+                // 雛形での位置を持ち込むと、利用者の節と順番が混ざる。
+                table.set_position(None);
+                added.extend(leaves(&table, &here));
+                present.insert(key, Item::Table(table));
+            }
+            (None, _) => {
+                let (template_key, _) = wanted
+                    .get_key_value(key)
+                    .expect("いま数え上げた項目なので必ずある");
+                let mut new_key = template_key.clone();
+                let prefix = decor_text(new_key.leaf_decor().prefix());
+                new_key.leaf_decor_mut().set_prefix(format!(
+                    "\n{}{}",
+                    added_note(),
+                    prefix.trim_start()
+                ));
+                present.insert_formatted(&new_key, value.clone());
+                added.push(here);
+            }
+            (Some(Item::Table(inner)), Item::Table(wanted_inner)) => {
+                fill_table(inner, wanted_inner, &here, added)?;
+            }
+            (Some(_), Item::Table(_)) => {
+                return Err(Error::new(format!(
+                    "{here} は節として書いてください ([{here}])"
+                )));
+            }
+            // 値が書かれている。正しいかどうかは読むときに確かめる。
+            (Some(_), _) => {}
+        }
+    }
+    Ok(())
+}
+
+/// 節の前のコメントのうち、節の直前の段落だけ。
+///
+/// TOML では、ファイルの冒頭の説明は最初の節に付いたコメントとして読まれる。
+/// そのまま持ち込むと、**ファイル全体の説明が途中に書き込まれる。** 空行で
+/// 区切られた最後の段落だけが、その節の説明である。
+fn last_paragraph(prefix: &str) -> String {
+    let lines: Vec<&str> = prefix.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|line| line.trim().is_empty())
+        .map_or(0, |at| at + 1);
+    lines[start..]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// 節の中の項目を、入れ子まで含めて `節.項目` の形で挙げる。
+fn leaves(table: &Table, path: &str) -> Vec<String> {
+    table
+        .iter()
+        .flat_map(|(key, item)| {
+            let here = join(path, key);
+            match item.as_table() {
+                Some(inner) => leaves(inner, &here),
+                None => vec![here],
+            }
+        })
+        .collect()
+}
+
+fn join(path: &str, key: &str) -> String {
+    if path.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{path}.{key}")
+    }
 }
 
 /// 全文を読み、使える値にする。**書き足しはしない。**
@@ -310,6 +406,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
             }
         },
         dictionaries: sources(section(&doc, "dictionaries")?)?,
+        colors: colors(section(&doc, "colors")?)?,
     })
 }
 
@@ -320,23 +417,21 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     };
     let template = template();
     let mut unknown = Vec::new();
-    for (section, item) in doc.as_table() {
-        match (
-            item.as_table(),
-            template.get(section).and_then(Item::as_table),
-        ) {
-            (Some(present), Some(known)) => {
-                for (key, _) in present {
-                    if !known.contains_key(key) {
-                        unknown.push(format!("{section}.{key}"));
-                    }
-                }
+    unknown_in(doc.as_table(), template.as_table(), "", &mut unknown);
+    unknown
+}
+
+fn unknown_in(present: &Table, known: &Table, path: &str, out: &mut Vec<String>) {
+    for (key, item) in present {
+        let here = join(path, key);
+        match (item.as_table(), known.get(key)) {
+            (_, None) => out.push(here),
+            (Some(inner), Some(Item::Table(known_inner))) => {
+                unknown_in(inner, known_inner, &here, out);
             }
-            _ if template.contains_key(section) => {}
-            _ => unknown.push(section.to_owned()),
+            _ => {}
         }
     }
-    unknown
 }
 
 /// ファイルを読み、足りない項目を書き足してから使える値にする。
@@ -567,6 +662,68 @@ fn one_char(table: &Table, section: &str, key: &str) -> Result<char, Error> {
     }
 }
 
+/// 色の節。
+fn colors(table: &Table) -> Result<Colors, Error> {
+    let theme = match value(table, "colors", "theme")?.as_str() {
+        Some("auto") => ThemeChoice::Auto,
+        Some("light") => ThemeChoice::Light,
+        Some("dark") => ThemeChoice::Dark,
+        _ => {
+            return Err(Error::new(
+                "colors.theme は \"auto\" か \"light\" か \"dark\" で書いてください",
+            ));
+        }
+    };
+    Ok(Colors {
+        theme,
+        light: color_set(table, "light")?,
+        dark: color_set(table, "dark")?,
+    })
+}
+
+fn color_set(colors: &Table, name: &str) -> Result<ColorSet, Error> {
+    let path = format!("colors.{name}");
+    let table = match colors.get(name) {
+        Some(Item::Table(table)) => table,
+        Some(_) => {
+            return Err(Error::new(format!(
+                "{path} は節として書いてください ([{path}])"
+            )));
+        }
+        None => return Err(Error::new(format!("[{path}] がありません"))),
+    };
+    Ok(ColorSet {
+        background: color(table, &path, "background")?,
+        text: color(table, &path, "text")?,
+        border: color(table, &path, "border")?,
+        selected_background: color(table, &path, "selected_background")?,
+        selected_text: color(table, &path, "selected_text")?,
+    })
+}
+
+/// `"#RRGGBB"`、`"system"`、`"accent"` のどれか。
+fn color(table: &Table, section: &str, key: &str) -> Result<Color, Error> {
+    let wrong = || {
+        Error::new(format!(
+            "{section}.{key} は \"#RRGGBB\" か \"system\" か \"accent\" で書いてください"
+        ))
+    };
+    let text = value(table, section, key)?.as_str().ok_or_else(wrong)?;
+    match text {
+        "system" => Ok(Color::System),
+        "accent" => Ok(Color::Accent),
+        _ => {
+            let hex = text
+                .strip_prefix('#')
+                .filter(|h| h.len() == 6)
+                .ok_or_else(wrong)?;
+            u32::from_str_radix(hex, 16)
+                .map(Color::Rgb)
+                .map_err(|_| wrong())
+        }
+    }
+}
+
 /// 辞書の並び。空でもよい (ユーザー辞書だけで使う)。
 ///
 /// 一つひとつは在りかの文字列か、`{ katakana_from = "在りか" }`。
@@ -711,18 +868,14 @@ mod tests {
     fn a_missing_section_is_written_in_whole() {
         let user = "[completion]\ndynamic = false\nmin_length = 3\nlimit = 8\ntake_key = \",\"\nshow_reading = true\n";
         let filled = fill(Some(user)).unwrap();
-        assert_eq!(
-            filled.added,
-            [
-                "candidates.until_list",
-                "candidates.labels",
-                "mode_indicator.on_switch",
-                "mode_indicator.on_focus",
-                "mode_indicator.duration_ms",
-                "dictionaries.sources",
-                "romaji.table"
-            ]
-        );
+        // [completion] 以外の節の項目が、すべて書き足される。
+        let expected: Vec<String> = leaves(template().as_table(), "")
+            .into_iter()
+            .filter(|key| !key.starts_with("completion."))
+            .collect();
+        assert_eq!(filled.added, expected);
+        assert!(filled.added.contains(&"candidates.labels".to_owned()));
+        assert!(filled.added.contains(&"colors.dark.background".to_owned()));
         let settings = parse(&filled.text, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(
             settings.engine.candidates.labels,
@@ -908,6 +1061,104 @@ mod tests {
                 duration_ms: 1000,
             }
         );
+    }
+
+    #[test]
+    fn the_template_keeps_the_look_that_was_there() {
+        let colors = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().colors;
+        assert_eq!(colors.theme, ThemeChoice::Auto);
+        assert_eq!(colors.light.background, Color::System);
+        assert_eq!(colors.dark.background, Color::Rgb(0x2B_2B_2B));
+        assert_eq!(colors.dark.text, Color::Rgb(0xFF_FF_FF));
+    }
+
+    #[test]
+    fn colours_are_read_in_three_ways() {
+        let user = TEMPLATE
+            .replacen("border = \"system\"", "border = \"accent\"", 1)
+            .replacen("text = \"system\"", "text = \"#1a2B3c\"", 1);
+        let light = parse(&user, ROMAJI_TEMPLATE).unwrap().colors.light;
+        assert_eq!(light.border, Color::Accent);
+        assert_eq!(light.text, Color::Rgb(0x1A_2B_3C), "大文字小文字は問わない");
+    }
+
+    #[test]
+    fn a_broken_colour_is_explained() {
+        for broken in ["\"#12345\"", "\"blue\"", "\"#GGGGGG\"", "1"] {
+            let user = TEMPLATE.replacen("border = \"system\"", &format!("border = {broken}"), 1);
+            let error = parse(&user, ROMAJI_TEMPLATE).expect_err(broken);
+            assert!(error.to_string().contains("colors.light.border"), "{error}");
+        }
+        let user = TEMPLATE.replace("theme = \"auto\"", "theme = \"sepia\"");
+        assert!(parse(&user, ROMAJI_TEMPLATE).is_err());
+    }
+
+    #[test]
+    fn a_missing_setting_deep_inside_is_written_into_its_own_table() {
+        // 入れ子の節の中の一項目。**末尾に足すと別の節の項目になる。**
+        let user = TEMPLATE.replacen("selected_text = \"system\"\n", "", 1);
+        let filled = fill(Some(&user)).unwrap();
+        assert_eq!(filled.added, ["colors.light.selected_text"]);
+        let doc: DocumentMut = filled.text.parse().unwrap();
+        assert!(
+            doc["colors"]["light"]
+                .as_table()
+                .unwrap()
+                .contains_key("selected_text")
+        );
+        assert!(parse(&filled.text, ROMAJI_TEMPLATE).is_ok());
+    }
+
+    #[test]
+    fn a_missing_table_deep_inside_is_written_in_whole() {
+        // 説明文にも `[colors.dark]` という文字があるので、行の頭で探す。
+        let start = TEMPLATE.find("\n[colors.dark]").unwrap() + 1;
+        let end = TEMPLATE[start..]
+            .find("\n\n")
+            .map_or(TEMPLATE.len(), |e| start + e + 1);
+        let user = format!("{}{}", &TEMPLATE[..start], &TEMPLATE[end..]);
+        let filled = fill(Some(&user)).unwrap();
+        assert!(
+            filled.added.contains(&"colors.dark.background".to_owned()),
+            "{:?}",
+            filled.added
+        );
+        assert!(parse(&filled.text, ROMAJI_TEMPLATE).is_ok());
+    }
+
+    #[test]
+    fn the_file_header_is_not_copied_into_the_middle() {
+        // [completion] ごと無いファイル。雛形の冒頭の説明は [completion] に
+        // 付いたコメントとして読まれるが、途中に書き込んではいけない。
+        let user = "[candidates]\nuntil_list = 5\nlabels = \"asdfjkl\"\n";
+        let filled = fill(Some(user)).unwrap();
+        assert!(
+            !filled.text.contains("# CrystalSKK の設定"),
+            "{}",
+            filled.text
+        );
+        assert!(
+            filled.text.contains("# 打っている最中に"),
+            "項目の説明は持ち込む"
+        );
+        // 節の直前の説明は持ち込む。
+        let start = TEMPLATE.find("\n[colors.dark]").unwrap() + 1;
+        let end = TEMPLATE[start..]
+            .find("\n\n")
+            .map_or(TEMPLATE.len(), |e| start + e + 1);
+        let without_dark = format!("{}{}", &TEMPLATE[..start], &TEMPLATE[end..]);
+        let filled = fill(Some(&without_dark)).unwrap();
+        assert!(filled.text.contains("# 暗い組。"), "{}", filled.text);
+    }
+
+    #[test]
+    fn strangers_deep_inside_are_reported() {
+        let user = TEMPLATE.replacen(
+            "border = \"system\"",
+            "border = \"system\"\nshadow = \"#000000\"",
+            1,
+        );
+        assert_eq!(unknown_keys(&user), ["colors.light.shadow"]);
     }
 
     #[test]

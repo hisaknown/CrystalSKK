@@ -112,6 +112,8 @@ cargo run -p crystalskk-setup -- uninstall
 
 ローマ字テーブルは隣の `romaji.txt` (Google 日本語入力と同じタブ区切り 3 列)。**利用者の持ち物**として扱い、無いときに作るだけで、版を上げても書き換えない ([ADR-0021](docs/adr/0021-the-romaji-table-belongs-to-the-user.md))。
 
+候補の窓とカーソルのそばの窓の色は `[colors]` で決める。明るい組と暗い組を書いておき、アプリの明るさに合わせて選ぶ ([ADR-0026](docs/adr/0026-colours-of-the-popups-are-settings.md))。
+
 トレイの入力モード表示を右クリックすると、設定フォルダを開く・設定を読み直す・設定ファイルやローマ字テーブルを雛形で上書きする (元の中身は `.bak` に退避) ことができる。
 
 ### TIP の様子を見る

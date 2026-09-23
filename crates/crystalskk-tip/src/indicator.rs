@@ -53,6 +53,8 @@ pub struct ModeWindow {
     hwnd: RefCell<HWND>,
     /// いま出している絵。窓の手続きが描くときに読む。
     shown: Cell<Option<Option<InputMode>>>,
+    /// 描く色。出すときに受け取る。
+    palette: Cell<Option<Palette>>,
 }
 
 impl ModeWindow {
@@ -68,11 +70,13 @@ impl ModeWindow {
         caret: RECT,
         owner: Option<HWND>,
         duration_ms: u32,
+        palette: Palette,
     ) {
         let Some(hwnd) = self.ensure_window() else {
             return;
         };
         self.shown.set(Some(mode));
+        self.palette.set(Some(palette));
         // SAFETY: 窓は自分で作ったもの。描く中身は `self` にあり、窓より長く
         // 生きる (窓は `close` か `Drop` で壊す)。
         unsafe {
@@ -223,6 +227,7 @@ fn pixels(mode: Option<InputMode>, side: i32, palette: Palette) -> Vec<u32> {
         background,
         text: ink,
         border,
+        ..
     } = palette;
 
     let side_u = side.max(0) as usize;
@@ -316,9 +321,11 @@ unsafe extern "system" fn window_proc(
                     let hdc = BeginPaint(hwnd, &mut ps);
                     let owner =
                         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ModeWindow).as_ref();
-                    if let Some(mode) = owner.and_then(|o| o.shown.get()) {
+                    if let Some((mode, palette)) =
+                        owner.and_then(|o| Some((o.shown.get()?, o.palette.get()?)))
+                    {
                         let side = scaled(GLYPH) + scaled(PADDING) * 2;
-                        let drawn = pixels(mode, side, Palette::current());
+                        let drawn = pixels(mode, side, palette);
                         let info = BITMAPINFO {
                             bmiHeader: BITMAPINFOHEADER {
                                 biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
@@ -416,6 +423,8 @@ mod tests {
             background: 0x2B_2B_2B,
             text: 0xFF_FF_FF,
             border: 0x00_78_D4,
+            selected_background: 0x00_78_D4,
+            selected_text: 0xFF_FF_FF,
         };
         let side = 20;
         let drawn = pixels(Some(InputMode::Hiragana), side, palette);

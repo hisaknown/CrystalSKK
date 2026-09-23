@@ -42,3 +42,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0023](0023-derive-a-katakana-dictionary.md) | カタカナ語の辞書を、元の辞書から読み込むときに作る | Accepted | ADR-0022, ADR-0021 |
 | [0024](0024-draw-the-icons-from-svg-at-build-time.md) | アイコンは SVG を正本にしてビルドのときに描き、モードの絵はタスクバーの明るさに合わせる | Accepted | ADR-0009, PRD N-08 |
 | [0025](0025-show-the-mode-near-the-caret-for-a-moment.md) | 入力モードは、切り替えたときにカーソルのそばへ短く出す | Accepted | ADR-0013, ADR-0015, ADR-0020, ADR-0024 |
+| [0026](0026-colours-of-the-popups-are-settings.md) | 小窓の色は明るい組と暗い組を設定に書き、アプリの明るさで選ぶ | Accepted | ADR-0015, ADR-0020, ADR-0025 |

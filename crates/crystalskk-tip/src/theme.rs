@@ -12,7 +12,8 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
+    SYS_COLOR_INDEX,
 };
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
@@ -86,50 +87,102 @@ fn read(name: PCWSTR, fallback: Theme) -> Theme {
     }
 }
 
-/// アプリの上に出す小窓の色。どれも `0xRRGGBB`。
+/// アプリの上に出す小窓 (候補の窓、カーソルのそばの窓) の色。どれも `0xRRGGBB`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     pub background: u32,
     pub text: u32,
     pub border: u32,
+    /// 選んでいる行 (反転の帯) の地。
+    pub selected_background: u32,
+    /// 選んでいる行の文字。
+    pub selected_text: u32,
 }
 
 impl Palette {
-    /// いまの明るさに合わせた色。
+    /// 設定の色を、いまの明るさに合わせて解く (ADR-0026)。
     ///
-    /// - **ハイコントラストなら、システムの色に従う。** 利用者が選んだ配色を
-    ///   上書きしてはならない。
-    /// - 明るいなら、システムの色 (窓の地、文字、強調)。
-    /// - 暗いなら、黒い地に白い文字。**Win32 のシステムの色はダーク
-    ///   モードにしても白いまま**なので、こちらで決める。
-    pub fn current() -> Self {
-        if high_contrast() || Theme::apps() == Theme::Light {
+    /// - **ハイコントラストなら、設定にかかわらずシステムの色に従う。**
+    ///   利用者が選んだ配色を上書きしてはならない。
+    /// - `theme` が `auto` なら、アプリの明るさで組を選ぶ。
+    /// - `"system"` は役目ごとの Windows の標準の色、`"accent"` はアクセント
+    ///   カラー。
+    pub fn resolve(colors: &crystalskk_settings::Colors) -> Self {
+        use crystalskk_settings::ThemeChoice;
+        if high_contrast() {
             return Self::system();
         }
+        let dark = match colors.theme {
+            ThemeChoice::Auto => Theme::apps() == Theme::Dark,
+            ThemeChoice::Light => false,
+            ThemeChoice::Dark => true,
+        };
+        let set = if dark { &colors.dark } else { &colors.light };
         Self {
-            background: DARK_BACKGROUND,
-            text: 0xFF_FF_FF,
-            border: system(COLOR_HIGHLIGHT),
+            background: pick(set.background, COLOR_WINDOW),
+            text: pick(set.text, COLOR_WINDOWTEXT),
+            border: pick(set.border, COLOR_HIGHLIGHT),
+            selected_background: pick(set.selected_background, COLOR_HIGHLIGHT),
+            selected_text: pick(set.selected_text, COLOR_HIGHLIGHTTEXT),
         }
     }
 
-    fn system() -> Self {
+    /// Windows の標準の色だけの組。
+    ///
+    /// 設定をまだ受け取っていないとき (設定が読めないことを知らせる窓など)
+    /// に使う。
+    pub fn system() -> Self {
         Self {
             background: system(COLOR_WINDOW),
             text: system(COLOR_WINDOWTEXT),
             border: system(COLOR_HIGHLIGHT),
+            selected_background: system(COLOR_HIGHLIGHT),
+            selected_text: system(COLOR_HIGHLIGHTTEXT),
         }
     }
 }
 
-/// 暗いときの地の色。Windows 11 の暗い小窓 (メニューやツールチップ) に近い。
-const DARK_BACKGROUND: u32 = 0x2B_2B_2B;
+/// 設定の色を解く。`"system"` なら `role` の標準の色。
+fn pick(color: crystalskk_settings::Color, role: SYS_COLOR_INDEX) -> u32 {
+    use crystalskk_settings::Color;
+    match color {
+        Color::System => system(role),
+        // アクセントカラーが読めない (古い Windows) なら、強調の色で代える。
+        Color::Accent => accent().unwrap_or_else(|| system(COLOR_HIGHLIGHT)),
+        Color::Rgb(rgb) => rgb & 0x00FF_FFFF,
+    }
+}
 
 /// システムの色を `0xRRGGBB` で。
 fn system(index: SYS_COLOR_INDEX) -> u32 {
     // SAFETY: 番号を渡して色を受け取るだけ。
     let c = unsafe { GetSysColor(index) };
     ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+
+/// Windows のアクセントカラー。`0xRRGGBB`。
+///
+/// 「個人用設定 → 色」で選ぶ色で、`DWM\AccentColor` に `0xAABBGGRR` で
+/// 置かれている。**`COLOR_HIGHLIGHT` はこれに追従しない。**
+fn accent() -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut size = u32::try_from(size_of::<u32>()).unwrap_or(4);
+    // SAFETY: 書き込み先はこの関数の変数で、大きさも渡している。
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\DWM"),
+            w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut value).cast()),
+            Some(&raw mut size),
+        )
+    };
+    status.is_ok().then(|| {
+        let (r, g, b) = (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF);
+        (r << 16) | (g << 8) | b
+    })
 }
 
 /// ハイコントラストの配色が選ばれているか。
@@ -332,17 +385,14 @@ mod tests {
         // どちらになるかは機械次第。読めて、落ちないこと。
         let _ = Theme::current();
         let _ = Theme::apps();
-        let _ = Palette::current();
+        let _ = Palette::system();
+        let _ = accent();
     }
 
     #[test]
-    fn a_dark_popup_is_light_on_dark() {
-        let dark = Palette {
-            background: DARK_BACKGROUND,
-            text: 0xFF_FF_FF,
-            border: 0,
-        };
-        // 地より文字のほうが十分明るい。
-        assert!(dark.text > dark.background + 0x80_80_80);
+    fn written_colours_are_used_as_they_are() {
+        use crystalskk_settings::Color;
+        assert_eq!(pick(Color::Rgb(0x12_34_56), COLOR_WINDOW), 0x12_34_56);
+        assert_eq!(pick(Color::System, COLOR_WINDOW), system(COLOR_WINDOW));
     }
 }

@@ -322,7 +322,8 @@ impl TextService {
             self.candidates.hide();
             return;
         };
-        self.candidates.show(&content, anchor, *self.owner.borrow());
+        self.candidates
+            .show(&content, anchor, *self.owner.borrow(), self.palette());
     }
 
     /// 候補一覧をシステムへ差し出す。返るのは自前の窓を出してよいか。
@@ -415,9 +416,23 @@ impl TextService {
         };
         let mode = compartment::is_open(&thread_manager).then(|| self.engine.borrow().mode());
         let window = Rc::clone(&self.mode_window);
+        let palette = self.palette();
         edit::caret(&context, client_id, move |caret, owner| {
-            window.show(mode, caret, owner, settings.duration_ms);
+            window.show(mode, caret, owner, settings.duration_ms, palette);
         });
+    }
+
+    /// 小窓の色。設定の色を、いまの明るさに合わせて解く (ADR-0026)。
+    ///
+    /// 設定をまだ受け取っていなければ Windows の標準の色。**設定が読めない
+    /// ことを知らせる窓**は、設定が無くても出さなければならない。
+    fn palette(&self) -> crate::theme::Palette {
+        self.settings
+            .borrow()
+            .as_ref()
+            .map_or_else(crate::theme::Palette::system, |s| {
+                crate::theme::Palette::resolve(&s.colors)
+            })
     }
 
     /// いまの設定でカーソルのそばに出すことになっているか。

@@ -31,11 +31,10 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    CreateFontIndirectW, CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps, GetSysColor,
+    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect, GetDC, GetDeviceCaps,
     GetTextExtentPoint32W, HDC, HFONT, InvalidateRect, LOGPIXELSY, PAINTSTRUCT, ReleaseDC,
-    SYS_COLOR_INDEX, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
@@ -49,6 +48,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::guard::guard;
 use crate::log;
+use crate::theme::Palette;
 
 /// 窓に出すもの。
 ///
@@ -213,7 +213,7 @@ impl CandidateWindow {
     /// 窓に一つ出す。`anchor` は未確定の文字列の画面上の矩形。
     ///
     /// 出せなくても入力は続く。失敗は記録するだけにする。
-    pub fn show(&self, content: &Content, anchor: RECT, owner: Option<HWND>) {
+    pub fn show(&self, content: &Content, anchor: RECT, owner: Option<HWND>, palette: Palette) {
         if content.is_empty() {
             self.hide();
             return;
@@ -225,12 +225,15 @@ impl CandidateWindow {
 
         // 描く中身を窓に預ける。描画はいつ来るか分からないので、
         // 窓自身が持っていなければならない。
-        let stored = Box::into_raw(Box::new(content.clone()));
+        let stored = Box::into_raw(Box::new(Painted {
+            content: content.clone(),
+            palette,
+        }));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
             let previous = SetWindowLongPtrW(hwnd, GWLP_USERDATA, stored as isize);
             if previous != 0 {
-                drop(Box::from_raw(previous as *mut Content));
+                drop(Box::from_raw(previous as *mut Painted));
             }
         }
 
@@ -407,9 +410,9 @@ unsafe extern "system" fn window_proc(
                 unsafe {
                     let mut ps = PAINTSTRUCT::default();
                     let hdc = BeginPaint(hwnd, &mut ps);
-                    let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Content;
-                    if let Some(content) = stored.as_ref() {
-                        paint(hdc, content);
+                    let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Painted;
+                    if let Some(painted) = stored.as_ref() {
+                        paint(hdc, &painted.content, painted.palette);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -422,7 +425,7 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 let stored = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if stored != 0 {
-                    drop(Box::from_raw(stored as *mut Content));
+                    drop(Box::from_raw(stored as *mut Painted));
                 }
             }
             LRESULT(0)
@@ -437,7 +440,7 @@ unsafe extern "system" fn window_proc(
 /// # Safety
 ///
 /// `hdc` が描画中のものであること。
-unsafe fn paint(hdc: HDC, content: &Content) {
+unsafe fn paint(hdc: HDC, content: &Content, palette: Palette) {
     // SAFETY: 呼び出し側の約束による。作ったものはこの関数の中で片付ける。
     unsafe {
         let font = ui_font();
@@ -451,17 +454,17 @@ unsafe fn paint(hdc: HDC, content: &Content) {
             bottom: height,
         };
 
-        let background = CreateSolidBrush(system_color(COLOR_WINDOW.0));
+        let background = CreateSolidBrush(colorref(palette.background));
         FillRect(hdc, &area, background);
         let _ = DeleteObject(background.into());
 
         // 枠。地と同じ色では、背景に溶けて境目が分からない。
-        let border = CreateSolidBrush(system_color(COLOR_HIGHLIGHT.0));
+        let border = CreateSolidBrush(colorref(palette.border));
         FrameRect(hdc, &area, border);
         let _ = DeleteObject(border.into());
 
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, system_color(COLOR_WINDOWTEXT.0));
+        SetTextColor(hdc, colorref(palette.text));
 
         let line_height = line_height(hdc);
         let highlight = content.highlight();
@@ -486,16 +489,16 @@ unsafe fn paint(hdc: HDC, content: &Content) {
                     right: width - 1,
                     ..rect
                 };
-                let brush = CreateSolidBrush(system_color(COLOR_HIGHLIGHT.0));
+                let brush = CreateSolidBrush(colorref(palette.selected_background));
                 FillRect(hdc, &band, brush);
                 let _ = DeleteObject(brush.into());
             }
             SetTextColor(
                 hdc,
-                system_color(if selected {
-                    COLOR_HIGHLIGHTTEXT.0
+                colorref(if selected {
+                    palette.selected_text
                 } else {
-                    COLOR_WINDOWTEXT.0
+                    palette.text
                 }),
             );
 
@@ -513,6 +516,17 @@ unsafe fn paint(hdc: HDC, content: &Content) {
             let _ = DeleteObject(font.into());
         }
     }
+}
+
+/// 窓に預ける、描くものと色の組。
+struct Painted {
+    content: Content,
+    palette: Palette,
+}
+
+/// `0xRRGGBB` を `COLORREF` (`0x00BBGGRR`) にする。
+fn colorref(rgb: u32) -> COLORREF {
+    COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
 }
 
 /// 窓の大きさを測る。
@@ -621,12 +635,6 @@ fn ui_font() -> Option<HFONT> {
     }
     // SAFETY: 受け取った書体の指定をそのまま使う。
     unsafe { CreateFontIndirectW(&metrics.lfMessageFont) }.into()
-}
-
-/// システムの色。
-pub(crate) fn system_color(index: i32) -> COLORREF {
-    // SAFETY: 番号を渡して色を受け取るだけ。
-    COLORREF(unsafe { GetSysColor(SYS_COLOR_INDEX(index)) })
 }
 
 /// 拡大率に合わせて伸ばす。
