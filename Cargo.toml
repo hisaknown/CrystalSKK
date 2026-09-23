@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/crystalskk-core",
     "crates/crystalskk-dict",
+    "crates/crystalskk-ipc",
     "crates/crystalskk-fetch",
     "crates/crystalskk-cli",
     "crates/crystalskk-tip",

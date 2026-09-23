@@ -88,6 +88,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crystalskk-ipc"
+version = "0.1.0"
+dependencies = [
+ "crystalskk-core",
+]
+
+[[package]]
 name = "crystalskk-setup"
 version = "0.1.0"
 dependencies = [

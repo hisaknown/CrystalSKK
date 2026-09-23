@@ -1,0 +1,14 @@
+[package]
+name = "crystalskk-ipc"
+description = "The vocabulary the TIP and the dictionary server speak."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+
+[lints]
+workspace = true
