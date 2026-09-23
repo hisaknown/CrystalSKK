@@ -66,7 +66,60 @@ pub struct Settings {
     pub colors: Colors,
     /// 引く辞書。並べた順に引く。**使うのは辞書サーバだけ。**
     pub dictionaries: Vec<Source>,
+    /// 変換の候補を前後の文章から並べる (ADR-0030)。
+    pub ranker: Ranker,
 }
+
+/// 変換の候補を前後の文章から並べるための設定。
+///
+/// 前後の文章を読むのは TIP、並べるのは辞書サーバである。両方がこれを使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ranker {
+    /// 並べ替えるか。
+    pub enabled: bool,
+    /// 言語モデル (GGUF) の在りか。書かれたまま。
+    pub model: String,
+    /// 語彙 (tokenizer.json) の在りか。書かれたまま。
+    pub tokenizer: String,
+    /// llama.dll のあるフォルダ。書かれたまま。
+    pub runtime: String,
+    /// 辞書の順の重み。
+    pub weight: Weight,
+    /// 並べ替えを待つ時間 (ミリ秒)。
+    pub deadline_ms: u32,
+    /// カーソルより前の文章を何文字見せるか。
+    pub before: usize,
+    /// カーソルより後の文章を何文字見せるか。0 なら見せない。
+    pub after: usize,
+    /// 採点に使うスレッドの数。
+    pub threads: usize,
+}
+
+impl Ranker {
+    /// 書かれた在りかを、読む場所に解く。相対なら設定ファイルの場所から。
+    /// 空なら `None`。
+    pub fn resolve(written: &str, settings_directory: &Path) -> Option<PathBuf> {
+        if written.is_empty() {
+            return None;
+        }
+        Some(settings_directory.join(written))
+    }
+}
+
+/// 0 以上の重み。
+///
+/// 設定の一式を比べられるように (変わったときだけ作り直すために)、
+/// ビット列で比べる。
+#[derive(Debug, Clone, Copy)]
+pub struct Weight(pub f32);
+
+impl PartialEq for Weight {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for Weight {}
 
 /// 辞書の在りか。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +463,29 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         },
         dictionaries: sources(section(&doc, "dictionaries")?)?,
         colors: colors(section(&doc, "colors")?)?,
+        ranker: ranker(section(&doc, "ranker")?)?,
+    })
+}
+
+/// 並べ替えの節。
+fn ranker(table: &Table) -> Result<Ranker, Error> {
+    let weight = value(table, "ranker", "weight")?;
+    let weight = weight
+        .as_float()
+        .or_else(|| weight.as_integer().map(|n| n as f64))
+        .filter(|w| w.is_finite() && *w >= 0.0)
+        .ok_or_else(|| Error::new("ranker.weight は 0 以上の数で書いてください"))?;
+    Ok(Ranker {
+        enabled: boolean(table, "ranker", "enabled")?,
+        model: text(table, "ranker", "model")?,
+        tokenizer: text(table, "ranker", "tokenizer")?,
+        runtime: text(table, "ranker", "runtime")?,
+        weight: Weight(weight as f32),
+        deadline_ms: u32::try_from(count(table, "ranker", "deadline_ms")?)
+            .map_err(|_| Error::new("ranker.deadline_ms が大きすぎます"))?,
+        before: count(table, "ranker", "before")?,
+        after: amount(table, "ranker", "after")?,
+        threads: count(table, "ranker", "threads")?,
     })
 }
 
@@ -651,6 +727,22 @@ fn count(table: &Table, section: &str, key: &str) -> Result<usize, Error> {
         .filter(|n| *n >= 1)
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| Error::new(format!("{section}.{key} は 1 以上の整数で書いてください")))
+}
+
+/// 0 以上の整数。
+fn amount(table: &Table, section: &str, key: &str) -> Result<usize, Error> {
+    value(table, section, key)?
+        .as_integer()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| Error::new(format!("{section}.{key} は 0 以上の整数で書いてください")))
+}
+
+/// 文字列。空でもよい。
+fn text(table: &Table, section: &str, key: &str) -> Result<String, Error> {
+    value(table, section, key)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new(format!("{section}.{key} は文字列で書いてください")))
 }
 
 /// 一文字の文字列。
@@ -924,6 +1016,26 @@ mod tests {
     }
 
     #[test]
+    fn the_ranker_is_off_until_it_is_pointed_at_a_model() {
+        let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
+        assert!(!ranker.enabled);
+        assert_eq!(ranker.model, "");
+        assert_eq!(
+            Ranker::resolve(&ranker.model, Path::new("C:\\settings")),
+            None
+        );
+        assert_eq!(ranker.weight, Weight(1.0));
+        assert_eq!((ranker.before, ranker.after), (100, 5));
+    }
+
+    #[test]
+    fn a_whole_number_is_a_weight_too() {
+        let user = TEMPLATE.replace("weight = 1.0", "weight = 2");
+        let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
+        assert_eq!(settings.ranker.weight, Weight(2.0));
+    }
+
+    #[test]
     fn broken_values_are_explained() {
         let cases = [
             ("labels = \"asdfjkl\"", "labels = \"\"", "candidates.labels"),
@@ -932,6 +1044,9 @@ mod tests {
             ("min_length = 2", "min_length = 0", "1 以上"),
             ("dynamic = true", "dynamic = \"yes\"", "true か false"),
             ("until_list = 5", "until_list = 2.5", "整数"),
+            ("weight = 1.0", "weight = -1.0", "ranker.weight"),
+            ("after = 5", "after = -1", "0 以上の整数"),
+            ("model = \"\"", "model = 3", "文字列"),
         ];
         for (from, to, expected) in cases {
             let user = TEMPLATE.replace(from, to);
