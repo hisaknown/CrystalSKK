@@ -593,12 +593,20 @@ impl TextService_Impl {
             Vec::new()
         } else {
             let atoms = *self.this.atoms.borrow();
-            response
-                .preedit
-                .segments
+            let segments = &response.preedit.segments;
+            segments
                 .iter()
-                .map(|segment| {
-                    let atom = atoms.map_or(0, |atoms| atoms.for_role(segment.role));
+                .enumerate()
+                .map(|(index, segment)| {
+                    // 印 (`▽` `▼`) は続く部分に合わせる。**印だけ違う線に
+                    // なると、一つの塊が途中で切れて見える。**
+                    let role = match segment.role {
+                        crystalskk_core::engine::Role::Marker => segments
+                            .get(index + 1)
+                            .map_or(segment.role, |next| next.role),
+                        role => role,
+                    };
+                    let atom = atoms.map_or(0, |atoms| atoms.for_role(role));
                     (atom, segment.text.clone())
                 })
                 .collect()

@@ -11,16 +11,34 @@
 //! 配色が変わるたびに破綻を追いかけることになる。CorvusSKK の既定も色を
 //! 指定していない。
 //!
-//! # 効くのは線よりも「ここは何か」
+//! # 線は必ず自分で引く
 //!
-//! `bAttr` は部分の役目をアプリに伝える欄で、アプリは自分の流儀で強調
-//! する。`TARGET_CONVERTED` は多くのアプリで**選択中の塊**として塗られる。
-//! だから候補の部分は線を引かない。アプリが塗るので要らない。
+//! `bAttr` は部分の役目をアプリに伝える欄で、`TARGET_CONVERTED` は多くの
+//! アプリで**選択中の塊**として塗られる。
+//!
+//! ただし**塗らないアプリもある**。一度そこを当てにして候補の線を省き、
+//! 何も引かれない状態になった。自分で引いたうえで `bAttr` でも伝える —
+//! **アプリの善意を当てにしない。**
+//!
+//! # 太さで段階を示す
+//!
+//! | 部分 | 線 |
+//! |---|---|
+//! | 見出し語 | 点線 |
+//! | 送り仮名 | 細い実線 |
+//! | 候補 | **太い実線** |
+//!
+//! 「まだ打っている → 決まった → 選んでいる」が、そのまま線の強さになる。
+//! **注目しているところが太い**のは既存の日本語入力と同じ約束で、線種の
+//! 違いより確実に目に入る。
+//!
+//! 波線は使わない。綴り間違いの印として定着しているので、入力中の文字に
+//! 使うと「間違っている」と読まれる。
 
 use windows::Win32::UI::TextServices::{
     IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
     ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT, TF_ATTR_TARGET_CONVERTED, TF_DA_COLOR,
-    TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_NONE, TF_LS_SOLID,
+    TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_SOLID,
 };
 use windows::core::{BSTR, ComObject, GUID, Result, implement};
 
@@ -40,31 +58,39 @@ pub struct Attribute {
     pub description: &'static str,
     /// 線の種類。
     line: i32,
+    /// 太く引くか。
+    bold: bool,
     /// この部分は何か。
     kind: i32,
 }
 
-/// 見出し語。打っている最中なので点線。
+/// 見出し語。まだ打っている最中なので点線。
 pub const INPUT: Attribute = Attribute {
     guid: GUID_DISPLAY_ATTRIBUTE_INPUT,
     description: "CrystalSKK: 見出し語",
     line: TF_LS_DOT.0,
+    bold: false,
     kind: TF_ATTR_INPUT.0,
 };
 
-/// 送り仮名。ここは決まっているので実線。
+/// 送り仮名。決まっているので実線。
 pub const OKURI: Attribute = Attribute {
     guid: GUID_DISPLAY_ATTRIBUTE_OKURI,
     description: "CrystalSKK: 送り仮名",
     line: TF_LS_SOLID.0,
+    bold: false,
     kind: TF_ATTR_INPUT.0,
 };
 
-/// 選ばれている候補。線は引かず、アプリに塗らせる。
+/// 選ばれている候補。いま注目しているところなので太い実線。
+///
+/// 塗ってくれるアプリには `bAttr` で伝わる。**塗らないアプリでも線は
+/// 残る。**
 pub const CONVERTED: Attribute = Attribute {
     guid: GUID_DISPLAY_ATTRIBUTE_CONVERTED,
     description: "CrystalSKK: 変換中",
-    line: TF_LS_NONE.0,
+    line: TF_LS_SOLID.0,
+    bold: true,
     kind: TF_ATTR_TARGET_CONVERTED.0,
 };
 
@@ -73,12 +99,14 @@ pub const ALL: &[Attribute] = &[INPUT, OKURI, CONVERTED];
 
 /// 区切りの役目に対する見え方。
 ///
-/// 印 (`▽` `▼`) は隣の部分と同じ扱いにする。**別扱いにする利点が、いまは
-/// 無い。** 分けたくなったら足せる。
+/// 印 (`▽` `▼`) は**続く部分に合わせる**。印だけ違う線になると、一つの
+/// 塊が途中で切れて見える。合わせる相手は呼ぶ側が渡す。
 pub fn for_role(role: Role) -> Attribute {
     match role {
         Role::Midashi => INPUT,
         Role::Okuri => OKURI,
+        // 印を単独で渡されたときは、変換中として扱う。`▽` は続く見出し語に
+        // 合わせて上書きされる。
         Role::Candidate | Role::Marker => CONVERTED,
     }
 }
@@ -91,7 +119,7 @@ impl Attribute {
             crText: TF_DA_COLOR::default(),
             crBk: TF_DA_COLOR::default(),
             lsStyle: windows::Win32::UI::TextServices::TF_DA_LINESTYLE(self.line),
-            fBoldLine: false.into(),
+            fBoldLine: self.bold.into(),
             crLine: TF_DA_COLOR::default(),
             bAttr: windows::Win32::UI::TextServices::TF_DA_ATTR_INFO(self.kind),
         }
@@ -215,9 +243,28 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_is_left_for_the_application_to_paint() {
-        // 線を引くと、アプリが塗ったうえに下線が重なる。
-        assert_eq!(CONVERTED.line, TF_LS_NONE.0);
+    fn every_part_gets_a_line_of_its_own() {
+        // **アプリが塗ってくれることを当てにしない。** 一度それで、候補に
+        // 何も引かれない状態になった。
+        for attribute in ALL {
+            assert_ne!(
+                attribute.line,
+                windows::Win32::UI::TextServices::TF_LS_NONE.0,
+                "{}",
+                attribute.description
+            );
+        }
+    }
+
+    #[test]
+    fn the_candidate_is_the_boldest() {
+        // 注目しているところが一番強く出る。既存の日本語入力と同じ約束。
+        let bold: Vec<&str> = ALL
+            .iter()
+            .filter(|a| a.bold)
+            .map(|a| a.description)
+            .collect();
+        assert_eq!(bold, vec![CONVERTED.description], "太いのは候補だけ");
         assert_eq!(CONVERTED.kind, TF_ATTR_TARGET_CONVERTED.0);
     }
 
@@ -225,6 +272,20 @@ mod tests {
     fn the_okuri_looks_settled_and_the_midashi_does_not() {
         // 打っている最中と、決まっているところを見分けられるようにする。
         assert_ne!(INPUT.line, OKURI.line);
+    }
+
+    #[test]
+    fn nothing_is_squiggled() {
+        // 波線は綴り間違いの印として定着している。入力中の文字に使うと
+        // 「間違っている」と読まれる。
+        for attribute in ALL {
+            assert_ne!(
+                attribute.line,
+                windows::Win32::UI::TextServices::TF_LS_SQUIGGLE.0,
+                "{}",
+                attribute.description
+            );
+        }
     }
 
     #[test]
