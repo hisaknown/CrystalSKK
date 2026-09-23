@@ -31,3 +31,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0012](0012-the-open-close-compartment-is-the-truth.md) | 入力方式の入切は向こうが決める | Accepted | ADR-0010 |
 | [0013](0013-on-is-the-resting-state.md) | 入が常態で、切は SKK に手を引かせるためにある | Accepted | ADR-0012 |
 | [0014](0014-let-app-containers-read-the-dictionary.md) | 隔離されたアプリには辞書を読ませる。書かせはしない | Accepted | ADR-0011, PRD §7 |
+| [0015](0015-draw-the-candidate-list-and-offer-it-too.md) | 候補一覧は自前で描き、同時に差し出す | Accepted | PRD Q-02 |
