@@ -99,6 +99,12 @@ impl SessionBuilder {
         if !loaded.unknown.is_empty() {
             log(&format!("  知らない項目: {}", loaded.unknown.join(", ")));
         }
+        if loaded.romaji_created {
+            log(&format!(
+                "ローマ字テーブル {} を作りました",
+                loaded.romaji_path.display()
+            ));
+        }
 
         let user_path = self
             .user_dictionary

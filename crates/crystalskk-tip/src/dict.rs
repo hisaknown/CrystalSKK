@@ -80,8 +80,8 @@ impl CandidateSource for ServerSource {
                 self.unreachable.set(true);
                 return Vec::new();
             }
-            Ok(Response::Settings(_)) => {
-                log::error("検索に設定が返りました");
+            Ok(Response::Settings { .. } | Response::Done(_)) => {
+                log::error("検索に候補ではないものが返りました");
                 self.unreachable.set(true);
                 return Vec::new();
             }
@@ -197,7 +197,7 @@ impl Learning {
         let mut unsent = Vec::new();
         for request in pending.drain(..) {
             match client::ask(&request) {
-                Ok(Response::Ok(_) | Response::Settings(_)) => {}
+                Ok(Response::Ok(_) | Response::Settings { .. } | Response::Done(_)) => {}
                 Ok(Response::Error(reason)) => {
                     log::error(&format!("学習を断られました: {reason}"));
                 }
@@ -221,22 +221,40 @@ impl Learning {
 ///
 /// 返す誤りは**そのまま利用者に見せる文**になっている。
 pub fn fetch_settings() -> Result<crystalskk_settings::Settings, String> {
-    let response = match client::ask(&Request::Settings) {
-        Ok(response) => response,
+    match ask_server(&Request::Settings)? {
+        Response::Settings { config, romaji } => crystalskk_settings::parse(&config, &romaji)
+            .map_err(|e| format!("設定を読めません: {e}")),
+        Response::Error(reason) => Err(format!("設定を読めません: {reason}")),
+        Response::Ok(_) | Response::Done(_) => {
+            Err("設定を読めません: 辞書サーバの答えが噛み合いません".to_owned())
+        }
+    }
+}
+
+/// サーバに頼み、したことを知らせる文を受け取る。品書きから使う。
+pub fn ask_to_do(request: &Request) -> Result<String, String> {
+    match ask_server(request)? {
+        Response::Done(told) => Ok(told),
+        Response::Error(reason) => Err(reason),
+        Response::Ok(_) | Response::Settings { .. } => {
+            Err("辞書サーバの答えが噛み合いません".to_owned())
+        }
+    }
+}
+
+/// サーバに頼む。居なければ起こして、もう一度だけ頼む。
+///
+/// 返す誤りは**そのまま利用者に見せる文**になっている。
+fn ask_server(request: &Request) -> Result<Response, String> {
+    match client::ask(request) {
+        Ok(response) => Ok(response),
         Err(e) => {
             log::write(&format!("辞書サーバが居ません ({e})。起こします"));
             if !launch::server() {
                 return Err(UNREACHABLE_NOTICE.to_owned());
             }
-            client::ask(&Request::Settings).map_err(|_| UNREACHABLE_NOTICE.to_owned())?
+            client::ask(request).map_err(|_| UNREACHABLE_NOTICE.to_owned())
         }
-    };
-    match response {
-        Response::Settings(text) => {
-            crystalskk_settings::parse(&text).map_err(|e| format!("設定を読めません: {e}"))
-        }
-        Response::Error(reason) => Err(format!("設定を読めません: {reason}")),
-        Response::Ok(_) => Err("設定を読めません: 辞書サーバの答えが噛み合いません".to_owned()),
     }
 }
 

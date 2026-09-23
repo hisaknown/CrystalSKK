@@ -6,9 +6,9 @@
 
 #![allow(dead_code)]
 
-use crystalskk_core::Engine;
 use crystalskk_core::dict::CandidateSource;
 use crystalskk_core::options::{CandidateOptions, CompletionOptions, Options};
+use crystalskk_core::{Engine, RomajiTable};
 
 /// 一覧から候補を選ぶキー。
 pub const LABELS: [char; 7] = ['a', 's', 'd', 'f', 'j', 'k', 'l'];
@@ -34,8 +34,12 @@ pub fn options() -> Options {
             until_list: UNTIL_LIST,
             labels: LABELS.to_vec(),
         },
+        romaji: RomajiTable::parse(ROMAJI).expect("雛形は読める"),
     }
 }
+
+/// 同梱のローマ字テーブル。試験でも規則はファイルから読む。
+const ROMAJI: &str = include_str!("../../../crystalskk-settings/romaji.txt");
 
 /// 設定を渡したエンジン。
 pub fn engine(dict: Box<dyn CandidateSource>) -> Engine {

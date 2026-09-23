@@ -7,11 +7,15 @@
 //! 値の正しさ (空でない、重ならない、など) は読み込む側が確かめてから
 //! 渡す。**ここに来た時点で使える値である。**
 
+use crate::romaji::RomajiTable;
+
 /// エンジンの振る舞いを決める値の一式。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub completion: CompletionOptions,
     pub candidates: CandidateOptions,
+    /// ローマ字の規則表。利用者のファイルから読んだもの (ADR-0021)。
+    pub romaji: RomajiTable,
 }
 
 /// 補完。

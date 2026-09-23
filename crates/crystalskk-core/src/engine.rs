@@ -427,7 +427,9 @@ impl Engine {
     pub fn new(dict: Box<dyn CandidateSource>) -> Self {
         Self {
             mode: InputMode::Hiragana,
-            romaji: RomajiConverter::default(),
+            // 規則表は設定と一緒に受け取る。それまでは何もかなにならないが、
+            // そもそも設定が来るまでエンジンは打鍵を受け取らない。
+            romaji: RomajiConverter::new(RomajiTable::empty()),
             state: State::Direct,
             registrations: Vec::new(),
             dict,
@@ -450,6 +452,7 @@ impl Engine {
             return;
         }
         self.reset();
+        self.romaji = RomajiConverter::new(options.romaji.clone());
         self.options = Some(options);
     }
 
@@ -474,11 +477,6 @@ impl Engine {
 
     pub fn with_ranker(mut self, ranker: Box<dyn Ranker>) -> Self {
         self.ranker = ranker;
-        self
-    }
-
-    pub fn with_romaji_table(mut self, table: RomajiTable) -> Self {
-        self.romaji = RomajiConverter::new(table);
         self
     }
 

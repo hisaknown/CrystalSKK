@@ -16,17 +16,34 @@
 //! `toml_edit` を使う。利用者のコメントや並びはそのまま残り、足りない
 //! 項目だけがその節の中に入る。知らない項目は消さずに知らせるだけにする。
 //! 打ち間違いか、廃止された項目か、利用者にしか分からない。
+//!
+//! # ローマ字テーブルは書き足さない
+//!
+//! ローマ字テーブルは別のファイルで、**利用者の持ち物**として扱う
+//! (ADR-0021)。無ければ雛形から作るが、あれば一切触らない。規則が一つ
+//! 無いのは、たいてい利用者が消したからである。
+//!
+//! # 雛形に戻す
+//!
+//! どちらのファイルも、利用者が頼めば雛形で上書きする ([`reset_settings`],
+//! [`reset_romaji`])。元の中身は隣に退避し、消さない。
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
 
+use std::path::PathBuf;
+
+use crystalskk_core::RomajiTable;
 use crystalskk_core::options::{CandidateOptions, CompletionOptions, Options};
 use toml_edit::{DocumentMut, Item, Table};
 
 /// 雛形。ファイルを作るときと、足りない項目を書き足すときだけに使う。
 pub const TEMPLATE: &str = include_str!("../default.toml");
+
+/// ローマ字テーブルの雛形。ファイルが無いときに作るためだけに使う。
+pub const ROMAJI_TEMPLATE: &str = include_str!("../romaji.txt");
 
 /// 書き足した項目に添える注記。
 fn added_note() -> String {
@@ -100,6 +117,12 @@ pub struct Loaded {
     pub created: bool,
     /// 知らない項目。消さずに知らせるだけにする。
     pub unknown: Vec<String>,
+    /// ローマ字テーブルのファイル。
+    pub romaji_path: PathBuf,
+    /// ローマ字テーブルの全文。
+    pub romaji_text: String,
+    /// ローマ字テーブルが無く、雛形から作ったか。
+    pub romaji_created: bool,
 }
 
 /// 足りない項目を書き足す。ファイルには触れない。
@@ -174,12 +197,16 @@ pub fn fill(user: Option<&str>) -> Result<Filled, Error> {
 /// 全文を読み、使える値にする。**書き足しはしない。**
 ///
 /// 項目が足りなければ誤りになる。ここに来る全文は、書き足しを済ませた
-/// ものでなければならない。
-pub fn parse(text: &str) -> Result<Settings, Error> {
+/// ものでなければならない。ローマ字テーブルは、設定ファイルが指す
+/// ファイルの全文を渡す。
+pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
     let doc = parse_document(text)?;
 
     let completion = section(&doc, "completion")?;
     let candidates = section(&doc, "candidates")?;
+    let table_name = romaji_table_name(&doc)?;
+    let romaji = RomajiTable::parse(romaji)
+        .map_err(|e| Error::new(format!("{table_name} を読めません: {e}")))?;
 
     Ok(Settings {
         engine: Options {
@@ -193,6 +220,7 @@ pub fn parse(text: &str) -> Result<Settings, Error> {
                 until_list: count(candidates, "candidates", "until_list")?,
                 labels: labels(candidates, "candidates", "labels")?,
             },
+            romaji,
         },
         window: Window {
             show_reading: boolean(completion, "completion", "show_reading")?,
@@ -263,7 +291,28 @@ pub fn load(path: &Path) -> Result<Loaded, Error> {
         })?;
     }
 
-    let settings = parse(&filled.text)?;
+    // ローマ字テーブル。**無いときだけ作る。あれば触らない。**
+    let romaji_path = romaji_path(path, &filled.text)?;
+    let (romaji_text, romaji_created) = match fs::read_to_string(&romaji_path) {
+        Ok(text) => (text.trim_start_matches('\u{feff}').to_owned(), false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            write(&romaji_path, ROMAJI_TEMPLATE).map_err(|e| {
+                Error::new(format!(
+                    "ローマ字テーブルを作れません ({}): {e}",
+                    romaji_path.display()
+                ))
+            })?;
+            (ROMAJI_TEMPLATE.to_owned(), true)
+        }
+        Err(e) => {
+            return Err(Error::new(format!(
+                "ローマ字テーブルを読めません ({}): {e}",
+                romaji_path.display()
+            )));
+        }
+    };
+
+    let settings = parse(&filled.text, &romaji_text)?;
     let unknown = unknown_keys(&filled.text);
     Ok(Loaded {
         settings,
@@ -271,7 +320,94 @@ pub fn load(path: &Path) -> Result<Loaded, Error> {
         added: filled.added,
         created: filled.created,
         unknown,
+        romaji_path,
+        romaji_text,
+        romaji_created,
     })
+}
+
+/// 設定ファイルを雛形で上書きする。元の中身は隣に退避する。
+///
+/// 返すのは退避先。元のファイルが無ければ `None`。
+pub fn reset_settings(path: &Path) -> Result<Option<PathBuf>, Error> {
+    overwrite_with(path, TEMPLATE)
+}
+
+/// ローマ字テーブルを雛形で上書きする。元の中身は隣に退避する。
+///
+/// どのファイルかは設定ファイルが決める。返すのは上書きしたファイルと
+/// 退避先。
+pub fn reset_romaji(settings: &Path) -> Result<(PathBuf, Option<PathBuf>), Error> {
+    let text = fs::read_to_string(settings).map_err(|e| {
+        Error::new(format!(
+            "設定ファイルを読めないので、ローマ字テーブルの場所が分かりません: {e}"
+        ))
+    })?;
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let target = romaji_path(settings, &text)?;
+    let backup = overwrite_with(&target, ROMAJI_TEMPLATE)?;
+    Ok((target, backup))
+}
+
+/// 雛形で上書きする。**元の中身は消さずに退避する。**
+///
+/// 退避先は `<名前>.bak`、それがあれば `<名前>.bak2`、`.bak3` と空いている
+/// ものを選ぶ。前の退避を上書きしない。
+fn overwrite_with(path: &Path, template: &str) -> Result<Option<PathBuf>, Error> {
+    let backup = if path.exists() {
+        let backup = free_backup_name(path);
+        fs::copy(path, &backup).map_err(|e| {
+            Error::new(format!(
+                "退避できないので、上書きをやめました ({}): {e}",
+                backup.display()
+            ))
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
+    write(path, template)
+        .map_err(|e| Error::new(format!("書けません ({}): {e}", path.display())))?;
+    Ok(backup)
+}
+
+fn free_backup_name(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    (1..)
+        .map(|n| {
+            let suffix = if n == 1 { String::new() } else { n.to_string() };
+            path.with_file_name(format!("{name}.bak{suffix}"))
+        })
+        .find(|candidate| !candidate.exists())
+        .expect("空いている名前はいずれ見つかる")
+}
+
+/// ローマ字テーブルの場所。設定ファイルと同じ場所からの相対で解く。
+fn romaji_path(settings: &Path, text: &str) -> Result<PathBuf, Error> {
+    let doc = parse_document(text)?;
+    let name = romaji_table_name(&doc)?;
+    let name = Path::new(&name);
+    if name.is_absolute() {
+        return Ok(name.to_path_buf());
+    }
+    Ok(match settings.parent() {
+        Some(directory) => directory.join(name),
+        None => name.to_path_buf(),
+    })
+}
+
+fn romaji_table_name(doc: &DocumentMut) -> Result<String, Error> {
+    let romaji = section(doc, "romaji")?;
+    value(romaji, "romaji", "table")?
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::new("romaji.table にはファイルの名前を書いてください (例: \"romaji.txt\")")
+        })
 }
 
 /// 書きかけで途切れても元のファイルを壊さないよう、隣に書いてから置き換える。
@@ -280,7 +416,8 @@ fn write(path: &Path, text: &str) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let temporary = path.with_extension("toml.writing");
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".writing");
     fs::write(&temporary, text)?;
     fs::rename(&temporary, path)
 }
@@ -386,7 +523,7 @@ mod tests {
     fn the_template_holds_every_setting() {
         // **雛形に書き忘れた項目は、どこからも値が来ない。** 項目を足して
         // 雛形に書き忘れたら、ここで落ちる。
-        let settings = parse(TEMPLATE).expect("雛形はそのまま使える");
+        let settings = parse(TEMPLATE, ROMAJI_TEMPLATE).expect("雛形はそのまま使える");
         assert!(settings.engine.completion.dynamic);
     }
 
@@ -423,7 +560,7 @@ mod tests {
         );
         // 雛形の説明も一緒に入る。**何の項目か分からないものを足さない。**
         assert!(filled.text.contains("# 一度に覚えておく補完の数"));
-        assert!(parse(&filled.text).is_ok());
+        assert!(parse(&filled.text, ROMAJI_TEMPLATE).is_ok());
     }
 
     #[test]
@@ -440,8 +577,11 @@ mod tests {
     fn a_missing_section_is_written_in_whole() {
         let user = "[completion]\ndynamic = false\nmin_length = 3\nlimit = 8\ntake_key = \",\"\nshow_reading = true\n";
         let filled = fill(Some(user)).unwrap();
-        assert_eq!(filled.added, ["candidates.until_list", "candidates.labels"]);
-        let settings = parse(&filled.text).unwrap();
+        assert_eq!(
+            filled.added,
+            ["candidates.until_list", "candidates.labels", "romaji.table"]
+        );
+        let settings = parse(&filled.text, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(
             settings.engine.candidates.labels,
             "asdfjkl".chars().collect::<Vec<_>>()
@@ -465,7 +605,7 @@ mod tests {
     #[test]
     fn the_file_wins_over_the_template() {
         let user = TEMPLATE.replace("min_length = 2", "min_length = 3");
-        let settings = parse(&user).unwrap();
+        let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(settings.engine.completion.min_length, 3);
     }
 
@@ -473,7 +613,7 @@ mod tests {
     fn nothing_is_taken_from_the_template_when_parsing() {
         // **読むときに雛形を見ない。** 足りなければ誤りになる。
         let user = without("limit = 16");
-        let error = parse(&user).unwrap_err();
+        let error = parse(&user, ROMAJI_TEMPLATE).unwrap_err();
         assert!(error.to_string().contains("completion.limit"));
     }
 
@@ -497,7 +637,7 @@ mod tests {
         ];
         for (from, to, expected) in cases {
             let user = TEMPLATE.replace(from, to);
-            let error = parse(&user).expect_err(to);
+            let error = parse(&user, ROMAJI_TEMPLATE).expect_err(to);
             assert!(error.to_string().contains(expected), "{to}: {error}");
         }
     }
@@ -506,6 +646,87 @@ mod tests {
     fn a_section_written_as_a_value_is_refused() {
         let error = fill(Some("completion = 1\n")).unwrap_err();
         assert!(error.to_string().contains("[completion]"));
+    }
+
+    #[test]
+    fn a_broken_romaji_table_is_named_with_its_line() {
+        let error = parse(TEMPLATE, "ka\tか\nki き\n").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("romaji.txt"), "{message}");
+        assert!(message.contains("2 行目"), "{message}");
+    }
+
+    /// 試験ごとに空の置き場所を作る。
+    fn scratch(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "crystalskk-settings-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn the_romaji_table_is_made_once_and_then_left_alone() {
+        let directory = scratch("romaji");
+        let path = directory.join("config.toml");
+        let table = directory.join("romaji.txt");
+
+        let first = load(&path).unwrap();
+        assert!(first.romaji_created);
+        assert_eq!(fs::read_to_string(&table).unwrap(), ROMAJI_TEMPLATE);
+
+        // 利用者が規則を一つだけにしたとする。**書き足さない。**
+        fs::write(&table, "ka\tか\n").unwrap();
+        let second = load(&path).unwrap();
+        assert!(!second.romaji_created);
+        assert_eq!(fs::read_to_string(&table).unwrap(), "ka\tか\n");
+        assert_eq!(second.romaji_text, "ka\tか\n");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_table_can_live_elsewhere() {
+        let directory = scratch("elsewhere");
+        let path = directory.join("config.toml");
+        fs::write(
+            &path,
+            TEMPLATE.replace("table = \"romaji.txt\"", "table = \"azik.txt\""),
+        )
+        .unwrap();
+        fs::write(directory.join("azik.txt"), "ka\tか\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.romaji_path, directory.join("azik.txt"));
+        assert!(!directory.join("romaji.txt").exists());
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn resetting_keeps_what_was_there() {
+        let directory = scratch("reset");
+        let path = directory.join("config.toml");
+        load(&path).unwrap();
+
+        let mine = TEMPLATE.replace("min_length = 2", "min_length = 3");
+        fs::write(&path, &mine).unwrap();
+        let backup = reset_settings(&path).unwrap().expect("退避した");
+        assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), mine, "元の中身が残る");
+
+        // 二度目は別の名前に退避する。**前の退避を消さない。**
+        fs::write(&path, "# 二度目\n").unwrap();
+        let second = reset_settings(&path).unwrap().expect("退避した");
+        assert_ne!(second, backup);
+        assert_eq!(fs::read_to_string(&backup).unwrap(), mine);
+
+        let table = directory.join("romaji.txt");
+        fs::write(&table, "ka\tか\n").unwrap();
+        let (target, saved) = reset_romaji(&path).unwrap();
+        assert_eq!(target, table);
+        assert_eq!(fs::read_to_string(&table).unwrap(), ROMAJI_TEMPLATE);
+        assert_eq!(fs::read_to_string(saved.unwrap()).unwrap(), "ka\tか\n");
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

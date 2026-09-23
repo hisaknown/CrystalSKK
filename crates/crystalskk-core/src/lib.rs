@@ -21,4 +21,4 @@ pub use engine::{Engine, Event, Marker, Preedit, Response};
 pub use key::Key;
 pub use mode::InputMode;
 pub use options::Options;
-pub use romaji::{RomajiConverter, RomajiTable, Rule};
+pub use romaji::{RomajiConverter, RomajiError, RomajiTable, Rule};

@@ -58,7 +58,7 @@ impl CandidateSource for ServerSource {
                 candidates
             }
             // 検索に設定が返るのは、話が噛み合っていないということ。
-            Ok(Response::Error(_) | Response::Settings(_)) | Err(_) => {
+            Ok(Response::Error(_) | Response::Settings { .. } | Response::Done(_)) | Err(_) => {
                 self.unreachable.set(true);
                 Vec::new()
             }

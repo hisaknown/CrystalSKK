@@ -30,7 +30,7 @@ fn main() -> ExitCode {
 fn stop() -> ExitCode {
     match client::ask(&Request::Exit) {
         // 終われと頼んで設定が返ることはないが、返っても頼みは届いている。
-        Ok(Response::Ok(_) | Response::Settings(_)) => {
+        Ok(Response::Ok(_) | Response::Settings { .. } | Response::Done(_)) => {
             println!("終了を頼みました。");
             ExitCode::SUCCESS
         }

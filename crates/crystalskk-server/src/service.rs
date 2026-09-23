@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_dict::{MemoryDict, UserDict};
-use crystalskk_ipc::{Request, Response};
+use crystalskk_ipc::{Request, Reset, Response};
 
 /// 頼みを聞き終えたあと、どうするか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,8 @@ impl Service {
                 (self.save(), Next::Listen)
             }
             Request::Settings => (self.settings(), Next::Listen),
+            Request::Reset(what) => (self.reset(what), Next::Listen),
+            Request::OpenFolder => (self.open_folder(), Next::Listen),
             Request::Save => (self.save(), Next::Listen),
             // 答えてから畳む。頼んだ側は「聞き届けた」ことを知れる。
             Request::Exit => (self.save(), Next::Stop),
@@ -140,9 +142,56 @@ impl Service {
                         loaded.unknown.join(", ")
                     );
                 }
-                Response::Settings(loaded.text)
+                if loaded.romaji_created {
+                    eprintln!(
+                        "crystalskk-server: ローマ字テーブルを作りました: {}",
+                        loaded.romaji_path.display()
+                    );
+                }
+                Response::Settings {
+                    config: loaded.text,
+                    romaji: loaded.romaji_text,
+                }
             }
             Err(e) => Response::Error(e.to_string()),
+        }
+    }
+
+    /// 雛形で上書きする。**元の中身は隣に退避する。**
+    ///
+    /// 上書きするのは利用者に頼まれたときだけである。版を上げても、
+    /// ローマ字テーブルには触れない (ADR-0021)。
+    fn reset(&self, what: Reset) -> Response {
+        let outcome = match what {
+            Reset::Settings => crystalskk_settings::reset_settings(&self.settings)
+                .map(|backup| (self.settings.clone(), backup)),
+            Reset::Romaji => crystalskk_settings::reset_romaji(&self.settings),
+        };
+        match outcome {
+            Ok((target, backup)) => {
+                let name = file_name(&target);
+                let told = match backup {
+                    Some(backup) => format!(
+                        "{name} を雛形で上書きしました。元の中身は {} に残しました。",
+                        file_name(&backup)
+                    ),
+                    None => format!("{name} を雛形から作りました。"),
+                };
+                eprintln!("crystalskk-server: {told}");
+                Response::Done(told)
+            }
+            Err(e) => Response::Error(e.to_string()),
+        }
+    }
+
+    /// 設定ファイルの置き場所をエクスプローラーで開く。
+    fn open_folder(&self) -> Response {
+        let Some(folder) = self.settings.parent() else {
+            return Response::Error("設定ファイルの置き場所が分かりません".to_owned());
+        };
+        match crate::shell::open(folder) {
+            Ok(()) => Response::Done(format!("{} を開きました。", folder.display())),
+            Err(e) => Response::Error(format!("{} を開けません: {e}", folder.display())),
         }
     }
 
@@ -155,23 +204,34 @@ impl Service {
     }
 }
 
+/// 見せる名前。場所まで出すと長くなる。
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 試験用。ユーザー辞書は一時の場所に置き、書き出しても実害が出ない
-    /// ようにする。
+    /// 試験用。ユーザー辞書と設定は試験ごとの置き場所に置き、書き出しても
+    /// 実害が出ないようにする。ローマ字テーブルは設定ファイルの隣に
+    /// 作られるので、**置き場所ごと分けないと試験どうしで取り合う。**
     fn service_with(entries: &str) -> Service {
         let (system, _) = MemoryDict::parse(entries);
-        let path = std::env::temp_dir().join(format!(
-            "crystalskk-server-test-{}-{:?}.dict",
+        let directory = std::env::temp_dir().join(format!(
+            "crystalskk-server-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_file(&path);
-        let settings = path.with_extension("toml");
-        let _ = std::fs::remove_file(&settings);
-        Service::new(system, UserDict::new(path), settings)
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("置き場所を作れる");
+        Service::new(
+            system,
+            UserDict::new(directory.join("user.dict")),
+            directory.join("config.toml"),
+        )
     }
 
     fn service() -> Service {
@@ -182,7 +242,9 @@ mod tests {
         match response {
             Response::Ok(candidates) => candidates.iter().map(|c| c.word.clone()).collect(),
             Response::Error(reason) => panic!("失敗した: {reason}"),
-            Response::Settings(_) => panic!("候補ではなく設定が返った"),
+            Response::Settings { .. } | Response::Done(_) => {
+                panic!("候補ではないものが返った: {response:?}")
+            }
         }
     }
 
@@ -289,12 +351,12 @@ mod tests {
         // ファイルが無ければ雛形から作り、その全文を返す。
         let mut service = service();
         let (response, _) = service.handle(Request::Settings);
-        let Response::Settings(text) = response else {
+        let Response::Settings { config, romaji } = response else {
             panic!("設定が返らない: {response:?}");
         };
-        assert!(crystalskk_settings::parse(&text).is_ok());
+        assert!(crystalskk_settings::parse(&config, &romaji).is_ok());
         assert!(service.settings.exists(), "ファイルができている");
-        let _ = std::fs::remove_file(&service.settings);
+        let _ = std::fs::remove_dir_all(service.settings.parent().unwrap());
     }
 
     #[test]
@@ -304,7 +366,26 @@ mod tests {
         let (response, next) = service.handle(Request::Settings);
         assert!(matches!(response, Response::Error(_)), "{response:?}");
         assert_eq!(next, Next::Listen, "設定が読めなくても辞書は引ける");
-        let _ = std::fs::remove_file(&service.settings);
+        let _ = std::fs::remove_dir_all(service.settings.parent().unwrap());
+    }
+
+    #[test]
+    fn resetting_tells_where_the_old_one_went() {
+        let mut service = service();
+        service.handle(Request::Settings);
+        let table = service.settings.with_file_name("romaji.txt");
+        std::fs::write(&table, "ka\tか\n").unwrap();
+
+        let (response, _) = service.handle(Request::Reset(Reset::Romaji));
+        let Response::Done(told) = response else {
+            panic!("上書きできない: {response:?}");
+        };
+        assert!(told.contains("romaji.txt.bak"), "{told}");
+        assert_eq!(
+            std::fs::read_to_string(&table).unwrap(),
+            crystalskk_settings::ROMAJI_TEMPLATE
+        );
+        let _ = std::fs::remove_dir_all(service.settings.parent().unwrap());
     }
 
     #[test]

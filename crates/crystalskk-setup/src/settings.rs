@@ -48,6 +48,14 @@ pub fn prepare() {
                     println!("  {key}");
                 }
             }
+            // ローマ字テーブルは無いときに作るだけで、あれば触らない
+            // (ADR-0021)。作ったときだけ言う。
+            if loaded.romaji_created {
+                println!(
+                    "ローマ字テーブルを作りました: {}",
+                    loaded.romaji_path.display()
+                );
+            }
         }
         Err(e) => {
             eprintln!("crystalskk-setup: {e}");

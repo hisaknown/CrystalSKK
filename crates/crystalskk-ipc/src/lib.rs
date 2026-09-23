@@ -17,6 +17,8 @@
 //! search\t<見出し語>\t<送り仮名>
 //! learn\t<見出し語>\t<送り仮名>\t<語>
 //! settings
+//! reset\t<settings か romaji>
+//! open-folder
 //! save
 //! exit
 //! ```
@@ -25,7 +27,8 @@
 //!
 //! ```text
 //! ok\t<候補>\u{1f}<候補>...
-//! settings\t<設定ファイルの全文。改行は \u{1f}>
+//! settings\t<設定ファイルの全文>\u{1e}<ローマ字テーブルの全文>
+//! done\t<したこと>
 //! error\t<訳>
 //! ```
 //!
@@ -33,8 +36,11 @@
 //! 現れない文字**なので、逃がし方を決めずに済む。SKK 辞書はこれらの制御
 //! 文字を含まない。
 //!
-//! 設定ファイルの改行も `\u{1f}` にする。TOML は字下げ以外の制御文字を
-//! そのまま書くことを許さないので、**読めた設定ファイルには現れない。**
+//! 設定ファイルとローマ字テーブルの改行も `\u{1f}` にし、二つの間は
+//! `\u{1e}` で分ける。TOML は字下げ以外の制御文字をそのまま書くことを
+//! 許さず、ローマ字テーブルも読むときに弾くので、**読めたファイルには
+//! 現れない。** 字下げ (タブ) は欄の区切りと同じ文字だが、全文は一行の
+//! 残り全部として読むので混ざらない。
 
 use crystalskk_core::dict::{Candidate, Query};
 
@@ -49,6 +55,18 @@ const WITHIN_CANDIDATE: char = '\u{1e}';
 
 /// 設定ファイルの改行の代わり。
 const LINE_BREAK: char = '\u{1f}';
+
+/// 設定ファイルとローマ字テーブルの区切り。
+const BETWEEN_FILES: char = '\u{1e}';
+
+/// 雛形に戻すもの。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reset {
+    /// 設定ファイル。
+    Settings,
+    /// ローマ字テーブル。
+    Romaji,
+}
 
 /// TIP からサーバへの頼み。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +85,13 @@ pub enum Request {
     /// ことがあり、書き手は一人に絞りたい。隔離された入れ物の中の TIP
     /// からは、そもそもファイルが読めない。
     Settings,
+    /// 雛形で上書きする。元の中身は退避する。
+    Reset(Reset),
+    /// 設定ファイルの置き場所を開く。
+    ///
+    /// **開くのもサーバである。** 隔離された入れ物の中からは、エクス
+    /// プローラーを立ち上げられないことがある。
+    OpenFolder,
     /// ユーザー辞書を書き出す。
     Save,
     /// 終わる。
@@ -81,8 +106,11 @@ pub enum Request {
 pub enum Response {
     /// 引けた候補。頼みが検索でなければ空。
     Ok(Vec<Candidate>),
-    /// 設定ファイルの全文。足りない項目は書き足してある。
-    Settings(String),
+    /// 設定ファイルとローマ字テーブルの全文。設定ファイルの足りない項目は
+    /// 書き足してある。
+    Settings { config: String, romaji: String },
+    /// 頼まれたことをした。利用者に見せる文を添える。
+    Done(String),
     /// できなかった。
     Error(String),
 }
@@ -100,6 +128,9 @@ impl Request {
                 format!("register{FIELD}{}{FIELD}{word}", encode_query(query))
             }
             Self::Settings => "settings".to_owned(),
+            Self::Reset(Reset::Settings) => format!("reset{FIELD}settings"),
+            Self::Reset(Reset::Romaji) => format!("reset{FIELD}romaji"),
+            Self::OpenFolder => "open-folder".to_owned(),
             Self::Save => "save".to_owned(),
             Self::Exit => "exit".to_owned(),
         }
@@ -132,6 +163,12 @@ impl Request {
                 })
             }
             "settings" => Some(Self::Settings),
+            "reset" => match fields.next()? {
+                "settings" => Some(Self::Reset(Reset::Settings)),
+                "romaji" => Some(Self::Reset(Reset::Romaji)),
+                _ => None,
+            },
+            "open-folder" => Some(Self::OpenFolder),
             "save" => Some(Self::Save),
             "exit" => Some(Self::Exit),
             _ => None,
@@ -151,12 +188,14 @@ impl Response {
                     .join(&BETWEEN_CANDIDATES.to_string());
                 format!("ok{FIELD}{body}")
             }
-            Self::Settings(text) => {
-                let body = text
-                    .replace('\r', "")
-                    .replace('\n', &LINE_BREAK.to_string());
-                format!("settings{FIELD}{body}")
+            Self::Settings { config, romaji } => {
+                format!(
+                    "settings{FIELD}{}{BETWEEN_FILES}{}",
+                    one_line(config),
+                    one_line(romaji)
+                )
             }
+            Self::Done(what) => format!("done{FIELD}{what}"),
             Self::Error(reason) => format!("error{FIELD}{reason}"),
         }
     }
@@ -176,11 +215,24 @@ impl Response {
                     .map(decode_candidate)
                     .collect(),
             )),
-            "settings" => Some(Self::Settings(body.replace(LINE_BREAK, "\n"))),
+            "settings" => {
+                let (config, romaji) = body.split_once(BETWEEN_FILES)?;
+                Some(Self::Settings {
+                    config: config.replace(LINE_BREAK, "\n"),
+                    romaji: romaji.replace(LINE_BREAK, "\n"),
+                })
+            }
+            "done" => Some(Self::Done(body.to_owned())),
             "error" => Some(Self::Error(body.to_owned())),
             _ => None,
         }
     }
+}
+
+/// 全文を一行にする。
+fn one_line(text: &str) -> String {
+    text.replace('\r', "")
+        .replace('\n', &LINE_BREAK.to_string())
 }
 
 /// 見出し語と送り仮名を二つの欄にする。
@@ -247,18 +299,34 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_request_survives_a_round_trip() {
+    fn settings_requests_survive_a_round_trip() {
         roundtrip(&Request::Settings);
+        roundtrip(&Request::Reset(Reset::Settings));
+        roundtrip(&Request::Reset(Reset::Romaji));
+        roundtrip(&Request::OpenFolder);
     }
 
     #[test]
-    fn the_settings_file_travels_on_one_line() {
-        // 一つの答えは一行。**改行を含む全文でも、一行で運ぶ。**
-        let text = "[completion]\n# 補完候補\ndynamic = true\n\tlimit = 16\n";
-        let response = Response::Settings(text.to_owned());
+    fn an_unknown_reset_is_refused() {
+        assert_eq!(Request::decode("reset\teverything"), None);
+    }
+
+    #[test]
+    fn both_files_travel_on_one_line() {
+        // 一つの答えは一行。**改行やタブを含む全文でも、一行で運ぶ。**
+        let response = Response::Settings {
+            config: "[completion]\n# 補完候補\ndynamic = true\n\tlimit = 16\n".to_owned(),
+            romaji: "# 説明\nka\tか\nkk\tっ\tk\n".to_owned(),
+        };
         let line = response.encode();
         assert!(!line.contains('\n'));
         assert_eq!(Response::decode(&line), Some(response));
+    }
+
+    #[test]
+    fn what_was_done_is_told() {
+        let response = Response::Done("上書きしました".to_owned());
+        assert_eq!(Response::decode(&response.encode()), Some(response));
     }
 
     #[test]

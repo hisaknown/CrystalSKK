@@ -164,7 +164,7 @@ SKK 標準機能の網羅（数値変換、skkserv、文字コード入力など
 
 | フック | 用途 |
 |---|---|
-| `romaji_rules()` | ローマ字テーブルの差分定義 |
+| `romaji_rules()` | ローマ字テーブル。**差分ではなく表全体を返す** (ADR-0021: ファイルが表のすべてであり、元になる表を持たない) |
 | `on_candidates(query, candidates) -> candidates` | 候補の並べ替え・絞り込み・追加 |
 | `on_commit(yomi, word)` | 確定時の副作用（独自学習など） |
 | `on_mode_change(mode)` | モード変化の通知 |

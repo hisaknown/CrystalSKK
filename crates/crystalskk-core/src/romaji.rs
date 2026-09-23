@@ -3,8 +3,10 @@
 //! 変換規則は「入力 → 出力かな + 次に持ち越す入力」の三つ組で表す。
 //! 持ち越しは `tt` → `っ` + `t` のような促音の表現に使う。
 //!
-//! 規則表は差し替え可能 ([`RomajiTable::from_rules`])。AZIK などの
-//! 別配列は、規則表を差し替えることで対応する。
+//! **規則表は利用者のファイルから来る** (ADR-0021)。ここは規則表を
+//! 持たない。促音や撥音のような「どの配列にもありそうな規則」も含めて、
+//! 効いている規則はすべてファイルに書かれている。AZIK などの別配列は、
+//! ファイルを差し替えることで対応する。
 
 use std::collections::BTreeMap;
 
@@ -30,7 +32,7 @@ impl Rule {
 }
 
 /// ローマ字変換規則の集合。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RomajiTable {
     /// 打鍵列をキーとする。前方一致の判定に順序が必要なため `BTreeMap`。
     rules: BTreeMap<String, Rule>,
@@ -43,9 +45,65 @@ impl RomajiTable {
         Self { rules }
     }
 
-    /// 標準の SKK 配列。
-    pub fn default_skk() -> Self {
-        Self::from_rules(DEFAULT_RULES.iter().map(|&(i, o, n)| Rule::new(i, o, n)))
+    /// 規則の無い表。何を打ってもかなにならない。
+    ///
+    /// 設定を受け取る前のエンジンが持つ。**既定の配列として使うものでは
+    /// ない。**
+    pub fn empty() -> Self {
+        Self {
+            rules: BTreeMap::new(),
+        }
+    }
+
+    /// タブ区切りの規則表を読む。
+    ///
+    /// 一行に `打鍵列 <タブ> 出すかな [<タブ> 続けて打ったことにする打鍵列]`。
+    /// Google 日本語入力のローマ字テーブルと同じ形である。`#` で始まる行と
+    /// 空行は読み飛ばす。
+    ///
+    /// 読めない行があれば、**一つ目の誤りの行番号と理由**を返す。一部だけ
+    /// 読んで動かすと、どの規則が効いていないのか利用者に分からない。
+    pub fn parse(text: &str) -> Result<Self, RomajiError> {
+        let mut rules = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line_number = index + 1;
+            let error = |message: &str| RomajiError {
+                line: line_number,
+                message: message.to_owned(),
+            };
+            // 空白だけの行を読み飛ばすのに trim は使わない。打鍵列には
+            // 空白そのものを書ける (`z ` など)。
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            // 字下げ以外の制御文字は、説明の行にも置かせない。見えない文字が
+            // 紛れた規則表は、どこが効いていないのか利用者に分からない。
+            if line.chars().any(|c| c.is_control() && c != '\t') {
+                return Err(error("制御文字は使えません"));
+            }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            let (input, output, next) = match fields.as_slice() {
+                [input, output] => (*input, *output, ""),
+                [input, output, next] => (*input, *output, *next),
+                [_] => return Err(error("タブで区切られていません")),
+                _ => return Err(error("欄が多すぎます (三つまで)")),
+            };
+            if input.is_empty() {
+                return Err(error("打鍵列が空です"));
+            }
+            if output.is_empty() && next.is_empty() {
+                return Err(error("出すかなも、続きの打鍵列もありません"));
+            }
+            rules.push(Rule::new(input, output, next));
+        }
+        if rules.is_empty() {
+            return Err(RomajiError {
+                line: 0,
+                message: "規則が一つもありません".to_owned(),
+            });
+        }
+        Ok(Self::from_rules(rules))
     }
 
     fn exact(&self, input: &str) -> Option<&Rule> {
@@ -61,11 +119,26 @@ impl RomajiTable {
     }
 }
 
-impl Default for RomajiTable {
-    fn default() -> Self {
-        Self::default_skk()
+/// 規則表の読めなかったところ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RomajiError {
+    /// 何行目か。1 から数える。ファイル全体の誤りなら 0。
+    pub line: usize,
+    /// 理由。利用者に見せる文。
+    pub message: String,
+}
+
+impl std::fmt::Display for RomajiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.line == 0 {
+            f.write_str(&self.message)
+        } else {
+            write!(f, "{} 行目: {}", self.line, self.message)
+        }
     }
 }
+
+impl std::error::Error for RomajiError {}
 
 /// ローマ字入力を受け取り、確定したかなを吐き出す変換器。
 ///
@@ -162,24 +235,16 @@ impl RomajiConverter {
             }
         }
 
-        // 2. 撥音: `n` + 子音 → `ん`。(`nn` / `n` + `'` は規則表側で処理済み)
-        if chars.len() >= 2 && chars[0] == 'n' && is_consonant(chars[1]) && chars[1] != 'y' {
-            let rest: String = chars[1..].iter().collect();
-            return Some(("ん".to_owned(), rest));
-        }
+        // 促音 (`kk` → `っ` + `k`) や撥音 (`nk` → `ん` + `k`) は、ここでは
+        // 扱わない。**規則表に書いてある** (ADR-0021)。ここで補うと、表に
+        // 無い規則が効くことになる。
 
-        // 3. 促音: 同じ子音の連続 → `っ` + 二文字目以降。
-        if chars.len() >= 2 && chars[0] == chars[1] && is_consonant(chars[0]) {
-            let rest: String = chars[1..].iter().collect();
-            return Some(("っ".to_owned(), rest));
-        }
-
-        // 4. 一文字だけなら、変換できない文字としてそのまま出す。
+        // 2. 一文字だけなら、変換できない文字としてそのまま出す。
         if chars.len() == 1 {
             return Some((buf.to_owned(), String::new()));
         }
 
-        // 5. 先頭を捨てて解釈し直す。
+        // 3. 先頭を捨てて解釈し直す。
         Some((String::new(), chars[1..].iter().collect()))
     }
 
@@ -219,99 +284,30 @@ impl RomajiConverter {
     }
 }
 
-impl Default for RomajiConverter {
-    fn default() -> Self {
-        Self::new(RomajiTable::default_skk())
-    }
-}
-
 /// 打鍵列がそこで終わることを示す文字。規則表の `n'` などに使われている。
 const TERMINATOR: char = '\'';
-
-fn is_consonant(c: char) -> bool {
-    c.is_ascii_alphabetic() && !matches!(c, 'a' | 'i' | 'u' | 'e' | 'o')
-}
-
-/// 標準 SKK 配列の変換規則。`(打鍵列, 出力, 持ち越し)`。
-#[rustfmt::skip]
-const DEFAULT_RULES: &[(&str, &str, &str)] = &[
-    ("a", "あ", ""), ("i", "い", ""), ("u", "う", ""), ("e", "え", ""), ("o", "お", ""),
-
-    ("ka", "か", ""), ("ki", "き", ""), ("ku", "く", ""), ("ke", "け", ""), ("ko", "こ", ""),
-    ("kya", "きゃ", ""), ("kyi", "きぃ", ""), ("kyu", "きゅ", ""), ("kye", "きぇ", ""), ("kyo", "きょ", ""),
-    ("ga", "が", ""), ("gi", "ぎ", ""), ("gu", "ぐ", ""), ("ge", "げ", ""), ("go", "ご", ""),
-    ("gya", "ぎゃ", ""), ("gyi", "ぎぃ", ""), ("gyu", "ぎゅ", ""), ("gye", "ぎぇ", ""), ("gyo", "ぎょ", ""),
-
-    ("sa", "さ", ""), ("si", "し", ""), ("su", "す", ""), ("se", "せ", ""), ("so", "そ", ""),
-    ("sya", "しゃ", ""), ("syi", "しぃ", ""), ("syu", "しゅ", ""), ("sye", "しぇ", ""), ("syo", "しょ", ""),
-    ("sha", "しゃ", ""), ("shi", "し", ""), ("shu", "しゅ", ""), ("she", "しぇ", ""), ("sho", "しょ", ""),
-    ("za", "ざ", ""), ("zi", "じ", ""), ("zu", "ず", ""), ("ze", "ぜ", ""), ("zo", "ぞ", ""),
-    ("zya", "じゃ", ""), ("zyi", "じぃ", ""), ("zyu", "じゅ", ""), ("zye", "じぇ", ""), ("zyo", "じょ", ""),
-    ("ja", "じゃ", ""), ("ji", "じ", ""), ("ju", "じゅ", ""), ("je", "じぇ", ""), ("jo", "じょ", ""),
-    ("jya", "じゃ", ""), ("jyi", "じぃ", ""), ("jyu", "じゅ", ""), ("jye", "じぇ", ""), ("jyo", "じょ", ""),
-
-    ("ta", "た", ""), ("ti", "ち", ""), ("tu", "つ", ""), ("te", "て", ""), ("to", "と", ""),
-    ("tya", "ちゃ", ""), ("tyi", "ちぃ", ""), ("tyu", "ちゅ", ""), ("tye", "ちぇ", ""), ("tyo", "ちょ", ""),
-    ("cha", "ちゃ", ""), ("chi", "ち", ""), ("chu", "ちゅ", ""), ("che", "ちぇ", ""), ("cho", "ちょ", ""),
-    ("cya", "ちゃ", ""), ("cyi", "ちぃ", ""), ("cyu", "ちゅ", ""), ("cye", "ちぇ", ""), ("cyo", "ちょ", ""),
-    ("tsa", "つぁ", ""), ("tsi", "つぃ", ""), ("tsu", "つ", ""), ("tse", "つぇ", ""), ("tso", "つぉ", ""),
-    ("tha", "てゃ", ""), ("thi", "てぃ", ""), ("thu", "てゅ", ""), ("the", "てぇ", ""), ("tho", "てょ", ""),
-    ("twa", "とぁ", ""), ("twi", "とぃ", ""), ("twu", "とぅ", ""), ("twe", "とぇ", ""), ("two", "とぉ", ""),
-    ("da", "だ", ""), ("di", "ぢ", ""), ("du", "づ", ""), ("de", "で", ""), ("do", "ど", ""),
-    ("dya", "ぢゃ", ""), ("dyi", "ぢぃ", ""), ("dyu", "ぢゅ", ""), ("dye", "ぢぇ", ""), ("dyo", "ぢょ", ""),
-    ("dha", "でゃ", ""), ("dhi", "でぃ", ""), ("dhu", "でゅ", ""), ("dhe", "でぇ", ""), ("dho", "でょ", ""),
-    ("dwa", "どぁ", ""), ("dwi", "どぃ", ""), ("dwu", "どぅ", ""), ("dwe", "どぇ", ""), ("dwo", "どぉ", ""),
-
-    ("na", "な", ""), ("ni", "に", ""), ("nu", "ぬ", ""), ("ne", "ね", ""), ("no", "の", ""),
-    ("nya", "にゃ", ""), ("nyi", "にぃ", ""), ("nyu", "にゅ", ""), ("nye", "にぇ", ""), ("nyo", "にょ", ""),
-    ("nn", "ん", ""), ("n'", "ん", ""),
-
-    ("ha", "は", ""), ("hi", "ひ", ""), ("hu", "ふ", ""), ("he", "へ", ""), ("ho", "ほ", ""),
-    ("hya", "ひゃ", ""), ("hyi", "ひぃ", ""), ("hyu", "ひゅ", ""), ("hye", "ひぇ", ""), ("hyo", "ひょ", ""),
-    ("fa", "ふぁ", ""), ("fi", "ふぃ", ""), ("fu", "ふ", ""), ("fe", "ふぇ", ""), ("fo", "ふぉ", ""),
-    ("fya", "ふゃ", ""), ("fyu", "ふゅ", ""), ("fyo", "ふょ", ""),
-    ("ba", "ば", ""), ("bi", "び", ""), ("bu", "ぶ", ""), ("be", "べ", ""), ("bo", "ぼ", ""),
-    ("bya", "びゃ", ""), ("byi", "びぃ", ""), ("byu", "びゅ", ""), ("bye", "びぇ", ""), ("byo", "びょ", ""),
-    ("pa", "ぱ", ""), ("pi", "ぴ", ""), ("pu", "ぷ", ""), ("pe", "ぺ", ""), ("po", "ぽ", ""),
-    ("pya", "ぴゃ", ""), ("pyi", "ぴぃ", ""), ("pyu", "ぴゅ", ""), ("pye", "ぴぇ", ""), ("pyo", "ぴょ", ""),
-
-    ("ma", "ま", ""), ("mi", "み", ""), ("mu", "む", ""), ("me", "め", ""), ("mo", "も", ""),
-    ("mya", "みゃ", ""), ("myi", "みぃ", ""), ("myu", "みゅ", ""), ("mye", "みぇ", ""), ("myo", "みょ", ""),
-
-    ("ya", "や", ""), ("yi", "い", ""), ("yu", "ゆ", ""), ("ye", "いぇ", ""), ("yo", "よ", ""),
-
-    ("ra", "ら", ""), ("ri", "り", ""), ("ru", "る", ""), ("re", "れ", ""), ("ro", "ろ", ""),
-    ("rya", "りゃ", ""), ("ryi", "りぃ", ""), ("ryu", "りゅ", ""), ("rye", "りぇ", ""), ("ryo", "りょ", ""),
-
-    ("wa", "わ", ""), ("wi", "うぃ", ""), ("wu", "う", ""), ("we", "うぇ", ""), ("wo", "を", ""),
-    ("va", "ヴぁ", ""), ("vi", "ヴぃ", ""), ("vu", "ヴ", ""), ("ve", "ヴぇ", ""), ("vo", "ヴぉ", ""),
-
-    ("xa", "ぁ", ""), ("xi", "ぃ", ""), ("xu", "ぅ", ""), ("xe", "ぇ", ""), ("xo", "ぉ", ""),
-    ("xya", "ゃ", ""), ("xyu", "ゅ", ""), ("xyo", "ょ", ""),
-    ("xtu", "っ", ""), ("xtsu", "っ", ""), ("xwa", "ゎ", ""),
-    ("xka", "ヵ", ""), ("xke", "ヶ", ""), ("xn", "ん", ""),
-
-    ("-", "ー", ""), (",", "、", ""), (".", "。", ""), ("[", "「", ""), ("]", "」", ""),
-
-    // Egg 風の二ストローク記号入力。
-    ("z-", "〜", ""), ("z,", "‥", ""), ("z.", "…", ""), ("z/", "・", ""),
-    ("z[", "『", ""), ("z]", "』", ""), ("z ", "　", ""),
-    ("zh", "←", ""), ("zj", "↓", ""), ("zk", "↑", ""), ("zl", "→", ""),
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 同梱の雛形。**試験はこれを規則表として使う。** 雛形と変換器の
+    /// 食い違いも、ここで見つかる。
+    const TEMPLATE: &str = include_str!("../../crystalskk-settings/romaji.txt");
+
+    fn converter() -> RomajiConverter {
+        RomajiConverter::new(RomajiTable::parse(TEMPLATE).expect("雛形は読める"))
+    }
+
     /// 打鍵列を与え、確定したかなを連結して返す。未確定分は捨てる。
     fn typed(keys: &str) -> String {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         keys.chars().map(|k| c.feed(k)).collect()
     }
 
     /// 打鍵列を与え、`(確定したかな, 未確定の打鍵列)` を返す。
     fn typed_with_pending(keys: &str) -> (String, String) {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         let out: String = keys.chars().map(|k| c.feed(k)).collect();
         (out, c.pending().to_owned())
     }
@@ -371,7 +367,7 @@ mod tests {
 
     #[test]
     fn pending_kana_tells_what_can_stand_alone() {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         assert_eq!(c.pending_kana(), None, "未確定がなければ何もない");
 
         c.feed('n');
@@ -391,14 +387,14 @@ mod tests {
 
     #[test]
     fn take_pending_kana_leaves_unresolvable_input_alone() {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         c.feed('k');
         assert_eq!(c.take_pending_kana(), None);
         assert_eq!(c.pending(), "k", "取り出せないなら残す");
         // 残っているので続きと組み合わせられる。
         assert_eq!(c.feed('a'), "か");
 
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         c.feed('n');
         assert_eq!(c.take_pending_kana().as_deref(), Some("ん"));
         assert!(c.is_empty());
@@ -406,14 +402,14 @@ mod tests {
 
     #[test]
     fn flush_resolves_trailing_n_only() {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         for k in "hon".chars() {
             c.feed(k);
         }
         assert_eq!(c.flush(), "ん");
         assert!(c.is_empty());
 
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         c.feed('k');
         assert_eq!(c.flush(), "");
         assert!(c.is_empty());
@@ -421,7 +417,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_one_keystroke() {
-        let mut c = RomajiConverter::default();
+        let mut c = converter();
         c.feed('k');
         c.feed('y');
         assert_eq!(c.pending(), "ky");
@@ -454,5 +450,48 @@ mod tests {
         let mut c = RomajiConverter::new(table);
         let out: String = "kkaa".chars().map(|k| c.feed(k)).collect();
         assert_eq!(out, "ッカア");
+    }
+
+    #[test]
+    fn a_table_reads_like_google_japanese_input() {
+        let table = RomajiTable::parse("ka\tか\nkk\tっ\tk\n# 説明\n\nz \t　\n").unwrap();
+        let mut c = RomajiConverter::new(table);
+        let out: String = "kka".chars().map(|k| c.feed(k)).collect();
+        assert_eq!(out, "っか");
+        assert_eq!(c.feed('z'), "");
+        assert_eq!(c.feed(' '), "　", "空白の打鍵列を切り詰めない");
+    }
+
+    #[test]
+    fn windows_line_endings_are_accepted() {
+        assert!(RomajiTable::parse("ka\tか\r\nki\tき\r\n").is_ok());
+    }
+
+    #[test]
+    fn a_broken_line_is_named() {
+        let error = RomajiTable::parse("ka\tか\nki き\n").unwrap_err();
+        assert_eq!(error.line, 2);
+        assert!(error.to_string().contains("2 行目"));
+
+        let error = RomajiTable::parse("ka\tか\tk\tx\n").unwrap_err();
+        assert!(error.message.contains("多すぎ"));
+        assert!(RomajiTable::parse("\tか\n").is_err(), "打鍵列が空");
+        assert!(RomajiTable::parse("# 空っぽ\n").is_err(), "規則が無い");
+    }
+
+    #[test]
+    fn nothing_is_filled_in_behind_the_table() {
+        // **表に無い規則は効かない。** 促音も撥音も、表に書かれていなければ
+        // 起きない。
+        let table = RomajiTable::parse("ka\tか\nta\tた\n").unwrap();
+        let mut c = RomajiConverter::new(table);
+        let out: String = "kka".chars().map(|k| c.feed(k)).collect();
+        assert_eq!(out, "か", "っ は出ない");
+    }
+
+    #[test]
+    fn an_empty_table_makes_no_kana() {
+        let mut c = RomajiConverter::new(RomajiTable::empty());
+        assert_eq!(c.feed('a'), "a");
     }
 }

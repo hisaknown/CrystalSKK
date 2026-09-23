@@ -1,0 +1,315 @@
+# CrystalSKK のローマ字テーブル
+#
+# 一行に一つの規則を、タブで区切って書きます。
+#
+#   打鍵列 <タブ> 出すかな <タブ> 続けて打ったことにする打鍵列
+#
+# 三つめは省けます。Google 日本語入力のローマ字テーブルと同じ形なので、
+# あちらで書き出したものをそのまま使えます。# で始まる行と空行は読み飛ばします。
+#
+# このファイルはあなたのものです。CrystalSKK は、無いときに作るだけで、
+# 版を上げても書き換えません。雛形に戻したいときは、トレイのアイコンを
+# 右クリックして「romaji.txt を雛形で上書き」を選びます。
+#
+# 打鍵列の終わりに ' を付けた規則 (n' など) は、その打鍵列が単独でかなに
+# なることを示します。見出し語の途中でシフトを押したとき、手前の n を
+# ん にするかどうかがこれで決まります。
+
+# 母音
+a	あ
+i	い
+u	う
+e	え
+o	お
+
+# か行・が行
+ka	か
+ki	き
+ku	く
+ke	け
+ko	こ
+kya	きゃ
+kyi	きぃ
+kyu	きゅ
+kye	きぇ
+kyo	きょ
+ga	が
+gi	ぎ
+gu	ぐ
+ge	げ
+go	ご
+gya	ぎゃ
+gyi	ぎぃ
+gyu	ぎゅ
+gye	ぎぇ
+gyo	ぎょ
+
+# さ行・ざ行
+sa	さ
+si	し
+su	す
+se	せ
+so	そ
+sya	しゃ
+syi	しぃ
+syu	しゅ
+sye	しぇ
+syo	しょ
+sha	しゃ
+shi	し
+shu	しゅ
+she	しぇ
+sho	しょ
+za	ざ
+zi	じ
+zu	ず
+ze	ぜ
+zo	ぞ
+zya	じゃ
+zyi	じぃ
+zyu	じゅ
+zye	じぇ
+zyo	じょ
+ja	じゃ
+ji	じ
+ju	じゅ
+je	じぇ
+jo	じょ
+jya	じゃ
+jyi	じぃ
+jyu	じゅ
+jye	じぇ
+jyo	じょ
+
+# た行・だ行
+ta	た
+ti	ち
+tu	つ
+te	て
+to	と
+tya	ちゃ
+tyi	ちぃ
+tyu	ちゅ
+tye	ちぇ
+tyo	ちょ
+cha	ちゃ
+chi	ち
+chu	ちゅ
+che	ちぇ
+cho	ちょ
+cya	ちゃ
+cyi	ちぃ
+cyu	ちゅ
+cye	ちぇ
+cyo	ちょ
+tsa	つぁ
+tsi	つぃ
+tsu	つ
+tse	つぇ
+tso	つぉ
+tha	てゃ
+thi	てぃ
+thu	てゅ
+the	てぇ
+tho	てょ
+twa	とぁ
+twi	とぃ
+twu	とぅ
+twe	とぇ
+two	とぉ
+da	だ
+di	ぢ
+du	づ
+de	で
+do	ど
+dya	ぢゃ
+dyi	ぢぃ
+dyu	ぢゅ
+dye	ぢぇ
+dyo	ぢょ
+dha	でゃ
+dhi	でぃ
+dhu	でゅ
+dhe	でぇ
+dho	でょ
+dwa	どぁ
+dwi	どぃ
+dwu	どぅ
+dwe	どぇ
+dwo	どぉ
+
+# な行と ん
+na	な
+ni	に
+nu	ぬ
+ne	ね
+no	の
+nya	にゃ
+nyi	にぃ
+nyu	にゅ
+nye	にぇ
+nyo	にょ
+nn	ん
+n'	ん
+
+# は行・ば行・ぱ行
+ha	は
+hi	ひ
+hu	ふ
+he	へ
+ho	ほ
+hya	ひゃ
+hyi	ひぃ
+hyu	ひゅ
+hye	ひぇ
+hyo	ひょ
+fa	ふぁ
+fi	ふぃ
+fu	ふ
+fe	ふぇ
+fo	ふぉ
+fya	ふゃ
+fyu	ふゅ
+fyo	ふょ
+ba	ば
+bi	び
+bu	ぶ
+be	べ
+bo	ぼ
+bya	びゃ
+byi	びぃ
+byu	びゅ
+bye	びぇ
+byo	びょ
+pa	ぱ
+pi	ぴ
+pu	ぷ
+pe	ぺ
+po	ぽ
+pya	ぴゃ
+pyi	ぴぃ
+pyu	ぴゅ
+pye	ぴぇ
+pyo	ぴょ
+
+# ま行
+ma	ま
+mi	み
+mu	む
+me	め
+mo	も
+mya	みゃ
+myi	みぃ
+myu	みゅ
+mye	みぇ
+myo	みょ
+
+# や行
+ya	や
+yi	い
+yu	ゆ
+ye	いぇ
+yo	よ
+
+# ら行
+ra	ら
+ri	り
+ru	る
+re	れ
+ro	ろ
+rya	りゃ
+ryi	りぃ
+ryu	りゅ
+rye	りぇ
+ryo	りょ
+
+# わ行・ヴ
+wa	わ
+wi	うぃ
+wu	う
+we	うぇ
+wo	を
+va	ヴぁ
+vi	ヴぃ
+vu	ヴ
+ve	ヴぇ
+vo	ヴぉ
+
+# 小さい文字
+xa	ぁ
+xi	ぃ
+xu	ぅ
+xe	ぇ
+xo	ぉ
+xya	ゃ
+xyu	ゅ
+xyo	ょ
+xtu	っ
+xtsu	っ
+xwa	ゎ
+xka	ヵ
+xke	ヶ
+xn	ん
+
+# 記号
+-	ー
+,	、
+.	。
+[	「
+]	」
+
+# 記号 (z に続けて打つ)
+z-	〜
+z,	‥
+z.	…
+z/	・
+z[	『
+z]	』
+z 	　
+zh	←
+zj	↓
+zk	↑
+zl	→
+
+# 促音: 同じ子音を重ねると っ になり、二つめの子音は次の文字に使われます
+bb	っ	b
+cc	っ	c
+dd	っ	d
+ff	っ	f
+gg	っ	g
+hh	っ	h
+jj	っ	j
+kk	っ	k
+ll	っ	l
+mm	っ	m
+pp	っ	p
+qq	っ	q
+rr	っ	r
+ss	っ	s
+tt	っ	t
+vv	っ	v
+ww	っ	w
+xx	っ	x
+yy	っ	y
+zz	っ	z
+
+# 撥音: n に子音が続くと ん になり、その子音は次の文字に使われます
+nb	ん	b
+nc	ん	c
+nd	ん	d
+nf	ん	f
+ng	ん	g
+nh	ん	h
+nj	ん	j
+nk	ん	k
+nl	ん	l
+nm	ん	m
+np	ん	p
+nq	ん	q
+nr	ん	r
+ns	ん	s
+nt	ん	t
+nv	ん	v
+nw	ん	w
+nx	ん	x
+nz	ん	z

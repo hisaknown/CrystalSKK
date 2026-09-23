@@ -36,8 +36,9 @@ use crate::dict::{Learning, SharedSource};
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
 use crate::langbar::ModeIndicator;
+use crate::menu::Command;
 use crate::uielement::{self, Announced, ListSnapshot};
-use crate::{compartment, dict, edit, keys, langbar, log, preserved};
+use crate::{compartment, dialog, dict, edit, keys, langbar, log, preserved};
 
 /// 入力方式が入にされた直後の入力モード。
 ///
@@ -423,6 +424,53 @@ impl TextService {
         }
     }
 
+    /// トレイの品書きで選ばれたことをする。
+    ///
+    /// ファイルを触るのは辞書サーバで、こちらは頼むだけである。**結果は
+    /// 必ず言う。** 品書きから起こしたことは、黙って終わると効いたのか
+    /// どうか分からない。
+    fn on_menu(&self, command: Command) {
+        log::write(&format!("品書きから選ばれた: {command:?}"));
+        match command {
+            Command::OpenFolder => {
+                if let Err(problem) = dict::ask_to_do(&crystalskk_ipc::Request::OpenFolder) {
+                    dialog::complain(&problem);
+                }
+            }
+            Command::Reload => {
+                self.refresh_settings();
+                let problem = self.settings_problem.borrow().clone();
+                match problem {
+                    Some(problem) => dialog::complain(&problem),
+                    None => dialog::tell("設定を読み直しました。"),
+                }
+            }
+            Command::ResetSettings | Command::ResetRomaji => {
+                let (what, target) = match command {
+                    Command::ResetSettings => (
+                        "設定ファイル (config.toml)",
+                        crystalskk_ipc::Reset::Settings,
+                    ),
+                    _ => ("ローマ字テーブル", crystalskk_ipc::Reset::Romaji),
+                };
+                let asked = format!(
+                    "{what}を雛形で上書きします。\n\n\
+                     いまの中身は、同じフォルダに .bak を付けた名前で残します。"
+                );
+                if !dialog::confirm(&asked) {
+                    return;
+                }
+                match dict::ask_to_do(&crystalskk_ipc::Request::Reset(target)) {
+                    Ok(told) => {
+                        self.refresh_settings();
+                        dialog::tell(&told);
+                    }
+                    Err(problem) => dialog::complain(&problem),
+                }
+            }
+        }
+    }
+
     /// いま小窓に出すもの。出すものが無ければ `None`。
     ///
     /// 辞書登録を先に見る。登録中は候補の選択も入れ子で起きうるが、
@@ -551,6 +599,8 @@ impl TextService {
             return Ok(());
         };
         log::write("無効化された");
+        // 互いに持ち合っているので、ここで外さないと解放されない。
+        activation.indicator_object.clear_handler();
         if let Some(cookie) = activation.open_close_cookie {
             compartment::unadvise_open_close(&activation.thread_manager, cookie);
         }
@@ -599,6 +649,9 @@ impl TextService_Impl {
         // 言語バーの項目は、出せなくても入力そのものは続けられる。
         let indicator_object = ComObject::new(ModeIndicator::new());
         let indicator: ITfLangBarItem = indicator_object.to_interface();
+        // 品書きで選ばれたことを受け取る。無効化のときに外す。
+        let service = self.to_object();
+        indicator_object.set_handler(move |command| service.on_menu(command));
         if let Err(e) = langbar::add(&thread_manager, &indicator) {
             log::error(&format!("言語バーに項目を出せなかった: {}", e.message()));
         }

@@ -6,13 +6,14 @@
 //! 有効化そのものが起きていない。
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::TextServices::{
     GUID_LBI_INPUTMODE, ITfLangBarItem, ITfLangBarItem_Impl, ITfLangBarItemButton,
     ITfLangBarItemButton_Impl, ITfLangBarItemMgr, ITfLangBarItemSink, ITfMenu, ITfSource,
-    ITfSource_Impl, ITfThreadMgr, TF_LANGBARITEMINFO, TF_LBI_STYLE_BTN_BUTTON,
+    ITfSource_Impl, ITfThreadMgr, TF_LANGBARITEMINFO, TF_LBI_CLK_RIGHT, TF_LBI_STYLE_BTN_BUTTON,
     TF_LBI_STYLE_SHOWNINTRAY, TfLBIClick,
 };
 use windows::Win32::UI::WindowsAndMessaging::HICON;
@@ -24,6 +25,10 @@ use crate::guard::guard;
 use crate::guids::CLSID_CRYSTALSKK;
 use crate::icon;
 use crate::log;
+use crate::menu::{self, Command};
+
+/// 品書きで選ばれたことを受け取る先。
+type Handler = Rc<dyn Fn(Command)>;
 
 /// 入力方式が切のときに出す文字。
 ///
@@ -43,6 +48,11 @@ pub struct ModeIndicator {
     sinks: RefCell<Vec<(u32, ITfLangBarItemSink)>>,
     /// 次に配る受付番号。
     next_cookie: RefCell<u32>,
+    /// 品書きで選ばれたことを渡す先。有効化されている間だけ入る。
+    ///
+    /// 渡す先は TIP 本体で、本体もこの表示を持っている。**無効化のときに
+    /// 外さないと、互いに持ち合ったまま解放されない。**
+    handler: RefCell<Option<Handler>>,
 }
 
 impl std::fmt::Debug for ModeIndicator {
@@ -65,6 +75,28 @@ impl ModeIndicator {
             shown: RefCell::new(None),
             sinks: RefCell::new(Vec::new()),
             next_cookie: RefCell::new(1),
+            handler: RefCell::new(None),
+        }
+    }
+
+    /// 品書きで選ばれたことを渡す先を決める。
+    pub fn set_handler(&self, handler: impl Fn(Command) + 'static) {
+        *self.handler.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    /// 渡す先を外す。無効化のときに呼ぶ。
+    pub fn clear_handler(&self) {
+        self.handler.borrow_mut().take();
+    }
+
+    /// 選ばれたことを渡す。
+    fn dispatch(&self, command: Command) {
+        // 借用したまま呼ばない。呼んだ先で確かめの窓が出ている間に、
+        // もう一度ここへ来ることがある。
+        let handler = self.handler.borrow().clone();
+        match handler {
+            Some(handler) => handler(command),
+            None => log::error(&format!("品書きの {command:?} を渡す先がありません")),
         }
     }
 
@@ -170,17 +202,45 @@ impl ITfLangBarItem_Impl for ModeIndicator_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
-    /// 押されたときの動きはまだ決めていない。
-    fn OnClick(&self, _click: TfLBIClick, _pt: &POINT, _prcarea: *const RECT) -> Result<()> {
-        guard("OnClick", || Ok(()))
+    /// 右クリックされたら品書きを出す。
+    ///
+    /// トレイの入力モード表示は、右クリックを `OnClick` で伝えてくる。
+    /// 品書きを出すのはこちらの仕事である (CorvusSKK もそうしている)。
+    /// 左クリックはまだ何もしない。
+    #[allow(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "COM の呼び出し規約が引数の有効性を保証する"
+    )]
+    fn OnClick(&self, click: TfLBIClick, pt: &POINT, prcarea: *const RECT) -> Result<()> {
+        guard("OnClick", || {
+            if click != TF_LBI_CLK_RIGHT {
+                return Ok(());
+            }
+            // SAFETY: null でなければ、呼び出しの間は有効な領域である。
+            let area = (!prcarea.is_null()).then(|| unsafe { *prcarea });
+            if let Some(command) = menu::pop_up(*pt, area) {
+                self.this.dispatch(command);
+            }
+            Ok(())
+        })
     }
 
-    fn InitMenu(&self, _pmenu: Ref<ITfMenu>) -> Result<()> {
-        guard("InitMenu", || Ok(()))
+    /// 古い言語バーから品書きの中身を尋ねられた。
+    fn InitMenu(&self, pmenu: Ref<ITfMenu>) -> Result<()> {
+        guard("InitMenu", || match pmenu.as_ref() {
+            Some(menu) => menu::fill(menu),
+            None => Err(E_INVALIDARG.into()),
+        })
     }
 
-    fn OnMenuSelect(&self, _wid: u32) -> Result<()> {
-        guard("OnMenuSelect", || Ok(()))
+    /// 古い言語バーの品書きで選ばれた。
+    fn OnMenuSelect(&self, wid: u32) -> Result<()> {
+        guard("OnMenuSelect", || {
+            if let Some(command) = Command::from_id(wid) {
+                self.this.dispatch(command);
+            }
+            Ok(())
+        })
     }
 
     /// トレイに出す絵。

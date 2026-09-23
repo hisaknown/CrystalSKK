@@ -37,3 +37,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0018](0018-keep-the-markers-out-of-the-document.md) | 印は文書に出さない | Accepted | ADR-0017, PRD Q-09 |
 | [0019](0019-complete-the-heading-while-it-is-typed.md) | 打っている最中に見出し語の続きを補完する | Accepted | ADR-0001, ADR-0016, ADR-0017 |
 | [0020](0020-the-settings-file-is-the-whole-truth.md) | 設定ファイルに書かれていることを、効いている設定のすべてにする | Accepted | PRD F-14, ADR-0016, ADR-0019 |
+| [0021](0021-the-romaji-table-belongs-to-the-user.md) | ローマ字テーブルは利用者の持ち物として別のファイルに置き、書き換えない | Accepted | ADR-0020, PRD F-14, PRD §5.3 |
