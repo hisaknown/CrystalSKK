@@ -126,6 +126,10 @@ impl CandidateSource for UserDict {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         self.dict.lookup(query)
     }
+
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        CandidateSource::complete(&self.dict, prefix, limit)
+    }
 }
 
 #[cfg(test)]

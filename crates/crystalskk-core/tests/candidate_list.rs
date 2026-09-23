@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
-use crystalskk_core::engine::{PAGE_SIZE, SELECTION_KEYS, UNTIL_CANDIDATE_LIST};
+use crystalskk_core::engine::{PAGE_SIZE, Role, SELECTION_KEYS, UNTIL_CANDIDATE_LIST};
 use crystalskk_core::{Engine, Key};
 
 /// 候補をたくさん持つ試験用の辞書。
@@ -336,4 +336,106 @@ fn an_empty_but_reachable_dictionary_still_registers() {
         });
     }
     assert!(engine.registration().is_some(), "辞書に無いなら登録へ");
+}
+
+// --- 補完 --------------------------------------------------------------
+
+/// 前方一致を返す辞書。
+struct Completing(Vec<String>);
+
+impl CandidateSource for Completing {
+    fn lookup(&self, _query: &Query) -> Vec<Candidate> {
+        vec![Candidate::new("漢字")]
+    }
+
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|key| key.starts_with(prefix) && key.as_str() != prefix)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+}
+
+fn completing() -> Engine {
+    Engine::new(Box::new(Completing(vec![
+        "かんじ".to_owned(),
+        "かんじゃ".to_owned(),
+        "かんき".to_owned(),
+    ])))
+}
+
+/// 打鍵列を送り、未確定の表示を返す。
+fn typed(engine: &mut Engine, keys: &str) -> String {
+    for c in keys.chars() {
+        engine.press(match c {
+            ' ' => Key::Space,
+            '\t' => Key::Tab,
+            c => Key::Char(c),
+        });
+    }
+    engine.preedit().display()
+}
+
+#[test]
+fn a_guess_appears_once_there_is_enough_to_go_on() {
+    let mut engine = completing();
+    // 一文字では当てない。**「か」で始まる見出しは山ほどある。**
+    assert_eq!(typed(&mut engine, "Ka"), "▽か");
+    // 二文字目で当たる。`n` は一つでは確定しないので二度打つ。
+    assert_eq!(typed(&mut engine, "nn"), "▽かんじ");
+}
+
+#[test]
+fn the_guess_is_not_part_of_what_was_typed() {
+    let mut engine = completing();
+    typed(&mut engine, "Kann");
+    let preedit = engine.preedit();
+    let typed_text: String = preedit
+        .segments
+        .iter()
+        .filter(|s| s.role != Role::Completion)
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(typed_text, "▽かん", "当て推量は打った文字に含めない");
+}
+
+#[test]
+fn taking_the_guess_makes_it_typed() {
+    let mut engine = completing();
+    typed(&mut engine, "Kann.");
+    let preedit = engine.preedit();
+    assert!(
+        preedit.segments.iter().all(|s| s.role != Role::Completion),
+        "受け取れば当て推量ではなくなる"
+    );
+    assert_eq!(preedit.display(), "▽かんじ");
+}
+
+#[test]
+fn tab_walks_through_the_alternatives() {
+    let mut engine = completing();
+    assert_eq!(typed(&mut engine, "Kann\t"), "▽かんじ");
+    assert_eq!(typed(&mut engine, "\t"), "▽かんじゃ");
+    assert_eq!(typed(&mut engine, "\t"), "▽かんき");
+    // 端まで来たら先頭へ戻る。
+    assert_eq!(typed(&mut engine, "\t"), "▽かんじ");
+}
+
+#[test]
+fn a_period_is_just_a_period_when_nothing_is_offered() {
+    // 当て推量が出ていなければ奪わない。**見出し語に句点も打てる。**
+    let mut engine = Engine::new(Box::new(ManyDict::with_candidates(0)));
+    let preedit = typed(&mut engine, "Ka.");
+    assert!(preedit.ends_with('。'), "普通に句点になる: {preedit}");
+}
+
+#[test]
+fn converting_ignores_the_guess() {
+    // 受け取っていない当て推量は、変換の見出し語に入らない。
+    let mut engine = completing();
+    typed(&mut engine, "Kann ");
+    let view = engine.candidates().expect("変換している");
+    assert_eq!(view.candidates[0].word, "漢字");
 }

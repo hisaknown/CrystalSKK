@@ -102,6 +102,22 @@ impl CandidateSource for ServerSource {
         }
     }
 
+    /// 前方一致する見出しを返す。補完に使う。
+    ///
+    /// **当たらなくても騒がない。** 補完は当て推量で、出なければ出ないだけ
+    /// である。ここで繋がらないことを言い立てると、打鍵のたびに知らせが
+    /// 出ることになる。
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        let request = Request::Complete {
+            prefix: prefix.to_owned(),
+            limit,
+        };
+        match client::ask(&request) {
+            Ok(Response::Ok(found)) => found.into_iter().map(|c| c.word).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// いま引ける状態か。
     ///
     /// 直近の引き方が届いていれば引ける。**届かなかったことをエンジンへ
@@ -129,6 +145,10 @@ impl SharedSource {
 impl CandidateSource for SharedSource {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         self.0.lookup(query)
+    }
+
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        self.0.complete(prefix, limit)
     }
 
     fn available(&self) -> bool {

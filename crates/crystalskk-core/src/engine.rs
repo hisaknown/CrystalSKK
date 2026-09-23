@@ -43,6 +43,11 @@ impl Marker {
 pub enum Role {
     /// `▽` `▼` の印。状態を表す。
     Marker,
+    /// 補完の当て推量。**まだ打っていない文字である。**
+    ///
+    /// 受け取るまでは見出し語の一部ではない。変換すれば、ここは無かった
+    /// ことになる。
+    Completion,
     /// 見出し語と送り仮名の区切り (`*`)。
     ///
     /// 印とは別の役目である。**状態を表すのではなく、境を示す。** 片方だけ
@@ -100,6 +105,23 @@ impl Preedit {
 
 /// 見出し語と送り仮名の区切りに出す印。
 pub const OKURI_MARK: &str = "*";
+
+/// 出ている当て推量を受け取るキー。
+///
+/// **当て推量が出ているときだけ奪う。** 出ていなければ普通に `。` になる。
+/// 見出し語に句点を打つことはまず無いので、奪っても困らない。
+pub const COMPLETION_TAKE: char = '.';
+
+/// 補完を当て始める見出し語の長さ。
+///
+/// 一文字では当たらない。**「あ」で始まる見出しは山ほどあり、どれを出しても
+/// 邪魔にしかならない。**
+pub const COMPLETION_MIN: usize = 2;
+
+/// 一度に覚えておく補完の数。
+///
+/// 動的補完で出すのは先頭の一つきりだが、Tab はこの範囲を巡る。
+pub const COMPLETION_LIMIT: usize = 16;
 
 /// 候補一覧を出すまでの変換回数。
 ///
@@ -243,6 +265,8 @@ struct Composing {
     okuri: Option<Okuri>,
     /// abbrev (`/`) で始まった入力か。この間はローマ字変換を通さない。
     abbrev: bool,
+    /// いまの補完。引けていなければ `None`。
+    completion: Option<Completion>,
 }
 
 /// 送り仮名の入力状態。
@@ -252,6 +276,50 @@ struct Okuri {
     head: char,
     /// これまでに確定した送り仮名のかな。
     kana: String,
+}
+
+/// 見出し語の補完。
+///
+/// **土台は Tab の補完である。** 打った見出し語から前方一致で引き、Tab で
+/// 順に当てていく。
+///
+/// 動的補完はその上に乗っている。当てる前の先頭の一つを**まだ打っていない
+/// 文字**として見せ、`.` で受け取る。受け取ることは Tab を一度押すのと
+/// 同じで、仕掛けを別に持っていない。
+#[derive(Debug, Clone)]
+struct Completion {
+    /// 引いたときの見出し語。Tab を繰り返してもここから引き直さない。
+    prefix: String,
+    /// 前方一致した見出し。ソースが並べた順のまま。
+    entries: Vec<String>,
+    /// いま当てている位置。`None` なら、まだ当てていない。
+    chosen: Option<usize>,
+}
+
+impl Completion {
+    /// まだ当てていないときに見せる、打っていない部分。
+    ///
+    /// 当てたあとは何も見せない。**当ててしまえば、それは打った文字である。**
+    fn ghost(&self) -> Option<&str> {
+        if self.chosen.is_some() {
+            return None;
+        }
+        self.entries
+            .first()
+            .and_then(|entry| entry.strip_prefix(&self.prefix))
+            .filter(|rest| !rest.is_empty())
+    }
+
+    /// 次に当てる位置。端まで来たら先頭へ戻る。
+    fn next(&self) -> Option<usize> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        Some(match self.chosen {
+            None => 0,
+            Some(index) => (index + 1) % self.entries.len(),
+        })
+    }
 }
 
 /// 候補選択中の状態。
@@ -477,6 +545,7 @@ impl Engine {
             State::Selecting(s) => self.on_selecting(s, key, &mut out),
         }
         self.context.mode = self.mode;
+        self.refresh_completion();
 
         Response {
             handled: out.handled,
@@ -485,6 +554,63 @@ impl Engine {
             candidates: self.candidates(),
             events: out.events,
         }
+    }
+
+    /// 補完を引き直す。
+    ///
+    /// 見出し語が変わるたびに引く。**動的補完とはそういうものである** —
+    /// 打つたびに当て直さなければ、当て推量が古くなる。
+    ///
+    /// 当てたばかりのものは引き直さない。Tab で巡っている最中に引き直すと、
+    /// 巡る先がそのつど変わってしまう。
+    fn refresh_completion(&mut self) {
+        let State::Composing(comp) = &mut self.state else {
+            return;
+        };
+
+        // 送り仮名に入っていれば見出し語はもう決まっている。abbrev は
+        // かなではないので、かなの見出しを当てても仕方がない。
+        let eligible =
+            comp.okuri.is_none() && !comp.abbrev && comp.midashi.chars().count() >= COMPLETION_MIN;
+        if !eligible {
+            comp.completion = None;
+            return;
+        }
+
+        // 当てたものがそのまま残っているなら、そのまま巡らせる。
+        if let Some(completion) = &comp.completion
+            && let Some(index) = completion.chosen
+            && completion.entries.get(index) == Some(&comp.midashi)
+        {
+            return;
+        }
+
+        let prefix = comp.midashi.clone();
+        let entries = self.dict.complete(&prefix, COMPLETION_LIMIT);
+        let State::Composing(comp) = &mut self.state else {
+            return;
+        };
+        comp.completion = (!entries.is_empty()).then_some(Completion {
+            prefix,
+            entries,
+            chosen: None,
+        });
+    }
+
+    /// 補完を一つ当てる。当てられなければ `false`。
+    ///
+    /// Tab は次へ巡り、`.` は先頭を取る。**どちらも同じ操作で、押す前の
+    /// 状態が違うだけである。**
+    fn take_completion(&mut self, comp: &mut Composing) -> bool {
+        let Some(completion) = &mut comp.completion else {
+            return false;
+        };
+        let Some(index) = completion.next() else {
+            return false;
+        };
+        completion.chosen = Some(index);
+        comp.midashi = completion.entries[index].clone();
+        true
     }
 
     /// 現在の未確定表示。
@@ -518,6 +644,12 @@ impl Engine {
                     None => {
                         if let Some(last) = segments.last_mut() {
                             last.text.push_str(self.romaji.pending());
+                        }
+                        // まだ打っていない文字を、打った文字の後ろに見せる。
+                        if self.romaji.is_empty()
+                            && let Some(ghost) = c.completion.as_ref().and_then(Completion::ghost)
+                        {
+                            segments.push(Segment::new(Role::Completion, ghost));
                         }
                     }
                 }
@@ -793,6 +925,23 @@ impl Engine {
                 self.emit(&text, out);
                 self.state = State::Direct;
             }
+            // Tab は補完を順に当てる。土台はこちらで、動的補完はこの上に
+            // 乗っている。
+            Key::Tab => {
+                self.absorb_pending(&mut comp);
+                if !self.take_completion(&mut comp) {
+                    // 当てるものが無ければ、アプリに渡す。**何も起きない
+                    // キーを食べても仕方がない。**
+                    out.handled = false;
+                }
+                self.state = State::Composing(comp);
+            }
+            // 出ている当て推量を受け取る。押す前の状態が違うだけで、
+            // Tab と同じ操作である。
+            Key::Char(c) if c == COMPLETION_TAKE && shows_ghost(&comp) => {
+                self.take_completion(&mut comp);
+                self.state = State::Composing(comp);
+            }
             Key::Space => self.convert(comp),
             Key::Backspace => {
                 if self.romaji.backspace() {
@@ -863,7 +1012,7 @@ impl Engine {
                 self.romaji.clear();
                 self.state = State::Direct;
             }
-            Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => {
+            Key::Up | Key::Down | Key::Ctrl(_) => {
                 out.handled = false;
                 self.state = State::Composing(comp);
             }
@@ -1107,9 +1256,22 @@ fn would_handle_composing(comp: &Composing, key: Key) -> bool {
     match key {
         Key::Ctrl('g') | Key::Ctrl('j') => true,
         Key::Ctrl('q') => !comp.abbrev,
-        Key::Ctrl(_) | Key::Tab | Key::Up | Key::Down => false,
+        // 当てるものがあるときだけ受け取る。
+        Key::Tab => comp
+            .completion
+            .as_ref()
+            .is_some_and(|completion| completion.next().is_some()),
+        Key::Ctrl(_) | Key::Up | Key::Down => false,
         _ => true,
     }
+}
+
+/// 当て推量を見せている最中か。
+fn shows_ghost(comp: &Composing) -> bool {
+    comp.completion
+        .as_ref()
+        .and_then(Completion::ghost)
+        .is_some()
 }
 
 /// 候補選択中に受け取るキーか。[`Engine::would_handle`] の一部。

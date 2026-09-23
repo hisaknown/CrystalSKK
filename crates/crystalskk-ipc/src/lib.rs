@@ -47,6 +47,8 @@ const WITHIN_CANDIDATE: char = '\u{1e}';
 pub enum Request {
     /// 見出し語を引く。
     Search(Query),
+    /// 前方一致する見出しを引く。補完に使う。
+    Complete { prefix: String, limit: usize },
     /// 選ばれた候補を覚える。並び順の学習に使う。
     Learn { query: Query, word: String },
     /// 新しい語を登録する。
@@ -74,6 +76,7 @@ impl Request {
     pub fn encode(&self) -> String {
         match self {
             Self::Search(query) => format!("search{FIELD}{}", encode_query(query)),
+            Self::Complete { prefix, limit } => format!("complete{FIELD}{prefix}{FIELD}{limit}"),
             Self::Learn { query, word } => {
                 format!("learn{FIELD}{}{FIELD}{word}", encode_query(query))
             }
@@ -93,6 +96,10 @@ impl Request {
         let mut fields = line.split(FIELD);
         match fields.next()? {
             "search" => Some(Self::Search(decode_query(&mut fields)?)),
+            "complete" => Some(Self::Complete {
+                prefix: fields.next()?.to_owned(),
+                limit: fields.next()?.parse().ok()?,
+            }),
             "learn" => {
                 let query = decode_query(&mut fields)?;
                 Some(Self::Learn {
@@ -212,6 +219,14 @@ mod tests {
         });
         roundtrip(&Request::Save);
         roundtrip(&Request::Exit);
+    }
+
+    #[test]
+    fn a_completion_request_survives_a_round_trip() {
+        roundtrip(&Request::Complete {
+            prefix: "かん".to_owned(),
+            limit: 16,
+        });
     }
 
     #[test]

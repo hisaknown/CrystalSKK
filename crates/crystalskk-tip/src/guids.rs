@@ -27,6 +27,10 @@ pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID =
 pub const GUID_DISPLAY_ATTRIBUTE_CONVERTED: GUID =
     GUID::from_u128(0x9b6004e5_bb9b_4b85_9741_507b98ddd64d);
 
+/// 補完の当て推量に付ける表示属性。
+pub const GUID_DISPLAY_ATTRIBUTE_COMPLETION: GUID =
+    GUID::from_u128(0xe7a1c0d4_5b92_4e38_9c07_2a6f13b84d5e);
+
 /// 送り仮名に付ける表示属性。
 pub const GUID_DISPLAY_ATTRIBUTE_OKURI: GUID =
     GUID::from_u128(0x4c0e5b71_8d3a_4f26_a915_b0d27e63c8fa);

@@ -81,6 +81,17 @@ pub trait CandidateSource {
     /// 並び順の最終決定は [`Ranker`] が行うので、ここでは順位付けに悩まなくてよい。
     fn lookup(&self, query: &Query) -> Vec<Candidate>;
 
+    /// 前方一致する見出しを返す。補完に使う。
+    ///
+    /// 並びはソースに任せる。**使った語を先に出すのは、それを知っている
+    /// ソースの仕事**であって、ここで決めることではない。
+    ///
+    /// 補完を持たないソースは何も返さない。既定がそれである。
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        let _ = (prefix, limit);
+        Vec::new()
+    }
+
     /// いま引ける状態か。
     ///
     /// **「候補が無い」と「引けなかった」は別である。** 前者なら辞書登録へ
@@ -165,6 +176,22 @@ impl CandidateSource for ChainedSource {
             for candidate in source.lookup(query) {
                 if !out.iter().any(|c| c.word == candidate.word) {
                     out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+
+    /// 前の辞書から順に集める。**並べた順がそのまま出る順になる。**
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for source in &self.sources {
+            for key in source.complete(prefix, limit) {
+                if out.len() >= limit {
+                    return out;
+                }
+                if !out.contains(&key) {
+                    out.push(key);
                 }
             }
         }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, ChainedSource, Query};
-use crystalskk_core::engine::{CandidateView, Event};
+use crystalskk_core::engine::{CandidateView, Event, Role};
 use crystalskk_core::{Engine, InputMode, Key};
 use crystalskk_dict::{MemoryDict, UserDict, encoding};
 
@@ -184,8 +184,19 @@ impl Session {
     }
 
     /// 印を含めた未確定表示。
+    ///
+    /// 補完の当て推量は角括弧で囲む。**ターミナルに下線を引けない**ので、
+    /// 打った文字との違いを文字で示すしかない。TIP は線の有無で示す。
     pub fn preedit(&self) -> String {
-        self.engine.preedit().display()
+        self.engine
+            .preedit()
+            .segments
+            .iter()
+            .map(|segment| match segment.role {
+                Role::Completion => format!("[{}]", segment.text),
+                _ => segment.text.clone(),
+            })
+            .collect()
     }
 
     /// 辞書登録中なら、登録しようとしている見出し。

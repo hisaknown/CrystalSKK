@@ -7,7 +7,7 @@
 //! ここには Windows が出てこない。パイプの向こうから来た一行をどう
 //! 解釈するか、それだけを担う。**運び方と、答え方を分けてある。**
 
-use crystalskk_core::dict::{CandidateSource, Query};
+use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_dict::{MemoryDict, UserDict};
 use crystalskk_ipc::{Request, Response};
 
@@ -38,6 +38,9 @@ impl Service {
     pub fn handle(&mut self, request: Request) -> (Response, Next) {
         match request {
             Request::Search(query) => (Response::Ok(self.search(&query)), Next::Listen),
+            Request::Complete { prefix, limit } => {
+                (Response::Ok(self.complete(&prefix, limit)), Next::Listen)
+            }
             Request::Learn { query, word } => {
                 self.user.learn(&query, &word);
                 (Response::Ok(Vec::new()), Next::Listen)
@@ -58,7 +61,7 @@ impl Service {
     ///
     /// 順番がそのまま候補の並びになる。**一度選んだ語が先に出る**のは
     /// この順番による。
-    fn search(&self, query: &Query) -> Vec<crystalskk_core::dict::Candidate> {
+    fn search(&self, query: &Query) -> Vec<Candidate> {
         let mut candidates = self.user.dict().lookup(query);
         for candidate in self.system.lookup(query) {
             if !candidates.iter().any(|seen| seen.word == candidate.word) {
@@ -66,6 +69,34 @@ impl Service {
             }
         }
         candidates
+    }
+
+    /// 前方一致する見出しを返す。
+    ///
+    /// **ユーザー辞書を先に、静的辞書を後に。** 前者は使った順、後者は
+    /// 辞書順である。「かん」で静的辞書を引けば「かんあけ」から並ぶが、
+    /// 直前に使った「かんじ」のほうが要る見込みが高い。
+    ///
+    /// 見出しを候補として返す。補完が返すのは**引くための見出し**であって、
+    /// 変換の結果ではない。
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<Candidate> {
+        let mut found: Vec<String> = self
+            .user
+            .dict()
+            .complete_recent(prefix, limit)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+
+        for key in self.system.complete(prefix, limit) {
+            if found.len() >= limit {
+                break;
+            }
+            if !found.iter().any(|seen| seen == key) {
+                found.push(key.to_owned());
+            }
+        }
+        found.into_iter().map(Candidate::new).collect()
     }
 
     /// 書き出す。変更が無ければ [`UserDict::save`] が何もしない。
@@ -80,7 +111,6 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crystalskk_core::dict::Candidate;
 
     /// 試験用。ユーザー辞書は一時の場所に置き、書き出しても実害が出ない
     /// ようにする。
@@ -160,6 +190,48 @@ mod tests {
 
         let (response, _) = service.handle(Request::Search(query));
         assert_eq!(words(&response), vec!["漢字", "感じ"], "重ねて出さない");
+    }
+
+    #[test]
+    fn completion_puts_what_was_used_before_the_rest() {
+        // **使った語が先に出る。** 辞書順に並べても、要る語が先に来る
+        // 保証はない。
+        let mut service = service_with("かんじ /漢字/\nかんじゃ /患者/\nかんき /寒気/\n");
+        service.handle(Request::Learn {
+            query: Query::okuri_nashi("かんじゃ"),
+            word: "患者".to_owned(),
+        });
+
+        let (response, _) = service.handle(Request::Complete {
+            prefix: "かん".to_owned(),
+            limit: 16,
+        });
+        assert_eq!(words(&response), vec!["かんじゃ", "かんき", "かんじ"]);
+    }
+
+    #[test]
+    fn completion_does_not_repeat_a_heading() {
+        let mut service = service_with("かんじ /漢字/\n");
+        service.handle(Request::Learn {
+            query: Query::okuri_nashi("かんじ"),
+            word: "漢字".to_owned(),
+        });
+
+        let (response, _) = service.handle(Request::Complete {
+            prefix: "かん".to_owned(),
+            limit: 16,
+        });
+        assert_eq!(words(&response), vec!["かんじ"], "両方に居ても一度だけ");
+    }
+
+    #[test]
+    fn completion_never_offers_what_is_already_typed() {
+        let mut service = service_with("かんじ /漢字/\n");
+        let (response, _) = service.handle(Request::Complete {
+            prefix: "かんじ".to_owned(),
+            limit: 16,
+        });
+        assert!(words(&response).is_empty(), "打ち終えた見出しは出さない");
     }
 
     #[test]

@@ -269,6 +269,26 @@ impl CandidateSource for MemoryDict {
             .map(<[Candidate]>::to_vec)
             .unwrap_or_default()
     }
+
+    /// 使った順を先に、辞書順を後に。
+    ///
+    /// 使った覚えのある見出しのほうが、また要る見込みが高い。
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        let mut found: Vec<String> = self
+            .complete_recent(prefix, limit)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for key in self.complete(prefix, limit) {
+            if found.len() >= limit {
+                break;
+            }
+            if !found.iter().any(|seen| seen == key) {
+                found.push(key.to_owned());
+            }
+        }
+        found
+    }
 }
 
 /// 区画を切り替える注釈行なら、それが送りありの区画かを返す。

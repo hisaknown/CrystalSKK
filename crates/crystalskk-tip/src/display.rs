@@ -61,7 +61,7 @@
 use windows::Win32::UI::TextServices::{
     IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
     ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT, TF_ATTR_TARGET_CONVERTED, TF_DA_COLOR,
-    TF_DISPLAYATTRIBUTE, TF_LS_DASH, TF_LS_DOT, TF_LS_SOLID,
+    TF_DISPLAYATTRIBUTE, TF_LS_DASH, TF_LS_DOT, TF_LS_NONE, TF_LS_SOLID,
 };
 use windows::core::{BSTR, ComObject, GUID, Result, implement};
 
@@ -69,7 +69,8 @@ use crystalskk_core::engine::{Role, Segment};
 
 use crate::guard::guard;
 use crate::guids::{
-    GUID_DISPLAY_ATTRIBUTE_CONVERTED, GUID_DISPLAY_ATTRIBUTE_INPUT, GUID_DISPLAY_ATTRIBUTE_OKURI,
+    GUID_DISPLAY_ATTRIBUTE_COMPLETION, GUID_DISPLAY_ATTRIBUTE_CONVERTED,
+    GUID_DISPLAY_ATTRIBUTE_INPUT, GUID_DISPLAY_ATTRIBUTE_OKURI,
 };
 
 /// 未確定の区切りに与える見え方。
@@ -121,8 +122,23 @@ pub const CONVERTED: Attribute = Attribute {
     kind: TF_ATTR_TARGET_CONVERTED.0,
 };
 
+/// 補完の当て推量。**線を引かない。**
+///
+/// 下線は打った文字のところで終わる。その先に線が無ければ、**まだ自分の
+/// 文字ではない**と見て分かる。
+///
+/// 色を使えれば薄く出すところだが、色は決めない方針なので (暗い配色を
+/// 追いかけることになる)、線の有無で示す。
+pub const COMPLETION: Attribute = Attribute {
+    guid: GUID_DISPLAY_ATTRIBUTE_COMPLETION,
+    description: "CrystalSKK: 補完",
+    line: TF_LS_NONE.0,
+    bold: false,
+    kind: TF_ATTR_INPUT.0,
+};
+
 /// 名乗るものすべて。
-pub const ALL: &[Attribute] = &[INPUT, OKURI, CONVERTED];
+pub const ALL: &[Attribute] = &[INPUT, OKURI, CONVERTED, COMPLETION];
 
 /// 区切りの役目に対する見え方。
 ///
@@ -132,6 +148,7 @@ pub fn for_role(role: Role) -> Attribute {
     match role {
         Role::Midashi => INPUT,
         Role::Okuri => OKURI,
+        Role::Completion => COMPLETION,
         // 単独で渡されたときは変換中として扱う。続く部分があれば、
         // そちらに合わせて上書きされる。
         Role::Candidate | Role::Marker | Role::Separator => CONVERTED,
@@ -203,6 +220,7 @@ pub struct Atoms {
     input: u32,
     okuri: u32,
     converted: u32,
+    completion: u32,
 }
 
 impl Atoms {
@@ -222,6 +240,7 @@ impl Atoms {
                 input: categories.RegisterGUID(&INPUT.guid)?,
                 okuri: categories.RegisterGUID(&OKURI.guid)?,
                 converted: categories.RegisterGUID(&CONVERTED.guid)?,
+                completion: categories.RegisterGUID(&COMPLETION.guid)?,
             })
         }
     }
@@ -231,6 +250,7 @@ impl Atoms {
         match for_role(role).guid {
             g if g == INPUT.guid => self.input,
             g if g == OKURI.guid => self.okuri,
+            g if g == COMPLETION.guid => self.completion,
             _ => self.converted,
         }
     }
@@ -311,17 +331,21 @@ mod tests {
     }
 
     #[test]
-    fn every_part_gets_a_line_of_its_own() {
+    fn every_part_the_user_typed_gets_a_line() {
         // **アプリが塗ってくれることを当てにしない。** 一度それで、候補に
         // 何も引かれない状態になった。
-        for attribute in ALL {
-            assert_ne!(
-                attribute.line,
-                windows::Win32::UI::TextServices::TF_LS_NONE.0,
-                "{}",
-                attribute.description
-            );
+        //
+        // 補完の当て推量だけは別で、線が無いことが「まだ打っていない」の
+        // 印になる。
+        for attribute in ALL.iter().filter(|a| a.guid != COMPLETION.guid) {
+            assert_ne!(attribute.line, TF_LS_NONE.0, "{}", attribute.description);
         }
+    }
+
+    #[test]
+    fn the_guess_has_no_line_under_it() {
+        // 下線が打った文字のところで終わる。その先は自分の文字ではない。
+        assert_eq!(COMPLETION.line, TF_LS_NONE.0);
     }
 
     #[test]
@@ -411,6 +435,7 @@ mod tests {
             input: 1,
             okuri: 2,
             converted: 3,
+            completion: 4,
         };
         let written = document_segments(
             &[segment(Role::Separator, "*"), segment(Role::Okuri, "り")],
@@ -434,6 +459,7 @@ mod tests {
             Role::Midashi,
             Role::Okuri,
             Role::Candidate,
+            Role::Completion,
         ] {
             let attribute = for_role(role);
             assert!(ALL.contains(&attribute), "{role:?}");
