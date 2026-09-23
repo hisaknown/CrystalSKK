@@ -20,17 +20,25 @@
 //! 何も引かれない状態になった。自分で引いたうえで `bAttr` でも伝える —
 //! **アプリの善意を当てにしない。**
 //!
-//! # 太さで段階を示す
+//! # 太さで段階を示し、模様で境を示す
 //!
 //! | 部分 | 線 |
 //! |---|---|
 //! | 見出し語 | 点線 |
-//! | 送り仮名 | 細い実線 |
+//! | 送り仮名 | 破線 |
 //! | 候補 | **太い実線** |
 //!
 //! 「まだ打っている → 決まった → 選んでいる」が、そのまま線の強さになる。
-//! **注目しているところが太い**のは既存の日本語入力と同じ約束で、線種の
-//! 違いより確実に目に入る。
+//! **注目しているところが太い**のは既存の日本語入力と同じ約束である。
+//!
+//! ただし太さだけでは、隣り合ったときの境が見えない。`▼送り` は候補と
+//! 送り仮名が地続きなので、実線同士だと**一本の線に見える**。線と線の間に
+//! 隙間は空けられない — 渡せるのは種類・太さ・色だけで、**描くのはアプリ**
+//! である。
+//!
+//! そこで送り仮名は模様を変える。太い実線と破線なら、繋がっていても境が
+//! 分かる。見出し語との境は `*` が受け持つので、点線と破線の差が細かくても
+//! 困らない。
 //!
 //! 波線は使わない。綴り間違いの印として定着しているので、入力中の文字に
 //! 使うと「間違っている」と読まれる。
@@ -38,7 +46,7 @@
 use windows::Win32::UI::TextServices::{
     IEnumTfDisplayAttributeInfo, IEnumTfDisplayAttributeInfo_Impl, ITfDisplayAttributeInfo,
     ITfDisplayAttributeInfo_Impl, TF_ATTR_INPUT, TF_ATTR_TARGET_CONVERTED, TF_DA_COLOR,
-    TF_DISPLAYATTRIBUTE, TF_LS_DOT, TF_LS_SOLID,
+    TF_DISPLAYATTRIBUTE, TF_LS_DASH, TF_LS_DOT, TF_LS_SOLID,
 };
 use windows::core::{BSTR, ComObject, GUID, Result, implement};
 
@@ -73,11 +81,15 @@ pub const INPUT: Attribute = Attribute {
     kind: TF_ATTR_INPUT.0,
 };
 
-/// 送り仮名。決まっているので実線。
+/// 送り仮名。決まっているので細い線。
+///
+/// **模様を候補と変えてある。** 実線にすると、`▼送り` で候補の太い実線と
+/// 地続きになり、一本の線に見える。線の間に隙間は空けられないので、
+/// 境は模様で示すしかない。
 pub const OKURI: Attribute = Attribute {
     guid: GUID_DISPLAY_ATTRIBUTE_OKURI,
     description: "CrystalSKK: 送り仮名",
-    line: TF_LS_SOLID.0,
+    line: TF_LS_DASH.0,
     bold: false,
     kind: TF_ATTR_INPUT.0,
 };
@@ -272,6 +284,13 @@ mod tests {
     fn the_okuri_looks_settled_and_the_midashi_does_not() {
         // 打っている最中と、決まっているところを見分けられるようにする。
         assert_ne!(INPUT.line, OKURI.line);
+    }
+
+    #[test]
+    fn the_candidate_and_the_okuri_do_not_blur_into_one_line() {
+        // `▼送り` では候補と送り仮名が地続きになる。**線の間に隙間は
+        // 空けられない**ので、模様が同じだと一本に見える。
+        assert_ne!(CONVERTED.line, OKURI.line, "隣り合う二つは模様を変える");
     }
 
     #[test]
