@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 *.pdb
+
+# CLI で試すために手元に落とした辞書。辞書は同梱しない (PRD)。
+/SKK-JISYO.*
+/*.dict
