@@ -29,6 +29,7 @@ CrystalSKK がそれらと違うところは次の3点。
 | `crystalskk-settings` | 設定ファイルの読み込みと、足りない項目の書き足し | 着手 |
 | `crystalskk-tip` | TSF TIP (cdylib) | 着手 |
 | `crystalskk-setup` | この環境への導入と削除 | 着手 |
+| `crystalskk-art` | アイコンの SVG を描いて埋め込む (ビルドのときだけ使う) | 着手 |
 | `crystalskk-config` | 設定 GUI | 未着手 |
 
 ## 開発

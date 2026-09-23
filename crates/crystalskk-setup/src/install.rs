@@ -77,9 +77,6 @@ pub const DLL_NAME: &str = "crystalskk_tip.dll";
 /// 設定画面に出す絵の名前。
 pub const ICON_NAME: &str = "crystalskk.ico";
 
-/// 設定画面に出す絵の大きさ。
-const ICON_SIZE: i32 = 32;
-
 /// 導入する。
 ///
 /// `source` の DLL を置き場所へ写してから登録する。すでに同じ場所へ
@@ -186,9 +183,9 @@ pub fn install(source: &Path) -> io::Result<Installed> {
 ///
 /// 絵が無くても入力はできる。ここで失敗しても導入は続ける。
 fn write_icon(directory: &Path) -> Option<PathBuf> {
-    let bytes = icon::ico_bytes("あ", ICON_SIZE)?;
+    // 顔の絵は SVG からビルドのときに描いてある (ADR-0024)。
     let path = directory.join(ICON_NAME);
-    std::fs::write(&path, bytes).ok()?;
+    std::fs::write(&path, icon::FACE_ICO).ok()?;
     Some(path)
 }
 

@@ -270,7 +270,7 @@ impl ITfLangBarItemButton_Impl for ModeIndicator_Impl {
     /// そのため。拡大率が変わっても追随できる利点もある。
     fn GetIcon(&self) -> Result<HICON> {
         guard("GetIcon", || {
-            icon::render(self.this.label(), self.this.theme.get().ink())
+            icon::render(*self.this.shown.borrow(), self.this.theme.get().ink())
         })
     }
 

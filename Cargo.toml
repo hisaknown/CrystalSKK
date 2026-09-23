@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/crystalskk-art",
     "crates/crystalskk-core",
     "crates/crystalskk-dict",
     "crates/crystalskk-ipc",
