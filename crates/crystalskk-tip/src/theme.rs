@@ -11,11 +11,16 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    RegisterClassExW, SetWindowLongPtrW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
-    WM_SETTINGCHANGE, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    RegisterClassExW, SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowLongPtrW,
+    SystemParametersInfoW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_SETTINGCHANGE,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -35,25 +40,15 @@ impl Theme {
     /// 読めなければ暗いほうとする。Windows 10 の 1903 からの既定がそれで、
     /// 値が無いのはそれより古いときである (そのころのタスクバーも暗い)。
     pub fn current() -> Self {
-        let mut value: u32 = 0;
-        let mut size = u32::try_from(size_of::<u32>()).unwrap_or(4);
-        // SAFETY: 書き込み先はこの関数の変数で、大きさも渡している。
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-                w!("SystemUsesLightTheme"),
-                RRF_RT_REG_DWORD,
-                None,
-                Some((&raw mut value).cast()),
-                Some(&raw mut size),
-            )
-        };
-        if status.is_ok() && value != 0 {
-            Self::Light
-        } else {
-            Self::Dark
-        }
+        read(w!("SystemUsesLightTheme"), Self::Dark)
+    }
+
+    /// いまのアプリの明るさ。カーソルのそばに出す窓は、こちらに合わせる。
+    ///
+    /// 窓が載るのはタスクバーではなくアプリの上である。二つは別々に選べる。
+    /// 読めなければ明るいほうとする (アプリの既定)。
+    pub fn apps() -> Self {
+        read(w!("AppsUseLightTheme"), Self::Light)
     }
 
     /// 絵を描く色。`0xRRGGBB`。
@@ -66,6 +61,94 @@ impl Theme {
             Self::Dark => 0xFF_FF_FF,
         }
     }
+}
+
+/// `Personalize` の下の明暗の値を読む。1 なら明るい。
+fn read(name: PCWSTR, fallback: Theme) -> Theme {
+    let mut value: u32 = 0;
+    let mut size = u32::try_from(size_of::<u32>()).unwrap_or(4);
+    // SAFETY: 書き込み先はこの関数の変数で、大きさも渡している。
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut value).cast()),
+            Some(&raw mut size),
+        )
+    };
+    match (status.is_ok(), value) {
+        (false, _) => fallback,
+        (true, 0) => Theme::Dark,
+        (true, _) => Theme::Light,
+    }
+}
+
+/// アプリの上に出す小窓の色。どれも `0xRRGGBB`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    pub background: u32,
+    pub text: u32,
+    pub border: u32,
+}
+
+impl Palette {
+    /// いまの明るさに合わせた色。
+    ///
+    /// - **ハイコントラストなら、システムの色に従う。** 利用者が選んだ配色を
+    ///   上書きしてはならない。
+    /// - 明るいなら、システムの色 (窓の地、文字、強調)。
+    /// - 暗いなら、黒い地に白い文字。**Win32 のシステムの色はダーク
+    ///   モードにしても白いまま**なので、こちらで決める。
+    pub fn current() -> Self {
+        if high_contrast() || Theme::apps() == Theme::Light {
+            return Self::system();
+        }
+        Self {
+            background: DARK_BACKGROUND,
+            text: 0xFF_FF_FF,
+            border: system(COLOR_HIGHLIGHT),
+        }
+    }
+
+    fn system() -> Self {
+        Self {
+            background: system(COLOR_WINDOW),
+            text: system(COLOR_WINDOWTEXT),
+            border: system(COLOR_HIGHLIGHT),
+        }
+    }
+}
+
+/// 暗いときの地の色。Windows 11 の暗い小窓 (メニューやツールチップ) に近い。
+const DARK_BACKGROUND: u32 = 0x2B_2B_2B;
+
+/// システムの色を `0xRRGGBB` で。
+fn system(index: SYS_COLOR_INDEX) -> u32 {
+    // SAFETY: 番号を渡して色を受け取るだけ。
+    let c = unsafe { GetSysColor(index) };
+    ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+
+/// ハイコントラストの配色が選ばれているか。
+fn high_contrast() -> bool {
+    let mut info = HIGHCONTRASTW {
+        cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
+        ..Default::default()
+    };
+    // SAFETY: 大きさを告げた構造体へ書かせる。
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            info.cbSize,
+            Some(std::ptr::from_mut::<HIGHCONTRASTW>(&mut info).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_ok();
+    ok && info.dwFlags.contains(HCF_HIGHCONTRASTON)
 }
 
 /// 見出しの変化を聞き、変わったら知らせる。
@@ -248,5 +331,18 @@ mod tests {
     fn the_theme_can_be_read() {
         // どちらになるかは機械次第。読めて、落ちないこと。
         let _ = Theme::current();
+        let _ = Theme::apps();
+        let _ = Palette::current();
+    }
+
+    #[test]
+    fn a_dark_popup_is_light_on_dark() {
+        let dark = Palette {
+            background: DARK_BACKGROUND,
+            text: 0xFF_FF_FF,
+            border: 0,
+        };
+        // 地より文字のほうが十分明るい。
+        assert!(dark.text > dark.background + 0x80_80_80);
     }
 }

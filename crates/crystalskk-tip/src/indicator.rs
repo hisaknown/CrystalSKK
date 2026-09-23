@@ -5,8 +5,8 @@
 //! - カーソル (選択範囲) の真下に出す。下に入らなければ上へ回す。
 //! - 決めた時間が経ったら消える。打鍵があったときや、入力先が変わった
 //!   ときも消す。
-//! - 絵はトレイと同じ入力モードの絵。色は候補の窓と同じくシステムの色に
-//!   従う (地は窓の色、絵は文字の色)。
+//! - 絵はトレイと同じ入力モードの絵。色はアプリの明るさに合わせる
+//!   ([`crate::theme::Palette`])。暗ければ黒い地に白い絵。
 //! - **焦点を奪わず、クリックも受けない。** 一瞬出るだけの窓に、打鍵や
 //!   クリックを取られてはならない。
 
@@ -15,9 +15,8 @@ use std::cell::{Cell, RefCell};
 use crystalskk_core::InputMode;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_HIGHLIGHT, COLOR_WINDOW,
-    COLOR_WINDOWTEXT, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
@@ -29,15 +28,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
-use crate::candwin::{scaled, system_color};
+use crate::candwin::scaled;
 use crate::guard::guard;
+use crate::theme::Palette;
 use crate::{icon, log};
 
 /// 絵の大きさ。100% のときの画素数。拡大率に合わせて伸ばす。
-const GLYPH: i32 = 24;
+///
+/// トレイと同じ 16 画素にする。**打っている文字より目立っては困る。**
+const GLYPH: i32 = 16;
 
 /// 絵のまわりの余白。
-const PADDING: i32 = 4;
+const PADDING: i32 = 2;
 
 /// カーソルとのあいだ。
 const GAP: i32 = 2;
@@ -215,11 +217,13 @@ fn work_area(caret: RECT) -> RECT {
     }
 }
 
-/// 描く。地は窓の色、縁は強調の色、絵は文字の色。
-fn pixels(mode: Option<InputMode>, side: i32) -> Vec<u32> {
-    let background = to_pixel(system_color(COLOR_WINDOW.0));
-    let border = to_pixel(system_color(COLOR_HIGHLIGHT.0));
-    let ink = to_pixel(system_color(COLOR_WINDOWTEXT.0));
+/// 描く。地、縁、絵の色は `palette` に従う。
+fn pixels(mode: Option<InputMode>, side: i32, palette: Palette) -> Vec<u32> {
+    let Palette {
+        background,
+        text: ink,
+        border,
+    } = palette;
 
     let side_u = side.max(0) as usize;
     let mut out = vec![background; side_u * side_u];
@@ -247,12 +251,6 @@ fn pixels(mode: Option<InputMode>, side: i32) -> Vec<u32> {
         }
     }
     out
-}
-
-/// `COLORREF` (`0x00BBGGRR`) を画素 (`0x00RRGGBB`) にする。
-fn to_pixel(color: COLORREF) -> u32 {
-    let c = color.0;
-    ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
 }
 
 /// 上に `alpha` の濃さで重ねる。
@@ -320,7 +318,7 @@ unsafe extern "system" fn window_proc(
                         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ModeWindow).as_ref();
                     if let Some(mode) = owner.and_then(|o| o.shown.get()) {
                         let side = scaled(GLYPH) + scaled(PADDING) * 2;
-                        let drawn = pixels(mode, side);
+                        let drawn = pixels(mode, side, Palette::current());
                         let info = BITMAPINFO {
                             bmiHeader: BITMAPINFOHEADER {
                                 biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
@@ -407,23 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn colours_are_turned_into_pixels() {
-        assert_eq!(to_pixel(COLORREF(0x00_33_22_11)), 0x00_11_22_33);
+    fn colours_are_blended() {
         assert_eq!(blend(0xFF_FF_FF, 0x00_00_00, 255), 0xFF_FF_FF);
         assert_eq!(blend(0xFF_FF_FF, 0x00_00_00, 0), 0x00_00_00);
     }
 
     #[test]
-    fn the_glyph_is_drawn_inside_the_border() {
-        let side = 32;
-        let drawn = pixels(Some(InputMode::Hiragana), side);
+    fn the_glyph_is_drawn_in_the_palette_inside_the_border() {
+        let palette = Palette {
+            background: 0x2B_2B_2B,
+            text: 0xFF_FF_FF,
+            border: 0x00_78_D4,
+        };
+        let side = 20;
+        let drawn = pixels(Some(InputMode::Hiragana), side, palette);
         assert_eq!(drawn.len(), (side * side) as usize);
-        let border = to_pixel(system_color(COLOR_HIGHLIGHT.0));
-        assert_eq!(drawn[0], border, "縁");
-        let background = to_pixel(system_color(COLOR_WINDOW.0));
-        assert!(
-            drawn.iter().any(|p| *p != background && *p != border),
-            "絵がある"
-        );
+        assert_eq!(drawn[0], palette.border, "縁");
+        assert_eq!(drawn[(side + 2) as usize], palette.background, "地");
+        assert!(drawn.contains(&palette.text), "絵は文字の色で描かれる");
     }
 }
