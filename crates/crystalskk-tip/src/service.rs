@@ -335,6 +335,13 @@ impl TextService {
             return;
         }
 
+        // 組版の変化を聞く (ADR-0028)。**位置がまだ取れていなくても聞く。**
+        // Firefox は組版を聞く相手がいると、組み終えるまで位置を答えず、
+        // 組み終えてから知らせてくる。知らせが来たら、そこで窓を出す。
+        let context = self.composition.borrow().as_ref().map(|(c, _)| c.clone());
+        if let Some(context) = context {
+            self.watch_layout(&context);
+        }
         let Some(anchor) = *self.anchor.borrow() else {
             log::trace("出す場所が分からないので小窓を出さない");
             self.candidates.hide();
@@ -342,10 +349,6 @@ impl TextService {
         };
         self.candidates
             .show(&content, anchor, *self.owner.borrow(), self.palette());
-        let context = self.composition.borrow().as_ref().map(|(c, _)| c.clone());
-        if let Some(context) = context {
-            self.watch_layout(&context);
-        }
     }
 
     /// `context` の組版の変化を聞く。すでに聞いていれば何もしない。
@@ -1132,12 +1135,6 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
             let Some(client_id) = self.this.client_id() else {
                 return Ok(());
             };
-            let candidates = self.this.candidates.is_visible();
-            let mode = self.this.mode_window.is_visible();
-            if !candidates && !mode {
-                self.this.unwatch_layout();
-                return Ok(());
-            }
             let composition = self
                 .this
                 .composition
@@ -1145,11 +1142,23 @@ impl ITfTextLayoutSink_Impl for TextService_Impl {
                 .as_ref()
                 .filter(|(c, _)| c == context)
                 .map(|(_, c)| c.clone());
-            if candidates && let Some(composition) = composition {
+            let mode = self.this.mode_window.is_visible();
+            if composition.is_none() && !mode {
+                self.this.unwatch_layout();
+                return Ok(());
+            }
+            // 未確定の文字列があれば、位置を尋ね直して窓を合わせ直す。
+            // **窓が出ていなくても尋ねる。** 打鍵のときに位置が取れず、
+            // 出せていなかった窓を、ここで出す。
+            if let Some(composition) = composition {
                 let service = self.to_object();
                 edit::composition_extent(context, client_id, composition, move |rect| {
-                    *service.anchor.borrow_mut() = Some(rect);
-                    service.candidates.follow(rect);
+                    if service.candidates.is_visible() {
+                        *service.anchor.borrow_mut() = Some(rect);
+                        service.candidates.follow(rect);
+                    } else {
+                        service.show_window(Some(rect), None);
+                    }
                 });
             }
             if mode {
