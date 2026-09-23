@@ -37,6 +37,17 @@ pub fn user_dictionary() -> io::Result<PathBuf> {
     Ok(data_dir()?.join(USER_DICTIONARY_NAME))
 }
 
+/// 設定ファイルの置き場所。
+///
+/// 辞書と並べる。**利用者が開いて書き換えるファイル**なので、探しやすい
+/// 場所にまとめておく。
+pub fn settings() -> io::Result<PathBuf> {
+    Ok(data_dir()?.join(SETTINGS_NAME))
+}
+
+/// 設定ファイルの名前。
+pub const SETTINGS_NAME: &str = "config.toml";
+
 /// 静的辞書の名前。取得元が何であれこの名前で置く。
 pub const SYSTEM_DICTIONARY_NAME: &str = "SKK-JISYO.L";
 

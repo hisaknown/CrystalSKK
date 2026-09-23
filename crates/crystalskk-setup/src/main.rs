@@ -26,6 +26,7 @@ mod elevate;
 mod install;
 mod report;
 mod server;
+mod settings;
 
 use report::Report;
 
@@ -59,6 +60,11 @@ fn run(arguments: Vec<String>) -> ExitCode {
     // ここは必ずログオンしている本人として動く。消すならここである。
     if matches!(parsed.command, Command::Install | Command::Uninstall) {
         clear_per_user_registration();
+    }
+    // 設定ファイルも利用者ごとの場所にある。同じ理由で、昇格する前に。
+    // 昇格して呼び直された側 (報告の置き場所を渡されている) ではやらない。
+    if parsed.command == Command::Install && parsed.report.is_none() {
+        settings::prepare();
     }
 
     // 権限が要る操作。足りなければ昇格して同じことをやり直す。

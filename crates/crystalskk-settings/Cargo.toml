@@ -1,0 +1,15 @@
+[package]
+name = "crystalskk-settings"
+description = "Read the CrystalSKK settings file, filling in what it lacks."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crystalskk-core = { path = "../crystalskk-core" }
+toml_edit = "0.25.15"
+
+[lints]
+workspace = true

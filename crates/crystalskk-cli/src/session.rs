@@ -12,6 +12,7 @@ use crystalskk_core::dict::{Candidate, CandidateSource, ChainedSource, Query};
 use crystalskk_core::engine::{CandidateView, CompletionView, Event, Role};
 use crystalskk_core::{Engine, InputMode, Key};
 use crystalskk_dict::{MemoryDict, UserDict, encoding};
+use crystalskk_settings::Settings;
 
 /// ユーザー辞書を、引きながら書き換えられる形にしたもの。
 ///
@@ -36,6 +37,8 @@ impl CandidateSource for SharedUserDict {
 /// 入力セッション。
 pub struct Session {
     engine: Engine,
+    /// 設定ファイルから読んだ値。エンジンにも渡してある。
+    settings: Settings,
     user: Rc<RefCell<UserDict>>,
     /// これまでに確定した文字列。入力先アプリの中身に相当する。
     document: String,
@@ -56,6 +59,7 @@ impl std::fmt::Debug for Session {
 pub struct SessionBuilder {
     dictionaries: Vec<PathBuf>,
     user_dictionary: Option<PathBuf>,
+    settings: Option<PathBuf>,
 }
 
 impl SessionBuilder {
@@ -69,8 +73,33 @@ impl SessionBuilder {
         self
     }
 
+    pub fn settings(mut self, path: impl Into<PathBuf>) -> Self {
+        self.settings = Some(path.into());
+        self
+    }
+
     /// 辞書を読み込んでセッションを作る。読み込みの経過は `log` へ渡す。
     pub fn build(self, log: &mut dyn FnMut(&str)) -> io::Result<Session> {
+        // 設定を先に読む。**既定値では動かない** (ADR-0020)。ファイルが
+        // 無ければ雛形から作り、足りなければ書き足す。TIP と同じ読み方で、
+        // 置き場所だけが違う。
+        let settings_path = self
+            .settings
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SETTINGS));
+        let loaded = crystalskk_settings::load(&settings_path)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if loaded.created {
+            log(&format!("設定 {} を作りました", settings_path.display()));
+        } else {
+            log(&format!("設定 {}", settings_path.display()));
+        }
+        if !loaded.added.is_empty() {
+            log(&format!("  書き足した項目: {}", loaded.added.join(", ")));
+        }
+        if !loaded.unknown.is_empty() {
+            log(&format!("  知らない項目: {}", loaded.unknown.join(", ")));
+        }
+
         let user_path = self
             .user_dictionary
             .unwrap_or_else(|| PathBuf::from(DEFAULT_USER_DICTIONARY));
@@ -89,8 +118,12 @@ impl SessionBuilder {
             sources.push(Box::new(dict));
         }
 
+        let mut engine = Engine::new(Box::new(ChainedSource::new(sources)));
+        engine.configure(loaded.settings.engine.clone());
+
         Ok(Session {
-            engine: Engine::new(Box::new(ChainedSource::new(sources))),
+            engine,
+            settings: loaded.settings,
             user,
             document: String::new(),
             last_unhandled: None,
@@ -185,7 +218,7 @@ impl Session {
 
     /// 印を含めた未確定表示。
     ///
-    /// 補完の当て推量は角括弧で囲む。**ターミナルに下線を引けない**ので、
+    /// 動的補完の候補は角括弧で囲む。**ターミナルに下線を引けない**ので、
     /// 打った文字との違いを文字で示すしかない。TIP は線の有無で示す。
     pub fn preedit(&self) -> String {
         self.engine
@@ -208,9 +241,14 @@ impl Session {
         self.engine.registration_depth()
     }
 
-    /// いま当てている補完。
+    /// いま選んでいる補完候補。
     pub fn completion(&self) -> Option<CompletionView> {
         self.engine.completion()
+    }
+
+    /// 設定ファイルから読んだ値。
+    pub fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     pub fn candidates(&self) -> Option<CandidateView> {
@@ -238,3 +276,9 @@ impl Session {
 
 /// 保存先を指定しなかったときのユーザー辞書。
 pub const DEFAULT_USER_DICTIONARY: &str = "crystalskk-user.dict";
+
+/// 場所を指定しなかったときの設定ファイル。
+///
+/// 置き場所の既定であって、**設定の値の既定ではない**。値は必ずこの
+/// ファイルに書かれたものを使う。
+pub const DEFAULT_SETTINGS: &str = "crystalskk-config.toml";

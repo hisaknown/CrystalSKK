@@ -67,7 +67,11 @@ fn report(session: &Session, out: &mut impl Write) -> io::Result<()> {
         }
     }
     if let Some(completion) = session.completion() {
-        writeln!(out, "  補完:   {}", render::completion(&completion))?;
+        writeln!(
+            out,
+            "  補完:   {}",
+            render::completion(&completion, session.settings())
+        )?;
     }
     writeln!(out, "  モード: {}", render::mode(session))?;
     if let Some(key) = session.last_unhandled() {

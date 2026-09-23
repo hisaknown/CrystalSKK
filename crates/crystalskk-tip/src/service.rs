@@ -49,6 +49,9 @@ use crate::{compartment, dict, edit, keys, langbar, log, preserved};
 /// 一手増えることにはならない。
 const DEFAULT_MODE: InputMode = InputMode::Ascii;
 
+/// 設定を受け取れないとき、尋ね直すまでの間。
+const SETTINGS_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// TSF から渡される、このスレッドでの立場。
 #[derive(Debug)]
 struct Activation {
@@ -97,13 +100,23 @@ pub struct TextService {
     /// 最後に分かった、未確定の文字列の画面上の位置。
     ///
     /// 辞書登録中は文書に何も書かないので、位置を尋ねる相手がいない。
-    /// **直前まで書いていた場所のそばに出すのが、いちばん近い当て推量**
+    /// **直前まで書いていた場所のそばに出すのが、いちばん近い見当**
     /// になる。
     anchor: RefCell<Option<windows::Win32::Foundation::RECT>>,
     /// 見え方に振られた番号。有効化のときに一度取る。
     ///
     /// 取れなければ既定の下線のままになるだけで、入力は続く。
     atoms: RefCell<Option<crate::display::Atoms>>,
+    /// 受け取った設定。受け取るまでは `None` で、エンジンも動かない。
+    ///
+    /// **既定の値では動かない** (ADR-0020)。ファイルに書かれていない値で
+    /// 動けば、利用者の知らない設定が効くことになる。
+    settings: RefCell<Option<crystalskk_settings::Settings>>,
+    /// 設定を受け取れなかった理由。受け取れたら消す。
+    settings_problem: RefCell<Option<String>>,
+    /// 最後に設定を尋ねた時刻。受け取れないあいだ、打鍵のたびに
+    /// サーバを叩かないために持つ。
+    settings_asked: std::cell::Cell<Option<std::time::Instant>>,
     /// システムへ申告している候補一覧。出していない間は `None`。
     ///
     /// **アプリが自分で描くと言うことがある。** そのときは自前の窓を
@@ -130,6 +143,9 @@ impl TextService {
             owner: RefCell::new(None),
             anchor: RefCell::new(None),
             atoms: RefCell::new(None),
+            settings: RefCell::new(None),
+            settings_problem: RefCell::new(None),
+            settings_asked: std::cell::Cell::new(None),
             announced: RefCell::new(None),
         }
     }
@@ -356,10 +372,54 @@ impl TextService {
             .collect();
         ListSnapshot {
             items: listed,
-            selection: u32::try_from(view.page_number() * crystalskk_core::engine::PAGE_SIZE)
-                .unwrap_or(0),
-            page_size: u32::try_from(crystalskk_core::engine::PAGE_SIZE).unwrap_or(1),
+            selection: u32::try_from(view.page_number() * view.page_size()).unwrap_or(0),
+            page_size: u32::try_from(view.page_size()).unwrap_or(1),
             current_page: u32::try_from(view.page_number()).unwrap_or(0),
+        }
+    }
+
+    /// 設定を尋ね直し、エンジンに渡す。
+    ///
+    /// 入力先が変わったときに呼ぶ。**書き換えた設定はそこで効く。** 打鍵の
+    /// たびに尋ねれば書き換えてすぐ効くが、打鍵のたびにファイルを読ませる
+    /// ことになる。
+    ///
+    /// 受け取れなかったときは、**前に受け取った値のまま続ける**。それも
+    /// ファイルに書かれていた値である。一度も受け取れていなければ、
+    /// エンジンは動かないまま、理由を知らせる。
+    fn refresh_settings(&self) {
+        self.settings_asked.set(Some(std::time::Instant::now()));
+        match dict::fetch_settings() {
+            Ok(settings) => {
+                self.engine.borrow_mut().configure(settings.engine.clone());
+                *self.settings.borrow_mut() = Some(settings);
+                if self.settings_problem.borrow_mut().take().is_some() {
+                    log::write("設定を受け取れるようになりました");
+                }
+            }
+            Err(problem) => {
+                log::error(&problem);
+                *self.settings_problem.borrow_mut() = Some(problem);
+            }
+        }
+    }
+
+    /// まだ設定を受け取れていなければ、尋ね直す。
+    ///
+    /// 受け取れないあいだは打鍵がすべてアプリへ素通しになる。利用者が
+    /// ファイルを直したり、サーバが起きたりすれば、次の打鍵で動き出す。
+    /// **尋ねるのは数秒に一度まで**にする。打鍵のたびにサーバを起こそうと
+    /// すれば、そのたびにプロセスを作ることになる。
+    fn ensure_settings(&self) {
+        if self.engine.borrow().is_configured() {
+            return;
+        }
+        let recently = self
+            .settings_asked
+            .get()
+            .is_some_and(|at| at.elapsed() < SETTINGS_RETRY);
+        if !recently {
+            self.refresh_settings();
         }
     }
 
@@ -377,6 +437,16 @@ impl TextService {
         // 閉じる手立てを別に覚えてもらう必要がない。
         if self.source.was_unreachable() && !engine.preedit().is_empty() {
             return Some(Content::Notice(UNREACHABLE_NOTICE.to_owned()));
+        }
+
+        // 設定を受け取れなかったことを言う。一度も受け取れていなければ
+        // エンジンは動いておらず、**なぜ日本語にならないのか**を言うほかに
+        // 知らせる手立てがない。前の値で動いているなら、入力している間
+        // だけ出す。
+        if let Some(problem) = self.settings_problem.borrow().as_ref()
+            && (!engine.is_configured() || !engine.preedit().is_empty())
+        {
+            return Some(Content::Notice(problem.clone()));
         }
 
         if let Some(registration) = engine.registration() {
@@ -411,15 +481,26 @@ impl TextService {
         // ある。** 補完は「まだ変換していない」段階のものなので、二つが
         // 重なることもない。
         let completion = engine.completion()?;
+        let settings = self.settings.borrow();
+        let settings = settings.as_ref()?;
+        let show_reading = settings.window.show_reading;
         Some(Content::Completion(Completion {
-            // 出すのは変換先だけ。読みは見れば大抵分かる。
+            // 出すのは変換先。読みは見れば大抵分かるので、添えるかどうかは
+            // 設定に任せる。
             entries: completion
                 .entries
                 .iter()
-                .map(|entry| entry.word.clone())
+                .map(|entry| {
+                    if show_reading && entry.word != entry.heading {
+                        format!("{} ({})", entry.word, entry.heading)
+                    } else {
+                        entry.word.clone()
+                    }
+                })
                 .collect(),
             current: completion.current,
             taken: completion.taken,
+            take_key: settings.engine.completion.take_key,
             number: completion.number,
             count: completion.count,
         }))
@@ -545,6 +626,9 @@ impl TextService_Impl {
             Err(e) => log::error(&format!("表示属性を登録できません: {}", e.message())),
         }
 
+        // 設定を受け取る。受け取るまでエンジンは動かない (ADR-0020)。
+        self.this.refresh_settings();
+
         // 切られていたら、入にする。**SKK では入が常態** (ADR-0013) で、
         // 切ったままでは `Ctrl+J` すら届かない。入って半角英数なら、打鍵の
         // 意味は切のときと変わらないので、邪魔にもならない。
@@ -646,6 +730,13 @@ impl TextService_Impl {
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
     fn would_handle_key(&self, wparam: WPARAM) -> BOOL {
         if !self.this.accepts_keys() {
+            return false.into();
+        }
+        // TSF はまずここを尋ねる。**設定が無ければ、ここで取りに行く。**
+        // 取れなければ食べずに渡し、なぜ動かないのかを窓で言う。
+        self.this.ensure_settings();
+        if !self.this.engine.borrow().is_configured() {
+            self.this.show_window(None, None);
             return false.into();
         }
         let translated = keys::translate(wparam);
@@ -761,10 +852,15 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
     /// 入力先が変わった。入力の途中経過は続けようがないので捨てる。
-    fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+    ///
+    /// 入ってきたときに設定を尋ね直す。**書き換えた設定はここで効く。**
+    fn OnSetFocus(&self, fforeground: BOOL) -> Result<()> {
         guard("OnSetFocus", || {
             self.this.drop_composition();
             self.this.engine.borrow_mut().reset();
+            if fforeground.as_bool() {
+                self.this.refresh_settings();
+            }
             Ok(())
         })
     }

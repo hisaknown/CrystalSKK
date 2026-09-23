@@ -13,10 +13,12 @@ pub mod engine;
 pub mod kana;
 pub mod key;
 pub mod mode;
+pub mod options;
 pub mod romaji;
 
 pub use dict::{Candidate, CandidateSource, Context, Query, Ranker};
 pub use engine::{Engine, Event, Marker, Preedit, Response};
 pub use key::Key;
 pub use mode::InputMode;
+pub use options::Options;
 pub use romaji::{RomajiConverter, RomajiTable, Rule};

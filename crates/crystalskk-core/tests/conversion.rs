@@ -3,6 +3,8 @@
 //! 一件ずつが「こう打ったらこうなる」という仕様の記述になるように書く。
 //! 内部状態ではなく、確定した文字列・未確定の表示・発生した副作用だけを見る。
 
+mod common;
+
 use std::collections::HashMap;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
@@ -54,7 +56,7 @@ impl Session {
             ("ぱそこん", &["パソコン", "パソ魂"][..]),
         ]);
         Self {
-            engine: Engine::new(Box::new(dict)),
+            engine: common::engine(Box::new(dict)),
             committed: String::new(),
             events: Vec::new(),
         }

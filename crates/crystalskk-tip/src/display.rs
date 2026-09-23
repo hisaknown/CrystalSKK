@@ -122,7 +122,7 @@ pub const CONVERTED: Attribute = Attribute {
     kind: TF_ATTR_TARGET_CONVERTED.0,
 };
 
-/// 補完の当て推量。**線を引かない。**
+/// 動的補完の候補。**線を引かない。**
 ///
 /// 下線は打った文字のところで終わる。その先に線が無ければ、**まだ自分の
 /// 文字ではない**と見て分かる。
@@ -335,7 +335,7 @@ mod tests {
         // **アプリが塗ってくれることを当てにしない。** 一度それで、候補に
         // 何も引かれない状態になった。
         //
-        // 補完の当て推量だけは別で、線が無いことが「まだ打っていない」の
+        // 動的補完の候補だけは別で、線が無いことが「まだ打っていない」の
         // 印になる。
         for attribute in ALL.iter().filter(|a| a.guid != COMPLETION.guid) {
             assert_ne!(attribute.line, TF_LS_NONE.0, "{}", attribute.description);

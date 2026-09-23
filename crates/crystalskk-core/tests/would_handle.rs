@@ -6,6 +6,8 @@
 //!
 //! 個別の場合を並べるのではなく、あらゆる状態を通しながら毎回照合する。
 
+mod common;
+
 use std::collections::HashMap;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
@@ -36,7 +38,7 @@ fn engine() -> Engine {
             })
             .collect(),
     );
-    Engine::new(Box::new(dict))
+    common::engine(Box::new(dict))
 }
 
 /// 照合に使う打鍵。エンジンが分岐する種類を一通り含める。

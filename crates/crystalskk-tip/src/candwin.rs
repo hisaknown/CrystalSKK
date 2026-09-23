@@ -61,7 +61,7 @@ pub enum Content {
     Page(Page),
     /// 辞書登録の入力欄。
     Registration(Registration),
-    /// いま当てている補完。
+    /// いま選んでいる補完候補。
     Completion(Completion),
     /// 伝えたいこと。**黙って違う結果を出すより、言うほうがよい。**
     Notice(String),
@@ -94,7 +94,7 @@ impl Content {
     }
 }
 
-/// いま当てている補完。
+/// いま選んでいる補完候補。
 ///
 /// 出すのは**変換先**である。読みは見れば大抵分かるので、窓に出して意味が
 /// あるのは変換した後の姿のほうである。
@@ -105,10 +105,12 @@ impl Content {
 pub struct Completion {
     /// このページに出す変換先。
     pub entries: Vec<String>,
-    /// ページの中での、当てているものの位置。
+    /// ページの中での、選んでいる候補の位置。
     pub current: usize,
     /// もう受け取ったものか。
     pub taken: bool,
+    /// 補完候補を受け取るキー。受け取る前の一行に出す。
+    pub take_key: char,
     /// いま何ページ目か。1 から数える。
     pub number: usize,
     /// 全部で何ページか。
@@ -122,13 +124,13 @@ impl Completion {
             return self
                 .entries
                 .first()
-                .map(|word| format!("{}: {word}", crystalskk_core::engine::COMPLETION_TAKE))
+                .map(|word| format!("{}: {word}", self.take_key))
                 .into_iter()
                 .collect();
         }
 
         // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
-        // しないのに、出したままにはできない。** 当てているものは
+        // しないのに、出したままにはできない。** 選んでいる候補は
         // [`Content::highlight`] が反転させる。
         let mut lines = self.entries.clone();
         if self.count > 1 {
@@ -472,7 +474,7 @@ unsafe fn paint(hdc: HDC, content: &Content) {
                 bottom: top + line_height,
             };
 
-            // 当てている行は地と文字の色を入れ替える。**記号で示すより
+            // 選んでいる行は地と文字の色を入れ替える。**記号で示すより
             // 確かで、フォントによって見た目が変わらない。**
             //
             // 帯は余白いっぱいまで広げる。文字の幅だけ塗ると、行によって
@@ -671,6 +673,7 @@ mod tests {
     fn the_guess_shows_the_key_that_takes_it() {
         let line = Content::Completion(Completion {
             entries: vec!["漢字".to_owned()],
+            take_key: '.',
             ..Completion::default()
         })
         .lines();
@@ -682,6 +685,7 @@ mod tests {
         // 次に何が来るかが見えないと、何度押せばよいか分からない。
         let content = Content::Completion(Completion {
             taken: true,
+            take_key: '.',
             entries: vec!["漢字".to_owned(), "患者".to_owned()],
             current: 1,
             number: 1,
@@ -697,6 +701,7 @@ mod tests {
         // 同じキーが同じことをしないのに、案内を出したままにはできない。
         let lines = Content::Completion(Completion {
             taken: true,
+            take_key: '.',
             entries: vec!["患者".to_owned()],
             current: 0,
             number: 1,

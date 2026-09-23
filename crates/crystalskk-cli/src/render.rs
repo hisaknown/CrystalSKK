@@ -2,7 +2,8 @@
 //!
 //! 行入力モードと対話モードで同じ見え方にするため、整形はここに集める。
 
-use crystalskk_core::engine::{CandidateView, CompletionView};
+use crystalskk_core::engine::{CandidateView, Completed, CompletionView};
+use crystalskk_settings::Settings;
 
 use crate::session::Session;
 
@@ -51,20 +52,23 @@ fn page(view: &CandidateView) -> String {
     )
 }
 
-/// 選択中の候補の注釈。
-///
-/// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
-/// 一つぶんの注釈を出す先がない。
-/// 当てている補完。**出すのは変換先。** 読みは見れば大抵分かる。
+/// 選んでいる補完候補。**出すのは変換先。** 読みは見れば大抵分かる。
 ///
 /// 受け取る前は一行。Tab で巡り始めたら前後も並べる。端末では反転が使え
-/// ないので、当てているものを括弧でくくる。
-pub fn completion(view: &CompletionView) -> String {
+/// ないので、選んでいる候補を括弧でくくる。
+pub fn completion(view: &CompletionView, settings: &Settings) -> String {
+    let show = |entry: &Completed| {
+        if settings.window.show_reading && entry.word != entry.heading {
+            format!("{} ({})", entry.word, entry.heading)
+        } else {
+            entry.word.clone()
+        }
+    };
     if !view.taken {
         return format!(
             "{}: {}",
-            crystalskk_core::engine::COMPLETION_TAKE,
-            view.current().word
+            settings.engine.completion.take_key,
+            show(view.current())
         );
     }
     let page: Vec<String> = view
@@ -73,9 +77,9 @@ pub fn completion(view: &CompletionView) -> String {
         .enumerate()
         .map(|(at, entry)| {
             if at == view.current {
-                format!("[{}]", entry.word)
+                format!("[{}]", show(entry))
             } else {
-                entry.word.clone()
+                show(entry)
             }
         })
         .collect();
@@ -86,6 +90,10 @@ pub fn completion(view: &CompletionView) -> String {
     text
 }
 
+/// 選択中の候補の注釈。
+///
+/// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
+/// 一つぶんの注釈を出す先がない。
 pub fn annotation(view: &CandidateView) -> Option<&str> {
     if view.listing {
         return None;

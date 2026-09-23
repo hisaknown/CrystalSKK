@@ -16,6 +16,7 @@
 //! ```text
 //! search\t<見出し語>\t<送り仮名>
 //! learn\t<見出し語>\t<送り仮名>\t<語>
+//! settings
 //! save
 //! exit
 //! ```
@@ -24,12 +25,16 @@
 //!
 //! ```text
 //! ok\t<候補>\u{1f}<候補>...
+//! settings\t<設定ファイルの全文。改行は \u{1f}>
 //! error\t<訳>
 //! ```
 //!
 //! 候補と候補は `\u{1f}`、語と注釈は `\u{1e}` で分ける。**辞書の中身に
 //! 現れない文字**なので、逃がし方を決めずに済む。SKK 辞書はこれらの制御
 //! 文字を含まない。
+//!
+//! 設定ファイルの改行も `\u{1f}` にする。TOML は字下げ以外の制御文字を
+//! そのまま書くことを許さないので、**読めた設定ファイルには現れない。**
 
 use crystalskk_core::dict::{Candidate, Query};
 
@@ -42,6 +47,9 @@ const BETWEEN_CANDIDATES: char = '\u{1f}';
 /// 語と注釈の区切り。
 const WITHIN_CANDIDATE: char = '\u{1e}';
 
+/// 設定ファイルの改行の代わり。
+const LINE_BREAK: char = '\u{1f}';
+
 /// TIP からサーバへの頼み。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -53,6 +61,12 @@ pub enum Request {
     Learn { query: Query, word: String },
     /// 新しい語を登録する。
     Register { query: Query, word: String },
+    /// 設定を尋ねる。
+    ///
+    /// **設定ファイルを読むのもサーバである。** 足りない項目を書き足す
+    /// ことがあり、書き手は一人に絞りたい。隔離された入れ物の中の TIP
+    /// からは、そもそもファイルが読めない。
+    Settings,
     /// ユーザー辞書を書き出す。
     Save,
     /// 終わる。
@@ -67,6 +81,8 @@ pub enum Request {
 pub enum Response {
     /// 引けた候補。頼みが検索でなければ空。
     Ok(Vec<Candidate>),
+    /// 設定ファイルの全文。足りない項目は書き足してある。
+    Settings(String),
     /// できなかった。
     Error(String),
 }
@@ -83,6 +99,7 @@ impl Request {
             Self::Register { query, word } => {
                 format!("register{FIELD}{}{FIELD}{word}", encode_query(query))
             }
+            Self::Settings => "settings".to_owned(),
             Self::Save => "save".to_owned(),
             Self::Exit => "exit".to_owned(),
         }
@@ -114,6 +131,7 @@ impl Request {
                     word: fields.next()?.to_owned(),
                 })
             }
+            "settings" => Some(Self::Settings),
             "save" => Some(Self::Save),
             "exit" => Some(Self::Exit),
             _ => None,
@@ -132,6 +150,12 @@ impl Response {
                     .collect::<Vec<_>>()
                     .join(&BETWEEN_CANDIDATES.to_string());
                 format!("ok{FIELD}{body}")
+            }
+            Self::Settings(text) => {
+                let body = text
+                    .replace('\r', "")
+                    .replace('\n', &LINE_BREAK.to_string());
+                format!("settings{FIELD}{body}")
             }
             Self::Error(reason) => format!("error{FIELD}{reason}"),
         }
@@ -152,6 +176,7 @@ impl Response {
                     .map(decode_candidate)
                     .collect(),
             )),
+            "settings" => Some(Self::Settings(body.replace(LINE_BREAK, "\n"))),
             "error" => Some(Self::Error(body.to_owned())),
             _ => None,
         }
@@ -219,6 +244,21 @@ mod tests {
         });
         roundtrip(&Request::Save);
         roundtrip(&Request::Exit);
+    }
+
+    #[test]
+    fn a_settings_request_survives_a_round_trip() {
+        roundtrip(&Request::Settings);
+    }
+
+    #[test]
+    fn the_settings_file_travels_on_one_line() {
+        // 一つの答えは一行。**改行を含む全文でも、一行で運ぶ。**
+        let text = "[completion]\n# 補完候補\ndynamic = true\n\tlimit = 16\n";
+        let response = Response::Settings(text.to_owned());
+        let line = response.encode();
+        assert!(!line.contains('\n'));
+        assert_eq!(Response::decode(&line), Some(response));
     }
 
     #[test]

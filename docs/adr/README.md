@@ -35,4 +35,5 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0016](0016-the-dictionary-lives-in-one-process.md) | 辞書は一つのプロセスだけが持つ | Accepted | ADR-0001, ADR-0014, PRD Q-04 |
 | [0017](0017-draw-the-underlines-ourselves.md) | 下線は自分で引き、色は決めない | Accepted | ADR-0011, PRD Q-09 |
 | [0018](0018-keep-the-markers-out-of-the-document.md) | 印は文書に出さない | Accepted | ADR-0017, PRD Q-09 |
-| [0019](0019-guess-the-rest-of-the-heading-while-it-is-typed.md) | 打っている最中に見出し語の続きを当てる | Accepted | ADR-0001, ADR-0016, ADR-0017 |
+| [0019](0019-complete-the-heading-while-it-is-typed.md) | 打っている最中に見出し語の続きを補完する | Accepted | ADR-0001, ADR-0016, ADR-0017 |
+| [0020](0020-the-settings-file-is-the-whole-truth.md) | 設定ファイルに書かれていることを、効いている設定のすべてにする | Accepted | PRD F-14, ADR-0016, ADR-0019 |

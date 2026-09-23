@@ -11,6 +11,7 @@ use crate::dict::{Candidate, CandidateSource, Context, EmptyDict, NoopRanker, Qu
 use crate::kana;
 use crate::key::Key;
 use crate::mode::InputMode;
+use crate::options::{Layout, Options};
 use crate::romaji::{RomajiConverter, RomajiTable};
 
 /// 未確定文字列に付く印。
@@ -43,7 +44,7 @@ impl Marker {
 pub enum Role {
     /// `▽` `▼` の印。状態を表す。
     Marker,
-    /// 補完の当て推量。**まだ打っていない文字である。**
+    /// 動的補完の候補。**まだ打っていない文字である。**
     ///
     /// 受け取るまでは見出し語の一部ではない。変換すれば、ここは無かった
     /// ことになる。
@@ -106,44 +107,6 @@ impl Preedit {
 /// 見出し語と送り仮名の区切りに出す印。
 pub const OKURI_MARK: &str = "*";
 
-/// 出ている当て推量を受け取るキー。
-///
-/// **当て推量が出ているときだけ奪う。** 出ていなければ普通に `。` になる。
-/// 見出し語に句点を打つことはまず無いので、奪っても困らない。
-pub const COMPLETION_TAKE: char = '.';
-
-/// 補完を当て始める見出し語の長さ。
-///
-/// 一文字では当たらない。**「あ」で始まる見出しは山ほどあり、どれを出しても
-/// 邪魔にしかならない。**
-pub const COMPLETION_MIN: usize = 2;
-
-/// 一度に覚えておく補完の数。
-///
-/// 動的補完で出すのは先頭の一つきりだが、Tab はこの範囲を巡る。
-pub const COMPLETION_LIMIT: usize = 16;
-
-/// 候補一覧を出すまでの変換回数。
-///
-/// SKK は候補を**まず一つずつ**見せる。ほとんどの変換は最初の候補で
-/// 決まるので、そのたびに一覧を開いては目障りなだけである。何度か送って
-/// 決まらないとき、初めて一覧に頼る。
-///
-/// 既定は CorvusSKK に合わせて 5。5 回目の変換から一覧に移る。
-pub const UNTIL_CANDIDATE_LIST: usize = 5;
-
-/// 一覧から候補を選ぶキー。
-///
-/// 並び順がそのままラベルの並びになり、**この数が一度に出す候補の数**に
-/// なる。選べない候補を並べても仕方がないので、一覧は必ずこの長さで切る。
-pub const SELECTION_KEYS: [char; 7] = ['a', 's', 'd', 'f', 'j', 'k', 'l'];
-
-/// 一覧の一ページに出す候補の数。
-pub const PAGE_SIZE: usize = SELECTION_KEYS.len();
-
-/// 一覧に移る最初の候補の位置。
-const FIRST_LISTED: usize = UNTIL_CANDIDATE_LIST - 1;
-
 /// 補完として窓に出す一件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Completed {
@@ -166,9 +129,9 @@ pub struct Completed {
 pub struct CompletionView {
     /// このページに出す分。
     pub entries: Vec<Completed>,
-    /// ページの中での、当てているものの位置。
+    /// ページの中での、選んでいる候補の位置。
     pub current: usize,
-    /// もう受け取ったものか。Tab で当てた後は受け取り済みになる。
+    /// もう受け取ったものか。Tab で選んだ後は受け取り済みになる。
     pub taken: bool,
     /// いま何ページ目か。1 から数える。
     pub number: usize,
@@ -177,7 +140,7 @@ pub struct CompletionView {
 }
 
 impl CompletionView {
-    /// 当てている一件。
+    /// 選んでいる一件。
     pub fn current(&self) -> &Completed {
         &self.entries[self.current]
     }
@@ -199,6 +162,8 @@ pub struct CandidateView {
     /// **候補ウィンドウを出してよいかどうかがこれで決まる。** 入っていない
     /// うちは `▼` のところに一つ出ているだけで、窓は要らない。
     pub listing: bool,
+    /// 区切り方。候補選択の側と同じものを持つ。
+    layout: Layout,
 }
 
 impl CandidateView {
@@ -209,13 +174,17 @@ impl CandidateView {
         if !self.listing {
             return Vec::new();
         }
-        let start = page_start(self.index);
+        let start = self.layout.page_start(self.index);
         self.candidates[start..]
             .iter()
-            .take(PAGE_SIZE)
-            .zip(SELECTION_KEYS)
+            .zip(self.layout.labels().iter().copied())
             .map(|(candidate, label)| (label, candidate))
             .collect()
+    }
+
+    /// 一ページの候補の数。
+    pub fn page_size(&self) -> usize {
+        self.layout.page_size()
     }
 
     /// 一覧に載る候補。
@@ -224,7 +193,9 @@ impl CandidateView {
     /// 現れない。外へ渡すときにこれを混ぜると、ページの区切りが合わなく
     /// なる。
     pub fn listed(&self) -> &[Candidate] {
-        self.candidates.get(FIRST_LISTED..).unwrap_or(&[])
+        self.candidates
+            .get(self.layout.first_listed()..)
+            .unwrap_or(&[])
     }
 
     /// いま何ページ目か。0 から数える。
@@ -232,24 +203,17 @@ impl CandidateView {
         if !self.listing {
             return 0;
         }
-        (page_start(self.index) - FIRST_LISTED) / PAGE_SIZE
+        (self.layout.page_start(self.index) - self.layout.first_listed())
+            / self.layout.page_size().max(1)
     }
 
     /// 一覧に載る候補は全部で何ページ分あるか。
     pub fn page_count(&self) -> usize {
         self.candidates
             .len()
-            .saturating_sub(FIRST_LISTED)
-            .div_ceil(PAGE_SIZE)
+            .saturating_sub(self.layout.first_listed())
+            .div_ceil(self.layout.page_size().max(1))
     }
-}
-
-/// この位置を含むページの先頭。
-fn page_start(index: usize) -> usize {
-    if index < FIRST_LISTED {
-        return index;
-    }
-    FIRST_LISTED + (index - FIRST_LISTED) / PAGE_SIZE * PAGE_SIZE
 }
 
 /// 辞書登録中の様子。
@@ -320,9 +284,9 @@ struct Okuri {
 /// 見出し語の補完。
 ///
 /// **土台は Tab の補完である。** 打った見出し語から前方一致で引き、Tab で
-/// 順に当てていく。
+/// 順に選んでいく。
 ///
-/// 動的補完はその上に乗っている。当てる前の先頭の一つを**まだ打っていない
+/// 動的補完はその上に乗っている。選ぶ前の先頭の一つを**まだ打っていない
 /// 文字**として見せ、`.` で受け取る。受け取ることは Tab を一度押すのと
 /// 同じで、仕掛けを別に持っていない。
 #[derive(Debug, Clone)]
@@ -336,14 +300,14 @@ struct Completion {
     /// 一度に全部引くと、打鍵のたびに辞書を十何回も叩くことになる。
     /// 引けていないところは `None` のまま置く。
     words: Vec<Option<String>>,
-    /// いま当てている位置。`None` なら、まだ当てていない。
+    /// いま選んでいる位置。`None` なら、まだ選んでいない。
     chosen: Option<usize>,
 }
 
 impl Completion {
-    /// まだ当てていないときに見せる、打っていない部分。
+    /// まだ選んでいないときに見せる、打っていない部分。
     ///
-    /// 当てたあとは何も見せない。**当ててしまえば、それは打った文字である。**
+    /// 選んだあとは何も見せない。**選んでしまえば、それは打った文字である。**
     fn ghost(&self) -> Option<&str> {
         if self.chosen.is_some() {
             return None;
@@ -354,7 +318,7 @@ impl Completion {
             .filter(|rest| !rest.is_empty())
     }
 
-    /// 次に当てる位置。端まで来たら先頭へ戻る。
+    /// 次に選ぶ位置。端まで来たら先頭へ戻る。
     fn next(&self) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
@@ -374,17 +338,19 @@ struct Selecting {
     index: usize,
     /// 候補選択を取りやめたときに戻る先。
     origin: Composing,
+    /// 区切り方。変換を始めたときの設定で決まる。
+    layout: Layout,
 }
 
 impl Selecting {
     /// 一覧を出す段階に入っているか。
     fn listing(&self) -> bool {
-        self.index >= FIRST_LISTED
+        self.layout.listing(self.index)
     }
 
     /// いま出しているページの先頭。
     fn page_start(&self) -> usize {
-        page_start(self.index)
+        self.layout.page_start(self.index)
     }
 }
 
@@ -436,6 +402,8 @@ pub struct Engine {
     dict: Box<dyn CandidateSource>,
     ranker: Box<dyn Ranker>,
     context: Context,
+    /// 振る舞いを決める値。**受け取るまでは何もしない。**
+    options: Option<Options>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -465,7 +433,43 @@ impl Engine {
             dict,
             ranker: Box::new(NoopRanker),
             context: Context::default(),
+            options: None,
         }
+    }
+
+    /// 振る舞いを決める値を渡す。
+    ///
+    /// **渡されるまでエンジンは何もしない。** 打鍵はすべてアプリへ素通し
+    /// になる。既定の値で動き出せば、利用者のファイルに書かれていない
+    /// 値が効くことになる (ADR-0020)。
+    ///
+    /// 値が変わったときは入力の途中経過を捨てる。区切り方が変われば、
+    /// 選んでいる途中の一覧はもう同じ形をしていない。
+    pub fn configure(&mut self, options: Options) {
+        if self.options.as_ref() == Some(&options) {
+            return;
+        }
+        self.reset();
+        self.options = Some(options);
+    }
+
+    /// 振る舞いを決める値を受け取っているか。
+    pub fn is_configured(&self) -> bool {
+        self.options.is_some()
+    }
+
+    /// 候補の区切り方。
+    fn layout(&self) -> Option<Layout> {
+        self.options
+            .as_ref()
+            .map(|options| Layout::new(&options.candidates))
+    }
+
+    /// 補完の一ページの数。候補の一覧と揃える。
+    fn completion_page_size(&self) -> usize {
+        self.options
+            .as_ref()
+            .map_or(1, |options| options.candidates.labels.len().max(1))
     }
 
     pub fn with_ranker(mut self, ranker: Box<dyn Ranker>) -> Self {
@@ -536,9 +540,12 @@ impl Engine {
     /// 消えたり二重に入ったりするので、[`Self::press`] が返す `handled` と
     /// 必ず一致していなければならない。一致は試験で担保している。
     pub fn would_handle(&self, key: Key) -> bool {
+        if !self.is_configured() {
+            return false;
+        }
         match &self.state {
             State::Direct => self.would_handle_direct(key),
-            State::Composing(comp) => would_handle_composing(comp, key),
+            State::Composing(comp) => self.would_handle_composing(comp, key),
             State::Selecting(_) => would_handle_selecting(key),
         }
     }
@@ -578,6 +585,15 @@ impl Engine {
 
     /// 一打鍵を処理する。
     pub fn press(&mut self, key: Key) -> Response {
+        if !self.is_configured() {
+            return Response {
+                handled: false,
+                commit: String::new(),
+                preedit: self.preedit(),
+                candidates: None,
+                events: Vec::new(),
+            };
+        }
         let mut out = Out {
             handled: true,
             ..Out::default()
@@ -605,25 +621,16 @@ impl Engine {
     /// 補完を引き直す。
     ///
     /// 見出し語が変わるたびに引く。**動的補完とはそういうものである** —
-    /// 打つたびに当て直さなければ、当て推量が古くなる。
+    /// 打つたびに引き直さなければ、補完候補が古くなる。
     ///
-    /// 当てたばかりのものは引き直さない。Tab で巡っている最中に引き直すと、
+    /// 選んだばかりのものは引き直さない。Tab で巡っている最中に引き直すと、
     /// 巡る先がそのつど変わってしまう。
     fn refresh_completion(&mut self) {
-        let State::Composing(comp) = &mut self.state else {
+        let State::Composing(comp) = &self.state else {
             return;
         };
 
-        // 送り仮名に入っていれば見出し語はもう決まっている。abbrev は
-        // かなではないので、かなの見出しを当てても仕方がない。
-        let eligible =
-            comp.okuri.is_none() && !comp.abbrev && comp.midashi.chars().count() >= COMPLETION_MIN;
-        if !eligible {
-            comp.completion = None;
-            return;
-        }
-
-        // 当てたものがそのまま残っているなら、そのまま巡らせる。
+        // 選んだものがそのまま残っているなら、そのまま巡らせる。
         if let Some(completion) = &comp.completion
             && let Some(index) = completion.chosen
             && completion.entries.get(index) == Some(&comp.midashi)
@@ -631,17 +638,51 @@ impl Engine {
             return;
         }
 
-        let prefix = comp.midashi.clone();
-        let entries = self.dict.complete(&prefix, COMPLETION_LIMIT);
-        let State::Composing(comp) = &mut self.state else {
-            return;
+        // 動的補完を切っているなら、打つたびには引かない。Tab で呼ばれた
+        // ときに引く。
+        let dynamic = self
+            .options
+            .as_ref()
+            .is_some_and(|options| options.completion.dynamic);
+        let fresh = if dynamic {
+            self.fetch_completion(comp)
+        } else {
+            None
         };
-        comp.completion = (!entries.is_empty()).then(|| Completion {
+        if let State::Composing(comp) = &mut self.state {
+            comp.completion = fresh;
+        }
+    }
+
+    /// 見出し語に続く補完を引く。補完できる状態でなければ `None`。
+    fn fetch_completion(&self, comp: &Composing) -> Option<Completion> {
+        let options = &self.options.as_ref()?.completion;
+        // 送り仮名に入っていれば見出し語はもう決まっている。abbrev は
+        // かなではないので、かなの見出しを補完しても仕方がない。
+        let eligible = comp.okuri.is_none()
+            && !comp.abbrev
+            && comp.midashi.chars().count() >= options.min_length;
+        if !eligible {
+            return None;
+        }
+        let prefix = comp.midashi.clone();
+        let entries = self.dict.complete(&prefix, options.limit);
+        (!entries.is_empty()).then(|| Completion {
             prefix,
             words: vec![None; entries.len()],
             entries,
             chosen: None,
-        });
+        })
+    }
+
+    /// Tab が使う補完。動的補完が引いていなければ、ここで引く。
+    ///
+    /// [`Self::would_handle`] と [`Self::press`] が**同じ答えを出す**よう、
+    /// どちらもここを通る。
+    fn completion_for_tab(&self, comp: &Composing) -> Option<Completion> {
+        comp.completion
+            .clone()
+            .or_else(|| self.fetch_completion(comp))
     }
 
     /// 窓に出す分の変換先を引く。
@@ -649,7 +690,7 @@ impl Engine {
     /// **読みではなく変換先を見せる。** 読みは見れば大抵分かるので、窓に
     /// 出して意味があるのは変換した後の姿のほうである。
     ///
-    /// 引くのは出す分だけ。まだ当てていなければ先頭の一つ、Tab で巡って
+    /// 引くのは出す分だけ。まだ選んでいなければ先頭の一つ、Tab で巡って
     /// いればそのページ分である。
     fn resolve_completion(&mut self) {
         let State::Composing(comp) = &self.state else {
@@ -659,11 +700,12 @@ impl Engine {
             return;
         };
 
+        let size = self.completion_page_size();
         let wanted: Vec<usize> = match completion.chosen {
             None => vec![0],
             Some(index) => {
-                let start = index / PAGE_SIZE * PAGE_SIZE;
-                (start..completion.entries.len().min(start + PAGE_SIZE)).collect()
+                let start = index / size * size;
+                (start..completion.entries.len().min(start + size)).collect()
             }
         };
         let todo: Vec<(usize, String)> = wanted
@@ -697,9 +739,9 @@ impl Engine {
         }
     }
 
-    /// 当て推量を受け取り、変換して、確定まで進める。
+    /// 補完候補を受け取り、変換して、確定まで進める。
     ///
-    /// **一打鍵で終わらせる。** 当て推量が出ている時点で見出し語は辞書に
+    /// **一打鍵で終わらせる。** 補完候補が出ている時点で見出し語は辞書に
     /// あると分かっているので、変換の結果を選ばせる手間を省ける。選び直し
     /// たければ、受け取らずに space を打てばよい。
     ///
@@ -712,7 +754,7 @@ impl Engine {
         }
     }
 
-    /// 補完を一つ当てる。当てられなければ `false`。
+    /// 補完候補を一つ選ぶ。選べなければ `false`。
     ///
     /// Tab は次へ巡り、`.` は先頭を取る。**どちらも同じ操作で、押す前の
     /// 状態が違うだけである。**
@@ -794,7 +836,7 @@ impl Engine {
         }
     }
 
-    /// いま当てている補完。出すものが無ければ `None`。
+    /// いま選んでいる補完候補。出すものが無ければ `None`。
     ///
     /// 未確定の表示とは別に返す。**窓に出すかどうかは表示側が決める。**
     pub fn completion(&self) -> Option<CompletionView> {
@@ -808,11 +850,12 @@ impl Engine {
         }
 
         // 受け取る前は一つきり。受け取った後はページの分を並べる。
+        let size = self.completion_page_size();
         let (start, end) = match completion.chosen {
             None => (index, index + 1),
             Some(_) => {
-                let start = index / PAGE_SIZE * PAGE_SIZE;
-                (start, completion.entries.len().min(start + PAGE_SIZE))
+                let start = index / size * size;
+                (start, completion.entries.len().min(start + size))
             }
         };
         let entries = (start..end)
@@ -827,8 +870,8 @@ impl Engine {
             entries,
             current: index - start,
             taken: completion.chosen.is_some(),
-            number: index / PAGE_SIZE + 1,
-            count: completion.entries.len().div_ceil(PAGE_SIZE),
+            number: index / size + 1,
+            count: completion.entries.len().div_ceil(size),
         })
     }
 
@@ -840,6 +883,7 @@ impl Engine {
                 index: s.index,
                 okuri: s.query.okuri.clone(),
                 listing: s.listing(),
+                layout: s.layout.clone(),
             }),
             _ => None,
         }
@@ -1079,20 +1123,21 @@ impl Engine {
                 self.emit(&text, out);
                 self.state = State::Direct;
             }
-            // Tab は補完を順に当てる。土台はこちらで、動的補完はこの上に
+            // Tab は補完候補を順に選ぶ。土台はこちらで、動的補完はこの上に
             // 乗っている。
             Key::Tab => {
+                comp.completion = self.completion_for_tab(&comp);
                 self.absorb_pending(&mut comp);
                 if !self.take_completion(&mut comp) {
-                    // 当てるものが無ければ、アプリに渡す。**何も起きない
+                    // 補完候補が無ければ、アプリに渡す。**何も起きない
                     // キーを食べても仕方がない。**
                     out.handled = false;
                 }
                 self.state = State::Composing(comp);
             }
-            // 出ている当て推量を受け取る。押す前の状態が違うだけで、
+            // 出ている補完候補を受け取る。押す前の状態が違うだけで、
             // Tab と同じ操作である。
-            Key::Char(c) if c == COMPLETION_TAKE && shows_ghost(&comp) => {
+            Key::Char(c) if Some(c) == self.take_key() && shows_ghost(&comp) => {
                 self.take_completion(&mut comp);
                 self.convert_and_commit(comp, out);
             }
@@ -1292,13 +1337,39 @@ impl Engine {
             }
             self.start_registration(query, comp, None);
         } else {
+            let Some(layout) = self.layout() else {
+                self.state = State::Composing(comp);
+                return;
+            };
             self.state = State::Selecting(Selecting {
                 query,
                 candidates,
                 index: 0,
                 origin: comp,
+                layout,
             });
         }
+    }
+
+    /// 見出し語入力中に受け取るキーか。[`Self::would_handle`] の一部。
+    fn would_handle_composing(&self, comp: &Composing, key: Key) -> bool {
+        match key {
+            Key::Ctrl('g') | Key::Ctrl('j') => true,
+            Key::Ctrl('q') => !comp.abbrev,
+            // 補完候補があるときだけ受け取る。
+            Key::Tab => self
+                .completion_for_tab(comp)
+                .is_some_and(|completion| completion.next().is_some()),
+            Key::Ctrl(_) | Key::Up | Key::Down => false,
+            _ => true,
+        }
+    }
+
+    /// 補完候補を受け取るキー。
+    fn take_key(&self) -> Option<char> {
+        self.options
+            .as_ref()
+            .map(|options| options.completion.take_key)
     }
 
     // --- 候補選択 ------------------------------------------------------
@@ -1309,7 +1380,7 @@ impl Engine {
                 // 一覧を出しているなら、送るのは一件ずつではなく一ページ
                 // ずつ。見えているものを送り直しても意味がない。
                 let next = if sel.listing() {
-                    sel.page_start() + PAGE_SIZE
+                    sel.page_start() + sel.layout.page_size()
                 } else {
                     sel.index + 1
                 };
@@ -1322,7 +1393,9 @@ impl Engine {
                     // 一覧が出ていたなら最後のページ、出ていなかったなら
                     // 最後の一件。`page_start` がどちらも言い当てる。
                     let resume = Selecting {
-                        index: page_start(sel.candidates.len().saturating_sub(1)),
+                        index: sel
+                            .layout
+                            .page_start(sel.candidates.len().saturating_sub(1)),
                         ..sel.clone()
                     };
                     self.start_registration(sel.query, sel.origin, Some(resume));
@@ -1331,12 +1404,13 @@ impl Engine {
             Key::Char('x') | Key::Up => {
                 if sel.listing() {
                     let start = sel.page_start();
-                    sel.index = if start == FIRST_LISTED {
+                    let first = sel.layout.first_listed();
+                    sel.index = if start == first {
                         // 最初のページから戻るときは、一覧を畳んで一つずつの
                         // 見え方に返る。戻る先は、一覧に移る直前の候補。
-                        FIRST_LISTED.saturating_sub(1)
+                        first.saturating_sub(1)
                     } else {
-                        start - PAGE_SIZE
+                        start - sel.layout.page_size()
                     };
                     self.state = State::Selecting(sel);
                 } else if sel.index > 0 {
@@ -1350,7 +1424,7 @@ impl Engine {
             Key::Ctrl('g') | Key::Backspace | Key::Escape => {
                 self.back_to_composing(sel.origin);
             }
-            Key::Char(c) if sel.listing() && SELECTION_KEYS.contains(&c) => {
+            Key::Char(c) if sel.listing() && sel.layout.labels().contains(&c) => {
                 self.choose_from_page(sel, c, out);
             }
             Key::Char(_) | Key::Ctrl('q') => {
@@ -1370,7 +1444,7 @@ impl Engine {
     /// そのラベルに候補が無いときは、何もせず一覧に留まる。**押し間違いで
     /// 関係のない文字が入るより、何も起きないほうがよい。**
     fn choose_from_page(&mut self, mut sel: Selecting, label: char, out: &mut Out) {
-        let Some(offset) = SELECTION_KEYS.iter().position(|k| *k == label) else {
+        let Some(offset) = sel.layout.labels().iter().position(|k| *k == label) else {
             self.state = State::Selecting(sel);
             return;
         };
@@ -1429,21 +1503,6 @@ impl Engine {
     }
 }
 
-/// 見出し語入力中に受け取るキーか。[`Engine::would_handle`] の一部。
-fn would_handle_composing(comp: &Composing, key: Key) -> bool {
-    match key {
-        Key::Ctrl('g') | Key::Ctrl('j') => true,
-        Key::Ctrl('q') => !comp.abbrev,
-        // 当てるものがあるときだけ受け取る。
-        Key::Tab => comp
-            .completion
-            .as_ref()
-            .is_some_and(|completion| completion.next().is_some()),
-        Key::Ctrl(_) | Key::Up | Key::Down => false,
-        _ => true,
-    }
-}
-
 /// 引くための問い合わせを組み立てる。
 fn query_of(comp: &Composing) -> Query {
     match &comp.okuri {
@@ -1452,7 +1511,7 @@ fn query_of(comp: &Composing) -> Query {
     }
 }
 
-/// 当て推量を見せている最中か。
+/// 補完候補を見せている最中か。
 fn shows_ghost(comp: &Composing) -> bool {
     comp.completion
         .as_ref()

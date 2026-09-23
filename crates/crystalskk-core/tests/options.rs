@@ -1,0 +1,187 @@
+//! 設定のとおりに振る舞うかを確かめる。
+//!
+//! エンジンは既定値を持たない (ADR-0020)。**受け取るまでは何もせず、
+//! 受け取ったら書かれたとおりに動く。** その両方をここで見る。
+
+mod common;
+
+use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+use crystalskk_core::engine::Role;
+use crystalskk_core::{Engine, Key};
+
+/// 見出し語ごとに候補を返し、前方一致で補完する。
+struct Dict(Vec<(&'static str, Vec<String>)>);
+
+impl Dict {
+    fn sample() -> Self {
+        Self(vec![
+            ("かん", vec!["巻".to_owned()]),
+            ("かんじ", vec!["漢字".to_owned()]),
+            ("かんじゃ", vec!["患者".to_owned()]),
+            ("たくさん", (1..=20).map(|n| format!("候補{n}")).collect()),
+        ])
+    }
+}
+
+impl CandidateSource for Dict {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        self.0
+            .iter()
+            .filter(|(heading, _)| *heading == query.key)
+            .flat_map(|(_, words)| words.iter().map(|w| Candidate::new(w.as_str())))
+            .collect()
+    }
+
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(heading, _)| *heading)
+            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .take(limit)
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+fn press_all(engine: &mut Engine, keys: &str) -> String {
+    let mut committed = String::new();
+    for c in keys.chars() {
+        let key = match c {
+            ' ' => Key::Space,
+            '\t' => Key::Tab,
+            '\n' => Key::Enter,
+            c => Key::Char(c),
+        };
+        committed.push_str(&engine.press(key).commit);
+    }
+    committed
+}
+
+fn ghost(engine: &Engine) -> Option<String> {
+    engine
+        .preedit()
+        .segments
+        .into_iter()
+        .find(|s| s.role == Role::Completion)
+        .map(|s| s.text)
+}
+
+#[test]
+fn without_settings_every_key_goes_to_the_application() {
+    // **既定の値で動き出さない。** 動けば、利用者のファイルに書かれて
+    // いない値が効くことになる。
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    for key in [Key::Char('K'), Key::Char('a'), Key::Space, Key::Ctrl('j')] {
+        assert!(!engine.would_handle(key), "{key:?} を食べない");
+        let response = engine.press(key);
+        assert!(!response.handled, "{key:?} を食べない");
+        assert!(response.commit.is_empty());
+    }
+    assert!(engine.preedit().is_empty());
+}
+
+#[test]
+fn settings_arrive_later_and_take_effect() {
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    assert!(!engine.is_configured());
+    engine.configure(common::options());
+    assert!(engine.is_configured());
+    assert_eq!(press_all(&mut engine, "Kanji \n"), "漢字");
+}
+
+#[test]
+fn turning_dynamic_completion_off_hides_the_guess() {
+    let mut options = common::options();
+    options.completion.dynamic = false;
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+
+    press_all(&mut engine, "Kann");
+    assert_eq!(ghost(&engine), None, "打っている最中には補完しない");
+    assert!(engine.completion().is_none());
+    // `.` はただの句点になる。
+    press_all(&mut engine, ".");
+    assert!(engine.preedit().display().ends_with('。'));
+}
+
+#[test]
+fn tab_still_completes_when_dynamic_completion_is_off() {
+    // Tab は利用者が呼ぶもの。動的補完を切っても使える。
+    let mut options = common::options();
+    options.completion.dynamic = false;
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+
+    press_all(&mut engine, "Kann");
+    assert!(
+        engine.would_handle(Key::Tab),
+        "引いてみて候補があるなら食べる"
+    );
+    press_all(&mut engine, "\t");
+    assert_eq!(engine.preedit().display(), "▽かんじ");
+    let view = engine.completion().expect("巡っている");
+    assert!(view.taken);
+}
+
+#[test]
+fn the_minimum_length_decides_when_guessing_starts() {
+    let mut options = common::options();
+    options.completion.min_length = 3;
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+
+    press_all(&mut engine, "Kann");
+    assert_eq!(ghost(&engine), None, "二文字ではまだ補完しない");
+    press_all(&mut engine, "ji");
+    assert_eq!(ghost(&engine).as_deref(), Some("ゃ"), "三文字で補完する");
+}
+
+#[test]
+fn the_take_key_can_be_changed() {
+    let mut options = common::options();
+    options.completion.take_key = ',';
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+
+    assert_eq!(press_all(&mut engine, "Kann,"), "漢字");
+}
+
+#[test]
+fn the_labels_decide_the_page() {
+    let mut options = common::options();
+    options.candidates.labels = vec!['1', '2', '3'];
+    options.candidates.until_list = 2;
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+
+    press_all(&mut engine, "Takusan  ");
+    let view = engine.candidates().expect("選んでいる");
+    assert!(view.listing, "二回目の変換から一覧に移る");
+    let labels: Vec<char> = view.page().iter().map(|(label, _)| *label).collect();
+    assert_eq!(labels, ['1', '2', '3']);
+    assert_eq!(press_all(&mut engine, "2"), "候補3");
+}
+
+#[test]
+fn changing_the_settings_drops_what_was_in_progress() {
+    // 区切り方が変われば、選んでいる途中の一覧はもう同じ形をしていない。
+    let mut engine = common::engine(Box::new(Dict::sample()));
+    press_all(&mut engine, "Kanji ");
+    assert!(engine.candidates().is_some());
+
+    let mut options = common::options();
+    options.candidates.labels = vec!['1', '2'];
+    engine.configure(options);
+    assert!(engine.candidates().is_none());
+    assert!(engine.preedit().is_empty());
+}
+
+#[test]
+fn the_same_settings_again_change_nothing() {
+    // 設定は入力先が変わるたびに渡し直される。**同じものなら、打ちかけを
+    // 捨てない。**
+    let mut engine = common::engine(Box::new(Dict::sample()));
+    press_all(&mut engine, "Kanji");
+    engine.configure(common::options());
+    assert!(engine.preedit().display().starts_with("▽かんじ"));
+}

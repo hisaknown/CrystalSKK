@@ -29,7 +29,8 @@ fn main() -> ExitCode {
 /// 強制終了は書きかけの学習を捨てることになる。
 fn stop() -> ExitCode {
     match client::ask(&Request::Exit) {
-        Ok(Response::Ok(_)) => {
+        // 終われと頼んで設定が返ることはないが、返っても頼みは届いている。
+        Ok(Response::Ok(_) | Response::Settings(_)) => {
             println!("終了を頼みました。");
             ExitCode::SUCCESS
         }
@@ -167,7 +168,7 @@ fn load() -> std::io::Result<Service> {
         }
     };
 
-    Ok(Service::new(system, user))
+    Ok(Service::new(system, user, paths::settings()?))
 }
 
 /// 一つだけであることを示す印。

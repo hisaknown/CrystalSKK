@@ -80,6 +80,11 @@ impl CandidateSource for ServerSource {
                 self.unreachable.set(true);
                 return Vec::new();
             }
+            Ok(Response::Settings(_)) => {
+                log::error("検索に設定が返りました");
+                self.unreachable.set(true);
+                return Vec::new();
+            }
             Err(e) => log::write(&format!("辞書サーバが居ません ({e})。起こします")),
         }
 
@@ -104,7 +109,7 @@ impl CandidateSource for ServerSource {
 
     /// 前方一致する見出しを返す。補完に使う。
     ///
-    /// **当たらなくても騒がない。** 補完は当て推量で、出なければ出ないだけ
+    /// **出なくても騒がない。** 補完は出れば助かるもので、出なければ出ないだけ
     /// である。ここで繋がらないことを言い立てると、打鍵のたびに知らせが
     /// 出ることになる。
     fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
@@ -192,7 +197,7 @@ impl Learning {
         let mut unsent = Vec::new();
         for request in pending.drain(..) {
             match client::ask(&request) {
-                Ok(Response::Ok(_)) => {}
+                Ok(Response::Ok(_) | Response::Settings(_)) => {}
                 Ok(Response::Error(reason)) => {
                     log::error(&format!("学習を断られました: {reason}"));
                 }
@@ -203,6 +208,35 @@ impl Learning {
             log::error(&format!("学習を {} 件ためています", unsent.len()));
         }
         *pending = unsent;
+    }
+}
+
+/// 設定を尋ねる。
+///
+/// **設定ファイルを読むのはサーバである。** TIP は隔離された入れ物の中
+/// からではファイルを読めないし、足りない項目を書き足す書き手は一人に
+/// 絞りたい。こちらは全文を受け取り、同じ crate で読む。
+///
+/// 居なければ起こして、もう一度だけ尋ねる。辞書を引くときと同じである。
+///
+/// 返す誤りは**そのまま利用者に見せる文**になっている。
+pub fn fetch_settings() -> Result<crystalskk_settings::Settings, String> {
+    let response = match client::ask(&Request::Settings) {
+        Ok(response) => response,
+        Err(e) => {
+            log::write(&format!("辞書サーバが居ません ({e})。起こします"));
+            if !launch::server() {
+                return Err(UNREACHABLE_NOTICE.to_owned());
+            }
+            client::ask(&Request::Settings).map_err(|_| UNREACHABLE_NOTICE.to_owned())?
+        }
+    };
+    match response {
+        Response::Settings(text) => {
+            crystalskk_settings::parse(&text).map_err(|e| format!("設定を読めません: {e}"))
+        }
+        Response::Error(reason) => Err(format!("設定を読めません: {reason}")),
+        Response::Ok(_) => Err("設定を読めません: 辞書サーバの答えが噛み合いません".to_owned()),
     }
 }
 

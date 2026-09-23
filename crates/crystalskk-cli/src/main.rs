@@ -37,6 +37,9 @@ fn run() -> io::Result<()> {
     if let Some(path) = &options.user_dictionary {
         builder = builder.user_dictionary(path);
     }
+    if let Some(path) = &options.settings {
+        builder = builder.settings(path);
+    }
 
     let mut log = |note: &str| eprintln!("  {note}");
     let mut session = builder.build(&mut log)?;
@@ -73,6 +76,7 @@ fn run() -> io::Result<()> {
 struct Options {
     dictionaries: Vec<PathBuf>,
     user_dictionary: Option<PathBuf>,
+    settings: Option<PathBuf>,
     interactive: bool,
 }
 
@@ -94,6 +98,12 @@ impl Options {
                     let path = args.next().ok_or("--user-dict に辞書の場所が要ります")?;
                     options.user_dictionary = Some(PathBuf::from(path));
                 }
+                "--config" => {
+                    let path = args
+                        .next()
+                        .ok_or("--config に設定ファイルの場所が要ります")?;
+                    options.settings = Some(PathBuf::from(path));
+                }
                 other if other.starts_with('-') => {
                     return Err(format!("知らない指定です: {other}"));
                 }
@@ -114,6 +124,8 @@ crystalskk - CrystalSKK の変換をターミナルで動かす
 指定:
   --dict <場所>       静的辞書。繰り返し指定できる
   --user-dict <場所>  ユーザー辞書 (既定: crystalskk-user.dict)
+  --config <場所>     設定ファイル (既定: crystalskk-config.toml)
+                      無ければ雛形から作り、足りない項目は書き足す
   -i, --interactive   一打鍵ずつ受け取る対話モード
   -h, --help          この説明
 
@@ -144,11 +156,20 @@ mod tests {
 
     #[test]
     fn named_options_are_read() {
-        let options = parse(&["--dict", "a.dict", "--user-dict", "u.dict", "-i"])
-            .expect("読める")
-            .expect("使い方ではない");
+        let options = parse(&[
+            "--dict",
+            "a.dict",
+            "--user-dict",
+            "u.dict",
+            "--config",
+            "c.toml",
+            "-i",
+        ])
+        .expect("読める")
+        .expect("使い方ではない");
         assert_eq!(options.dictionaries, [PathBuf::from("a.dict")]);
         assert_eq!(options.user_dictionary, Some(PathBuf::from("u.dict")));
+        assert_eq!(options.settings, Some(PathBuf::from("c.toml")));
         assert!(options.interactive);
     }
 

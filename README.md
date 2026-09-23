@@ -24,7 +24,9 @@ CrystalSKK がそれらと違うところは次の3点。
 | `crystalskk-dict` | 辞書の読み書きと検索、ユーザー辞書の永続化 | 着手 |
 | `crystalskk-fetch` | 辞書の取得と設置 (WinHTTP) | 着手 |
 | `crystalskk-cli` | ターミナルから変換を動かす確認用ツール | 着手 |
-| `crystalskk-server` | 変換サーバー。IPC、設定、スクリプト実行 | 未着手 |
+| `crystalskk-ipc` | TIP と辞書サーバが交わす語彙 | 着手 |
+| `crystalskk-server` | 辞書サーバー。辞書と設定ファイルを持つ唯一のプロセス | 着手 |
+| `crystalskk-settings` | 設定ファイルの読み込みと、足りない項目の書き足し | 着手 |
 | `crystalskk-tip` | TSF TIP (cdylib) | 着手 |
 | `crystalskk-setup` | この環境への導入と削除 | 着手 |
 | `crystalskk-config` | 設定 GUI | 未着手 |
@@ -96,6 +98,12 @@ cargo run -p crystalskk-setup -- uninstall
 入力方式の登録は機械全体に書かれるため、管理者権限が要る ([ADR-0007](docs/adr/0007-installing-a-tip-requires-administrator.md))。権限がなければ UAC の確認が出るので、応じればよい。導入後、設定 → 言語と地域 → 日本語 → 言語のオプション → キーボード に CrystalSKK が現れる。
 
 登録される DLL はビルド成果物とは別物なので、IME を有効にしたままでも `cargo build` は通る。入れ替えるときは `install` をやり直すだけでよい。使用中の DLL は別名へ退けられるため、アプリを閉じる必要もサインインし直す必要もない。ただし**すでに開いているアプリは古い DLL を使い続ける**ので、入れ替えを試すときはそのアプリを開き直すこと。
+
+### 設定
+
+設定ファイルは `%LOCALAPPDATA%\CrystalSKK\config.toml`。導入のときに雛形から作られ、全項目が説明付きで書かれている。
+
+**このファイルに書かれている値が、効いている設定のすべてである** ([ADR-0020](docs/adr/0020-the-settings-file-is-the-whole-truth.md))。CrystalSKK は既定値を持たない。新しい版で項目が増えたときは、導入のときにそのファイルへ書き足され、何を足したかが表示される。書き換えた値は、入力先を切り替えたときに効く。
 
 ### TIP の様子を見る
 

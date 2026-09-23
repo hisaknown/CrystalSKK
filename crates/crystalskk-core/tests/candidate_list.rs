@@ -9,10 +9,13 @@
 //! 窓を描く前に、この振る舞いをここで固めておく。**実機でしか確かめられない
 //! 部分を、できるだけ小さくしておきたい。**
 
+mod common;
+
 use std::collections::HashMap;
 
+use common::{LABELS as SELECTION_KEYS, PAGE_SIZE, UNTIL_LIST as UNTIL_CANDIDATE_LIST};
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
-use crystalskk_core::engine::{PAGE_SIZE, Role, SELECTION_KEYS, UNTIL_CANDIDATE_LIST};
+use crystalskk_core::engine::Role;
 use crystalskk_core::{Engine, Key};
 
 /// 候補をたくさん持つ試験用の辞書。
@@ -59,7 +62,7 @@ impl Session {
 
     fn with_dict(dict: ManyDict) -> Self {
         Self {
-            engine: Engine::new(Box::new(dict)),
+            engine: common::engine(Box::new(dict)),
             committed: String::new(),
         }
     }
@@ -309,7 +312,7 @@ fn an_unreachable_dictionary_does_not_start_a_registration() {
     // **「候補が無い」と「引けなかった」は別である。** 引けなかっただけで
     // 登録を始めると、知っているはずの語を「辞書に無い」と言われたうえ、
     // そのまま登録すれば辞書が汚れる。
-    let mut engine = Engine::new(Box::new(Unreachable));
+    let mut engine = common::engine(Box::new(Unreachable));
     for key in "Kanji ".chars() {
         engine.press(match key {
             ' ' => Key::Space,
@@ -328,7 +331,7 @@ fn an_unreachable_dictionary_does_not_start_a_registration() {
 #[test]
 fn an_empty_but_reachable_dictionary_still_registers() {
     // こちらは本当に無い場合。登録へ進むのが正しい。
-    let mut engine = Engine::new(Box::new(ManyDict::with_candidates(0)));
+    let mut engine = common::engine(Box::new(ManyDict::with_candidates(0)));
     for key in "Kanji ".chars() {
         engine.press(match key {
             ' ' => Key::Space,
@@ -364,7 +367,7 @@ impl CandidateSource for Completing {
 }
 
 fn completing() -> Engine {
-    Engine::new(Box::new(Completing(vec![
+    common::engine(Box::new(Completing(vec![
         ("かん", "巻"),
         ("かんじ", "漢字"),
         ("かんじゃ", "患者"),
@@ -387,9 +390,9 @@ fn typed(engine: &mut Engine, keys: &str) -> String {
 #[test]
 fn a_guess_appears_once_there_is_enough_to_go_on() {
     let mut engine = completing();
-    // 一文字では当てない。**「か」で始まる見出しは山ほどある。**
+    // 一文字では補完しない。**「か」で始まる見出しは山ほどある。**
     assert_eq!(typed(&mut engine, "Ka"), "▽か");
-    // 二文字目で当たる。`n` は一つでは確定しないので二度打つ。
+    // 二文字目で補完する。`n` は一つでは確定しないので二度打つ。
     assert_eq!(typed(&mut engine, "nn"), "▽かんじ");
 }
 
@@ -404,12 +407,12 @@ fn the_guess_is_not_part_of_what_was_typed() {
         .filter(|s| s.role != Role::Completion)
         .map(|s| s.text.as_str())
         .collect();
-    assert_eq!(typed_text, "▽かん", "当て推量は打った文字に含めない");
+    assert_eq!(typed_text, "▽かん", "補完候補は打った文字に含めない");
 }
 
 #[test]
 fn taking_the_guess_converts_and_commits_it() {
-    // **一打鍵で終わる。** 当て推量が出ている時点で見出し語は辞書にあると
+    // **一打鍵で終わる。** 補完候補が出ている時点で見出し語は辞書にあると
     // 分かっているので、変換の結果を選ばせる手間は要らない。
     let mut engine = completing();
     for c in "Kann.".chars() {
@@ -430,7 +433,7 @@ fn taking_the_guess_converts_and_commits_it() {
 fn the_window_shows_what_the_dot_would_take() {
     let mut engine = completing();
     typed(&mut engine, "Kann");
-    let view = engine.completion().expect("当て推量が出ている");
+    let view = engine.completion().expect("補完候補が出ている");
     // **窓に出すのは変換先。** 読みは見れば大抵分かる。
     assert_eq!(view.current().word, "漢字");
     assert_eq!(view.current().heading, "かんじ");
@@ -442,9 +445,9 @@ fn the_window_shows_what_the_dot_would_take() {
 fn the_window_follows_the_tab() {
     let mut engine = completing();
     typed(&mut engine, "Kann		");
-    let view = engine.completion().expect("当て推量が出ている");
+    let view = engine.completion().expect("補完候補が出ている");
     assert_eq!(view.current().word, "患者");
-    assert!(view.taken, "Tab で当てたものは受け取り済み");
+    assert!(view.taken, "Tab で選んだものは受け取り済み");
 }
 
 #[test]
@@ -452,7 +455,7 @@ fn walking_with_tab_shows_the_neighbours_too() {
     // **次に何が来るかが見えないと、何度押せばよいか分からない。**
     let mut engine = completing();
     typed(&mut engine, "Kann	");
-    let view = engine.completion().expect("当て推量が出ている");
+    let view = engine.completion().expect("補完候補が出ている");
     let words: Vec<&str> = view.entries.iter().map(|e| e.word.as_str()).collect();
     assert_eq!(words, ["漢字", "患者", "寒気"]);
     assert_eq!(view.current, 0);
@@ -478,15 +481,15 @@ fn tab_walks_through_the_alternatives() {
 
 #[test]
 fn a_period_is_just_a_period_when_nothing_is_offered() {
-    // 当て推量が出ていなければ奪わない。**見出し語に句点も打てる。**
-    let mut engine = Engine::new(Box::new(ManyDict::with_candidates(0)));
+    // 補完候補が出ていなければ奪わない。**見出し語に句点も打てる。**
+    let mut engine = common::engine(Box::new(ManyDict::with_candidates(0)));
     let preedit = typed(&mut engine, "Ka.");
     assert!(preedit.ends_with('。'), "普通に句点になる: {preedit}");
 }
 
 #[test]
 fn converting_ignores_the_guess() {
-    // 受け取っていない当て推量は、変換の見出し語に入らない。
+    // 受け取っていない補完候補は、変換の見出し語に入らない。
     let mut engine = completing();
     typed(&mut engine, "Kann ");
     let view = engine.candidates().expect("変換している");

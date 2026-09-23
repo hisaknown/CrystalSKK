@@ -16,6 +16,7 @@ crystalskk-dict = { path = "../crystalskk-dict" }
 crystalskk-fetch = { path = "../crystalskk-fetch" }
 crystalskk-ipc = { path = "../crystalskk-ipc" }
 crystalskk-server = { path = "../crystalskk-server" }
+crystalskk-settings = { path = "../crystalskk-settings" }
 crystalskk-tip = { path = "../crystalskk-tip" }
 
 [target.'cfg(windows)'.dependencies.windows]

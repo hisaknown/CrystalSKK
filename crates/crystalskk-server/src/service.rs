@@ -7,6 +7,8 @@
 //! ここには Windows が出てこない。パイプの向こうから来た一行をどう
 //! 解釈するか、それだけを担う。**運び方と、答え方を分けてある。**
 
+use std::path::PathBuf;
+
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_dict::{MemoryDict, UserDict};
 use crystalskk_ipc::{Request, Response};
@@ -27,11 +29,17 @@ pub struct Service {
     system: MemoryDict,
     /// ユーザー辞書。**この機械で唯一の書き手がここにいる。**
     user: UserDict,
+    /// 設定ファイル。足りない項目を書き足すのも、ここだけである。
+    settings: PathBuf,
 }
 
 impl Service {
-    pub fn new(system: MemoryDict, user: UserDict) -> Self {
-        Self { system, user }
+    pub fn new(system: MemoryDict, user: UserDict, settings: PathBuf) -> Self {
+        Self {
+            system,
+            user,
+            settings,
+        }
     }
 
     /// 一つの頼みに答える。
@@ -51,6 +59,7 @@ impl Service {
                 // 利用者の手間がそのまま失われる。**
                 (self.save(), Next::Listen)
             }
+            Request::Settings => (self.settings(), Next::Listen),
             Request::Save => (self.save(), Next::Listen),
             // 答えてから畳む。頼んだ側は「聞き届けた」ことを知れる。
             Request::Exit => (self.save(), Next::Stop),
@@ -99,6 +108,44 @@ impl Service {
         found.into_iter().map(Candidate::new).collect()
     }
 
+    /// 設定ファイルを読んで返す。
+    ///
+    /// **頼まれるたびに読み直す。** 利用者が書き換えたものが、入力先を
+    /// 切り替えたときに効く。ファイルは小さいので、読み直しても障らない。
+    ///
+    /// 足りない項目があれば、ここで書き足す。書き手をサーバ一つに絞る
+    /// ためで、TIP はファイルに触れない (隔離された入れ物の中からは、
+    /// そもそも読めない)。
+    ///
+    /// 返すのは**ファイルの全文**である。読み方は受け取った側も同じ
+    /// crate で揃えてあるので、値に崩して運び直す必要がない。
+    fn settings(&self) -> Response {
+        match crystalskk_settings::load(&self.settings) {
+            Ok(loaded) => {
+                if loaded.created {
+                    eprintln!(
+                        "crystalskk-server: 設定ファイルを作りました: {}",
+                        self.settings.display()
+                    );
+                }
+                if !loaded.added.is_empty() {
+                    eprintln!(
+                        "crystalskk-server: 設定ファイルに書き足しました: {}",
+                        loaded.added.join(", ")
+                    );
+                }
+                if !loaded.unknown.is_empty() {
+                    eprintln!(
+                        "crystalskk-server: 知らない設定があります: {}",
+                        loaded.unknown.join(", ")
+                    );
+                }
+                Response::Settings(loaded.text)
+            }
+            Err(e) => Response::Error(e.to_string()),
+        }
+    }
+
     /// 書き出す。変更が無ければ [`UserDict::save`] が何もしない。
     fn save(&mut self) -> Response {
         match self.user.save() {
@@ -122,7 +169,9 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_file(&path);
-        Service::new(system, UserDict::new(path))
+        let settings = path.with_extension("toml");
+        let _ = std::fs::remove_file(&settings);
+        Service::new(system, UserDict::new(path), settings)
     }
 
     fn service() -> Service {
@@ -133,6 +182,7 @@ mod tests {
         match response {
             Response::Ok(candidates) => candidates.iter().map(|c| c.word.clone()).collect(),
             Response::Error(reason) => panic!("失敗した: {reason}"),
+            Response::Settings(_) => panic!("候補ではなく設定が返った"),
         }
     }
 
@@ -232,6 +282,29 @@ mod tests {
             limit: 16,
         });
         assert!(words(&response).is_empty(), "打ち終えた見出しは出さない");
+    }
+
+    #[test]
+    fn settings_come_back_as_the_whole_file() {
+        // ファイルが無ければ雛形から作り、その全文を返す。
+        let mut service = service();
+        let (response, _) = service.handle(Request::Settings);
+        let Response::Settings(text) = response else {
+            panic!("設定が返らない: {response:?}");
+        };
+        assert!(crystalskk_settings::parse(&text).is_ok());
+        assert!(service.settings.exists(), "ファイルができている");
+        let _ = std::fs::remove_file(&service.settings);
+    }
+
+    #[test]
+    fn a_broken_settings_file_is_explained() {
+        let mut service = service();
+        std::fs::write(&service.settings, "[completion\n").unwrap();
+        let (response, next) = service.handle(Request::Settings);
+        assert!(matches!(response, Response::Error(_)), "{response:?}");
+        assert_eq!(next, Next::Listen, "設定が読めなくても辞書は引ける");
+        let _ = std::fs::remove_file(&service.settings);
     }
 
     #[test]

@@ -35,6 +35,7 @@ fn session(name: &str) -> (Session, PathBuf) {
     let session = SessionBuilder::default()
         .dictionary(&dictionary)
         .user_dictionary(&user)
+        .settings(dir.join("config.toml"))
         .build(&mut log)
         .expect("セッションを作れる");
     (session, user)
