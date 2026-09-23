@@ -12,6 +12,20 @@
 //!
 //! その「読んでもいいよ」を与えるのがこのモジュールである。
 //!
+//! # 辞書だけを許す。置き場所ごと開けない
+//!
+//! 置き場所には辞書のほかに**診断の記録**も置いてある。記録は `trace` に
+//! すると打鍵を残すので、辞書と同じ扱いで開くわけにはいかない。
+//!
+//! そこで、
+//!
+//! - **フォルダには「たどる」だけを許す。** 中を並べて見ることはできない
+//! - **辞書のファイルにだけ「読む」を許す。** 名前を知っているものしか
+//!   開けない
+//!
+//! 記録には何も与えない。隔離された入れ物から見れば、そこに無いのと同じ
+//! になる。
+//!
 //! # 読みだけを許す
 //!
 //! 書き込みは許さない。**許せば、隔離された入れ物で動くあらゆるアプリが
@@ -22,7 +36,7 @@
 //! (PRD §7) で、そちらができるまでの妥協である。
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::LocalFree;
 use windows::Win32::Security::Authorization::{
@@ -36,46 +50,71 @@ use windows::Win32::Security::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{HSTRING, PWSTR};
 
-/// 辞書の置き場所に、隔離された入れ物からの読みを許す。
+/// 辞書だけを、隔離された入れ物から読めるようにする。
 ///
-/// 折り返しのために、中のファイルへ受け継がれる形で与える。あとから
-/// 置かれる辞書にも、同じ許可が付く。
-pub fn allow_app_containers(directory: &Path) -> io::Result<()> {
-    let sddl = descriptor_text()?;
-    apply(directory, &sddl)
+/// `readable` に挙げたファイルにだけ読みを許す。**置き場所そのものは
+/// たどれるだけ**で、中に何があるかは見えない。
+///
+/// 挙げられていないファイル — 診断の記録など — には何も与えない。
+pub fn allow_app_containers(directory: &Path, readable: &[PathBuf]) -> io::Result<()> {
+    let user = current_user_sid()?;
+    apply(directory, &directory_rules(&user), Protect::Yes)?;
+
+    for file in readable {
+        if !file.is_file() {
+            continue;
+        }
+        // ファイルの側は受け継いだ分を残す。断ち切ると、自分の辞書を
+        // 自分で読めなくなる。
+        apply(file, FILE_RULES, Protect::No)?;
+    }
+    Ok(())
 }
 
-/// 与える許可を SDDL で書き表す。
+/// 受け継いできた許可を断ち切るか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protect {
+    /// 断ち切る。ここに書いた分だけが効く。
+    Yes,
+    /// 残す。書いた分は足されるだけ。
+    No,
+}
+
+/// 「制限されたすべてのアプリケーションパッケージ」。
 ///
-/// | 相手 | 許す範囲 |
-/// |---|---|
-/// | `AC` すべてのアプリケーションパッケージ | 読みと、フォルダをたどること |
-/// | 制限されたすべてのパッケージ | 同上 |
-/// | `SY` システム | すべて |
-/// | `BA` 管理者 | すべて |
-/// | 利用者自身 | すべて |
-///
-/// 権利は連結して書く (`FR` 読み + `FX` たどる)。フォルダは「たどる」が
-/// 無いと中のファイルへ届かない。
-///
-/// 二つ目は SID をそのまま書く。**SDDL の略号 `RC` は別物**で、
+/// 略号が無いので SID を直に書く。**SDDL の略号 `RC` は別物**で、
 /// 「制限されたコード」に解決されてしまう。Chromium 系の描画プロセスの
 /// ように、より強く絞られた入れ物 (LPAC) で動くものはこちらに当たる。
+const LPAC: &str = "S-1-15-2-2";
+
+/// 置き場所に与える許可。
+///
+/// | 相手 | 許す範囲 | 受け継ぎ |
+/// |---|---|---|
+/// | `AC` すべてのアプリケーションパッケージ | **たどるだけ** | しない |
+/// | 制限されたすべてのパッケージ | 同上 | しない |
+/// | `SY` システム | すべて | する |
+/// | `BA` 管理者 | すべて | する |
+/// | 利用者自身 | すべて | する |
+///
+/// 隔離された入れ物に与えるのは `FX` (たどる) だけで、`FR` (読む) は
+/// 与えない。**フォルダを読めると、中に何があるか並べて見られる。**
+/// たどるだけなら、名前を知っているものしか開けない。
+///
+/// そして**受け継がせない**。受け継がせると、診断の記録まで読めるように
+/// なる。
 ///
 /// `OICI` は「中のファイルとフォルダにも受け継ぐ」という印。`P` は
 /// 受け継いできたものを断ち切る印で、ここに書いた分だけが効く。
 ///
 /// **利用者自身を必ず入れる。** 断ち切ったうえで書き忘れると、自分の
 /// 辞書を自分で読めなくなる。
-fn descriptor_text() -> io::Result<String> {
-    let user = current_user_sid()?;
-    // 「制限されたすべてのアプリケーションパッケージ」。略号が無いので
-    // SID を直に書く。`%ProgramFiles%` の既定にも同じものが入っている。
-    const LPAC: &str = "S-1-15-2-2";
-    Ok(format!(
-        "D:P(A;OICI;FRFX;;;AC)(A;OICI;FRFX;;;{LPAC})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{user})"
-    ))
+fn directory_rules(user: &str) -> String {
+    format!("D:P(A;;FX;;;AC)(A;;FX;;;{LPAC})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{user})")
 }
+
+/// 辞書のファイルに足す許可。読みだけを与える。
+const FILE_RULES: &str = "D:(A;;FR;;;AC)(A;;FR;;;S-1-15-2-2)";
 
 /// いま動いている利用者の SID を文字列で得る。
 fn current_user_sid() -> io::Result<String> {
@@ -113,7 +152,7 @@ fn current_user_sid() -> io::Result<String> {
 }
 
 /// 書き表した許可を、その場所に与える。
-fn apply(path: &Path, sddl: &str) -> io::Result<()> {
+fn apply(path: &Path, sddl: &str, protect: Protect) -> io::Result<()> {
     let wide = HSTRING::from(path.as_os_str());
     let sddl = HSTRING::from(sddl);
 
@@ -135,10 +174,14 @@ fn apply(path: &Path, sddl: &str) -> io::Result<()> {
         GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
             .map_err(|e| io::Error::other(format!("許可を読み出せません: {}", e.message())))?;
 
+        let information = match protect {
+            Protect::Yes => DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            Protect::No => DACL_SECURITY_INFORMATION,
+        };
         let status = SetNamedSecurityInfoW(
             &wide,
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            information,
             None,
             None,
             Some(dacl),

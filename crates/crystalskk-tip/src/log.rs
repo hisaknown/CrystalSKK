@@ -16,13 +16,20 @@
 //!
 //! | 段階 | 出るもの | 一打鍵あたり |
 //! |---|---|---|
-//! | [`Level::Off`] | 何も出ない (既定) | 書かない |
+//! | [`Level::Off`] | 何も出ない | 書かない |
 //! | [`Level::Error`] | 失敗だけ | 普段は書かない |
-//! | [`Level::Info`] | 有効化、入切、辞書の読み込み | 普段は書かない |
+//! | [`Level::Info`] | 有効化、入切、辞書の読み込み (既定) | 普段は書かない |
 //! | [`Level::Trace`] | 打鍵ごとの一部始終 | **毎回書く** |
 //!
 //! `Info` までは「めったに起きないこと」だけなので、常用しても入力の速さに
 //! 響かない。打鍵ごとの記録が要るときだけ `Trace` へ上げる。
+//!
+//! **既定は `Info`。** 何も言われなければここで記録する。不具合の報告を
+//! 受けたとき「まず記録を入れてもう一度」と頼まずに済む価値は大きく、
+//! `Info` に残るのは節目の出来事だけなので代償が小さい。
+//!
+//! 記録そのものは、隔離されたアプリから読めないようにしてある (ADR-0014)。
+//! **辞書と同じ場所にあるが、同じ扱いではない。**
 //!
 //! 常用する以上は際限なく伸びては困るので、記録を始めるときに大きさを見て、
 //! 育ちすぎていれば一代だけ退ける。
@@ -106,6 +113,12 @@ impl Level {
 
 /// 目印のファイルの名前。中身に段階の名前を書く。
 pub const MARKER_NAME: &str = "log.on";
+
+/// 何も指定されていないときの段階。
+///
+/// 不具合の報告を受けてから記録を入れ直してもらうのでは、**その一度が
+/// 再現するとは限らない**。節目の出来事だけなら常に残してよい。
+pub const DEFAULT_LEVEL: Level = Level::Info;
 
 /// 記録する段階と行き先。起動時に一度だけ決める。
 static DESTINATION: OnceLock<Option<(Level, PathBuf)>> = OnceLock::new();
@@ -196,7 +209,8 @@ fn requested() -> Level {
                 Level::parse(&text)
             }
         })
-        .unwrap_or_default();
+        // 目印が無ければ既定。**切るには「切る」と書いてもらう。**
+        .unwrap_or(DEFAULT_LEVEL);
     by_variable.max(by_marker)
 }
 
@@ -297,6 +311,14 @@ mod tests {
         for level in [Level::Off, Level::Error, Level::Info, Level::Trace] {
             assert_eq!(Level::parse(level.name()), level, "{level:?}");
         }
+    }
+
+    #[test]
+    fn nothing_specified_means_the_default() {
+        // 目印も環境変数も無いとき、何も記録しないのではなく既定で記録する。
+        // 切るには「切る」と書いてもらう。
+        assert_eq!(DEFAULT_LEVEL, Level::Info);
+        assert!(DEFAULT_LEVEL < Level::Trace, "既定で打鍵は残さない");
     }
 
     #[test]

@@ -226,14 +226,9 @@ fn do_log(level: Level, report: &Report) -> ExitCode {
     };
     let marker = directory.join(crystalskk_tip::log::MARKER_NAME);
 
-    let result = if level == Level::Off {
-        match std::fs::remove_file(&marker) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
-    } else {
-        std::fs::write(&marker, level.name().as_bytes())
-    };
+    // 切るときも目印は残す。**消すと「指定なし」に戻り、既定の段階で
+    // 記録が再開してしまう。**
+    let result = std::fs::write(&marker, level.name().as_bytes());
     if let Err(e) = result {
         return fail(&e.to_string(), Some(report));
     }

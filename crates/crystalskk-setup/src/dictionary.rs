@@ -22,9 +22,13 @@ pub fn fetch() -> ExitCode {
     println!("取得元: {}", crystalskk_fetch::SKK_JISYO_L);
     println!("置き場: {}", path.display());
 
+    let outcome = crystalskk_fetch::install(crystalskk_fetch::SKK_JISYO_L, &path, None);
+
+    // 許可は**置いたあとで**与える。先に与えても、置き換えられた
+    // ファイルは新しく作られるので引き継がれない。
     grant_access();
 
-    match crystalskk_fetch::install(crystalskk_fetch::SKK_JISYO_L, &path, None) {
+    match outcome {
         Ok(Some(report)) => {
             println!();
             println!("見出し:     {} 件", report.entries);
@@ -63,7 +67,12 @@ pub fn grant_access() {
         eprintln!("crystalskk-setup: 置き場所を作れません: {e}");
         return;
     }
-    match access::allow_app_containers(&directory) {
+    // 読ませるのは辞書だけ。診断の記録は同じ場所にあるが、挙げない。
+    let readable = [paths::system_dictionary(), paths::user_dictionary()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    match access::allow_app_containers(&directory, &readable) {
         Ok(()) => println!("隔離されたアプリからも読めるようにしました。"),
         Err(e) => eprintln!("crystalskk-setup: {e}"),
     }
