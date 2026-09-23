@@ -15,6 +15,7 @@
 //!
 //! ```text
 //! search\t<見出し語>\t<送り仮名>
+//! convert\t<見出し語>\t<送り仮名>\t<前の文章>\t<後ろの文章>
 //! learn\t<見出し語>\t<送り仮名>\t<語>
 //! settings
 //! reset\t<settings か romaji>
@@ -31,6 +32,12 @@
 //! done\t<したこと>
 //! error\t<訳>
 //! ```
+//!
+//! `convert` は変換のための `search` で、カーソルの前後の文章を添える。
+//! サーバはそれを見て候補を並べる (ADR-0030)。前後の文章は画面にある
+//! 任意の文字列なので、**区切りに使う文字 (タブ・改行・`\u{1f}`・
+//! `\u{1e}`) は空白にしてから運ぶ。** 並べるための手がかりなので、
+//! その程度の崩れは構わない。
 //!
 //! 候補と候補は `\u{1f}`、語と注釈は `\u{1e}` で分ける。**辞書の中身に
 //! 現れない文字**なので、逃がし方を決めずに済む。SKK 辞書はこれらの制御
@@ -73,6 +80,13 @@ pub enum Reset {
 pub enum Request {
     /// 見出し語を引く。
     Search(Query),
+    /// 変換のために見出し語を引く。カーソルの前後の文章を添え、サーバは
+    /// それを見て候補を並べる。取れなかった文章は空。
+    Convert {
+        query: Query,
+        before: String,
+        after: String,
+    },
     /// 前方一致する見出しを引く。補完に使う。
     Complete { prefix: String, limit: usize },
     /// 選ばれた候補を覚える。並び順の学習に使う。
@@ -120,6 +134,16 @@ impl Request {
     pub fn encode(&self) -> String {
         match self {
             Self::Search(query) => format!("search{FIELD}{}", encode_query(query)),
+            Self::Convert {
+                query,
+                before,
+                after,
+            } => format!(
+                "convert{FIELD}{}{FIELD}{}{FIELD}{}",
+                encode_query(query),
+                plain(before),
+                plain(after)
+            ),
             Self::Complete { prefix, limit } => format!("complete{FIELD}{prefix}{FIELD}{limit}"),
             Self::Learn { query, word } => {
                 format!("learn{FIELD}{}{FIELD}{word}", encode_query(query))
@@ -144,6 +168,14 @@ impl Request {
         let mut fields = line.split(FIELD);
         match fields.next()? {
             "search" => Some(Self::Search(decode_query(&mut fields)?)),
+            "convert" => {
+                let query = decode_query(&mut fields)?;
+                Some(Self::Convert {
+                    query,
+                    before: fields.next()?.to_owned(),
+                    after: fields.next()?.to_owned(),
+                })
+            }
             "complete" => Some(Self::Complete {
                 prefix: fields.next()?.to_owned(),
                 limit: fields.next()?.parse().ok()?,
@@ -229,6 +261,16 @@ impl Response {
     }
 }
 
+/// 区切りに使う文字を空白にする。
+fn plain(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            FIELD | '\r' | '\n' | BETWEEN_CANDIDATES | WITHIN_CANDIDATE => ' ',
+            c => c,
+        })
+        .collect()
+}
+
 /// 全文を一行にする。
 fn one_line(text: &str) -> String {
     text.replace('\r', "")
@@ -296,6 +338,40 @@ mod tests {
         });
         roundtrip(&Request::Save);
         roundtrip(&Request::Exit);
+    }
+
+    #[test]
+    fn a_conversion_carries_the_surroundings() {
+        roundtrip(&Request::Convert {
+            query: Query::okuri_ari("おく", 'r', "り"),
+            before: "荷物を".to_owned(),
+            after: "ます".to_owned(),
+        });
+        // 前後が取れなかった変換も運べる。
+        roundtrip(&Request::Convert {
+            query: Query::okuri_nashi("かんじ"),
+            before: String::new(),
+            after: String::new(),
+        });
+    }
+
+    #[test]
+    fn separators_in_the_surroundings_become_spaces() {
+        let request = Request::Convert {
+            query: Query::okuri_nashi("かんじ"),
+            before: "一行目\r\n\t二行目\u{1f}".to_owned(),
+            after: "\u{1e}後".to_owned(),
+        };
+        let line = request.encode();
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            Request::decode(&line),
+            Some(Request::Convert {
+                query: Query::okuri_nashi("かんじ"),
+                before: "一行目   二行目 ".to_owned(),
+                after: " 後".to_owned(),
+            })
+        );
     }
 
     #[test]

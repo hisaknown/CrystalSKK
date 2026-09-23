@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+use crystalskk_core::dict::{Candidate, CandidateSource, Context, NoopRanker, Query, Ranker};
 use crystalskk_dict::UserDict;
 
 use crate::library::Library;
@@ -25,7 +25,6 @@ pub enum Next {
 }
 
 /// 辞書を持ち、頼みに答える係。
-#[derive(Debug)]
 pub struct Service {
     /// 設定に並べた辞書。読むだけ。**一つの辞書であるかのように引く。**
     library: Library,
@@ -33,6 +32,18 @@ pub struct Service {
     user: UserDict,
     /// 設定ファイル。足りない項目を書き足すのも、ここだけである。
     settings: PathBuf,
+    /// 変換の候補を、前後の文章から並べる (ADR-0030)。
+    ranker: Box<dyn Ranker>,
+}
+
+impl std::fmt::Debug for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Service")
+            .field("library", &self.library)
+            .field("user", &self.user)
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Service {
@@ -41,7 +52,13 @@ impl Service {
             library,
             user,
             settings,
+            ranker: Box::new(NoopRanker),
         }
+    }
+
+    /// 変換の候補を並べるものを差し替える。
+    pub fn set_ranker(&mut self, ranker: Box<dyn Ranker>) {
+        self.ranker = ranker;
     }
 
     /// 起動したときに、設定に並べた辞書を用意し始める。
@@ -60,6 +77,11 @@ impl Service {
         self.library.poll();
         match request {
             Request::Search(query) => (self.search(&query), Next::Listen),
+            Request::Convert {
+                query,
+                before,
+                after,
+            } => (self.convert(&query, before, after), Next::Listen),
             Request::Complete { prefix, limit } => {
                 (Response::Ok(self.complete(&prefix, limit)), Next::Listen)
             }
@@ -105,6 +127,30 @@ impl Service {
             && let Some(reason) = self.library.shortfall()
         {
             return Response::Error(reason);
+        }
+        Response::Ok(candidates)
+    }
+
+    /// 変換のために引き、前後の文章から並べる。
+    ///
+    /// **最後に使った語は先頭から動かさない。** ユーザー辞書の先頭がそれで
+    /// ある。利用者の手癖を壊さないためで、「受け取り/受取」のような、
+    /// 文脈では決まらない書き分けもここで片付く。並べるのは残りだけ。
+    fn convert(&self, query: &Query, before: String, after: String) -> Response {
+        let mut candidates = match self.search(query) {
+            Response::Ok(candidates) => candidates,
+            other => return other,
+        };
+        let pinned = usize::from(!self.user.dict().lookup(query).is_empty());
+        if candidates.len() > pinned + 1 {
+            let context = Context {
+                preceding_text: Some(before),
+                following_text: Some(after),
+                ..Context::default()
+            };
+            let mut rest = candidates.split_off(pinned);
+            self.ranker.rank(&context, query, &mut rest);
+            candidates.append(&mut rest);
         }
         Response::Ok(candidates)
     }
@@ -342,6 +388,55 @@ mod tests {
         assert!(
             matches!(&response, Response::Error(reason) if reason.contains("登録には進みません")),
             "{response:?}"
+        );
+    }
+
+    /// 前の文章の最後の文字を含む候補を先に出す、試験用のランカー。
+    struct Echo;
+
+    impl Ranker for Echo {
+        fn rank(&self, context: &Context, _query: &Query, candidates: &mut Vec<Candidate>) {
+            let last = context
+                .preceding_text
+                .as_deref()
+                .and_then(|text| text.chars().last());
+            candidates.sort_by_key(|c| !last.is_some_and(|last| c.word.contains(last)));
+        }
+    }
+
+    fn convert(service: &mut Service, key: &str, before: &str) -> Vec<String> {
+        let (response, _) = service.handle(Request::Convert {
+            query: Query::okuri_nashi(key),
+            before: before.to_owned(),
+            after: String::new(),
+        });
+        words(&response)
+    }
+
+    #[test]
+    fn a_conversion_is_ordered_by_the_ranker() {
+        let mut service = service_with("かんじ /漢字/感じ/幹事/\n");
+        service.set_ranker(Box::new(Echo));
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["幹事", "漢字", "感じ"]
+        );
+        // 並べるのは変換だけ。ただ引くときは辞書の順のまま。
+        let (response, _) = service.handle(Request::Search(Query::okuri_nashi("かんじ")));
+        assert_eq!(words(&response), ["漢字", "感じ", "幹事"]);
+    }
+
+    #[test]
+    fn what_was_used_last_stays_first_in_a_conversion() {
+        let mut service = service_with("かんじ /漢字/感じ/幹事/\n");
+        service.set_ranker(Box::new(Echo));
+        service.handle(Request::Learn {
+            query: Query::okuri_nashi("かんじ"),
+            word: "感じ".to_owned(),
+        });
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["感じ", "幹事", "漢字"]
         );
     }
 
