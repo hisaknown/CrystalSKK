@@ -5,6 +5,14 @@
 //! ラベルキーを押すことである。**その判断はすべてエンジンが済ませている**
 //! ので、ここは渡された一ページを描くだけでよい。
 //!
+//! # アプリの窓を親にする
+//!
+//! 作るときに入力先アプリの窓を親 (オーナー) として渡す。**親のない
+//! ポップアップは、アプリの描画面の下に潜って見えないことがある。**
+//! ストアアプリがまさにそうで、窓は出来ているのに何も見えなかった。
+//!
+//! 親を持てば、その窓の上に重なり、アプリが閉じれば一緒に片付く。
+//!
 //! # 入力を受け取らない窓である
 //!
 //! 打鍵は TIP が受け取り、エンジンが解釈する。窓はそれを映すだけで、
@@ -30,9 +38,9 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, NONCLIENTMETRICSW, RegisterClassExW,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
+    GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, NONCLIENTMETRICSW,
+    RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, SystemParametersInfoW, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
     WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -142,14 +150,15 @@ impl CandidateWindow {
     /// 窓に一つ出す。`anchor` は未確定の文字列の画面上の矩形。
     ///
     /// 出せなくても入力は続く。失敗は記録するだけにする。
-    pub fn show(&self, content: &Content, anchor: RECT) {
+    pub fn show(&self, content: &Content, anchor: RECT, owner: Option<HWND>) {
         if content.is_empty() {
             self.hide();
             return;
         }
-        let Some(hwnd) = self.ensure_window() else {
+        let Some(hwnd) = self.ensure_window(owner) else {
             return;
         };
+        self.follow_owner(hwnd, owner);
 
         // 描く中身を窓に預ける。描画はいつ来るか分からないので、
         // 窓自身が持っていなければならない。
@@ -210,8 +219,24 @@ impl CandidateWindow {
         }
     }
 
+    /// 親が変わっていたら付け替える。
+    ///
+    /// 入力先が別の窓へ移れば、重なる先もそちらへ移さなければならない。
+    fn follow_owner(&self, hwnd: HWND, owner: Option<HWND>) {
+        let Some(owner) = owner else {
+            return;
+        };
+        // SAFETY: どちらも有効な窓。親の付け替えは Windows が認めている。
+        unsafe {
+            let current = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
+            if current != owner.0 as isize {
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            }
+        }
+    }
+
     /// 窓を用意する。すでにあればそれを使う。
-    fn ensure_window(&self) -> Option<HWND> {
+    fn ensure_window(&self, owner: Option<HWND>) -> Option<HWND> {
         let existing = *self.hwnd.borrow();
         if !existing.is_invalid() {
             return Some(existing);
@@ -229,7 +254,8 @@ impl CandidateWindow {
                 0,
                 0,
                 0,
-                None,
+                // 親。ここが `None` だと、アプリの描画面の下に潜りうる。
+                owner,
                 None,
                 None,
                 None,

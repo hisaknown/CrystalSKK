@@ -19,7 +19,7 @@
 use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 
-use windows::Win32::Foundation::{E_FAIL, RECT};
+use windows::Win32::Foundation::{E_FAIL, HWND, RECT};
 use windows::Win32::UI::TextServices::{
     ITfComposition, ITfCompositionSink, ITfContext, ITfContextComposition, ITfEditSession,
     ITfEditSession_Impl, ITfInsertAtSelection, ITfRange, TF_AE_NONE, TF_ANCHOR_END,
@@ -48,6 +48,8 @@ pub struct Update {
     /// 候補の窓をどこへ置くかは、これを見て決める。**編集権のある間しか
     /// 尋ねられない**ので、書き込みのついでにここで取っておく。
     extent: RefCell<Option<RECT>>,
+    /// 入力先アプリの窓。候補の窓の親にする。
+    owner: RefCell<Option<HWND>>,
 }
 
 impl std::fmt::Debug for Update {
@@ -100,6 +102,7 @@ impl ITfEditSession_Impl for Update_Impl {
             *this.extent.borrow_mut() = composition
                 .as_ref()
                 .and_then(|opened| text_extent(&this.context, ec, opened));
+            *this.owner.borrow_mut() = owner_window(&this.context);
 
             *this.composition.borrow_mut() = composition;
             Ok(())
@@ -121,6 +124,27 @@ fn text_extent(context: &ITfContext, ec: u32, composition: &ITfComposition) -> O
         view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
         // 潰れた矩形は当てにならない。アプリがまだ描いていないことがある。
         (rect.right > rect.left || rect.bottom > rect.top).then_some(rect)
+    }
+}
+
+/// 入力先アプリの窓を尋ねる。
+///
+/// 候補の窓はこれを親にして作る。**親のないポップアップは、アプリの
+/// 描画面の下に潜って見えないことがある。** ストアアプリがそうだった。
+///
+/// 文脈が窓を持たないこともある。そのときは焦点のある窓で代える。
+fn owner_window(context: &ITfContext) -> Option<HWND> {
+    // SAFETY: どちらも問い合わせるだけ。
+    unsafe {
+        let from_view = context
+            .GetActiveView()
+            .ok()
+            .and_then(|view| view.GetWnd().ok())
+            .filter(|hwnd| !hwnd.is_invalid());
+        from_view.or_else(|| {
+            let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+            (!focused.is_invalid()).then_some(focused)
+        })
     }
 }
 
@@ -247,6 +271,8 @@ pub struct Applied {
     pub composition: Option<ITfComposition>,
     /// 未確定の文字列が画面上で占める矩形。候補の窓を置く目印。
     pub extent: Option<RECT>,
+    /// 入力先アプリの窓。候補の窓の親にする。
+    pub owner: Option<HWND>,
 }
 
 /// 文書の見え方を、確定と未確定の組に合わせる。
@@ -278,6 +304,7 @@ pub fn update(
         preedit: preedit.encode_utf16().collect(),
         composition: RefCell::new(composition),
         extent: RefCell::new(None),
+        owner: RefCell::new(None),
     });
     let requested: ITfEditSession = session.to_interface();
 
@@ -289,6 +316,7 @@ pub fn update(
     Ok(Applied {
         composition: session.composition.borrow_mut().take(),
         extent: *session.extent.borrow(),
+        owner: *session.owner.borrow(),
     })
 }
 

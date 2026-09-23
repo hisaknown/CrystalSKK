@@ -85,6 +85,8 @@ pub struct TextService {
     composition: RefCell<Option<(ITfContext, ITfComposition)>>,
     /// 候補の一覧と辞書登録を出す小窓。出す段階になるまで作らない。
     candidates: CandidateWindow,
+    /// 最後に分かった、入力先アプリの窓。候補の窓の親にする。
+    owner: RefCell<Option<windows::Win32::Foundation::HWND>>,
     /// 最後に分かった、未確定の文字列の画面上の位置。
     ///
     /// 辞書登録中は文書に何も書かないので、位置を尋ねる相手がいない。
@@ -113,6 +115,7 @@ impl TextService {
             user_dictionary,
             composition: RefCell::new(None),
             candidates: CandidateWindow::new(),
+            owner: RefCell::new(None),
             anchor: RefCell::new(None),
             announced: RefCell::new(None),
         }
@@ -242,9 +245,16 @@ impl TextService {
     /// `extent` は未確定の文字列の画面上の位置。取れたら覚えておき、
     /// 取れなかったときは最後に分かった場所を使う。辞書登録中は文書に
     /// 何も書かないので、尋ねても返ってこない。
-    fn show_window(&self, extent: Option<windows::Win32::Foundation::RECT>) {
+    fn show_window(
+        &self,
+        extent: Option<windows::Win32::Foundation::RECT>,
+        owner: Option<windows::Win32::Foundation::HWND>,
+    ) {
         if extent.is_some() {
             *self.anchor.borrow_mut() = extent;
+        }
+        if owner.is_some() {
+            *self.owner.borrow_mut() = owner;
         }
 
         let Some(content) = self.window_content() else {
@@ -273,7 +283,7 @@ impl TextService {
             self.candidates.hide();
             return;
         };
-        self.candidates.show(&content, anchor);
+        self.candidates.show(&content, anchor, *self.owner.borrow());
     }
 
     /// 候補一覧をシステムへ差し出す。返るのは自前の窓を出してよいか。
@@ -574,7 +584,7 @@ impl TextService_Impl {
                 *self.this.composition.borrow_mut() =
                     applied.composition.map(|c| (context.clone(), c));
                 log::trace("文書へ反映した");
-                self.this.show_window(applied.extent);
+                self.this.show_window(applied.extent, applied.owner);
             }
             Err(e) => {
                 log::error(&format!("文書へ反映できなかった: {}", e.message()));
