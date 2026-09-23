@@ -508,7 +508,7 @@ mod coverage_tests {
         let at = |x: i32, y: i32| coverage[(y * size + x) as usize];
         assert_eq!(at(0, 0), 0, "左上は透明");
         assert_eq!(at(size - 1, size - 1), 0, "右下は透明");
-        assert!(coverage.iter().any(|a| *a == 255), "濃いところがある");
+        assert!(coverage.contains(&255), "濃いところがある");
         assert!(coverage.iter().any(|a| *a > 0 && *a < 255), "縁はなめらか");
         if std::env::var_os("SHOW_GLYPH").is_some() {
             for y in 0..size {
