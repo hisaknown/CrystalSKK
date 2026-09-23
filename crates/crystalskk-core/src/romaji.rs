@@ -106,6 +106,11 @@ impl RomajiTable {
         Ok(Self::from_rules(rules))
     }
 
+    /// 規則を打鍵列の順に並べる。
+    pub fn rules(&self) -> impl Iterator<Item = &Rule> {
+        self.rules.values()
+    }
+
     fn exact(&self, input: &str) -> Option<&Rule> {
         self.rules.get(input)
     }
@@ -169,6 +174,19 @@ impl RomajiConverter {
 
     pub fn clear(&mut self) {
         self.pending.clear();
+    }
+
+    /// 打ちかけの打鍵列に `c` を続けると、規則になる (またはその途中になる) か。
+    ///
+    /// 打ちかけが無ければ偽。**一打鍵目から規則を優先すると、SKK のキー
+    /// (`l` や `/`) が一つも使えなくなる。**
+    pub fn continues(&self, c: char) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+        let mut buffer = self.pending.clone();
+        buffer.push(c);
+        self.table.exact(&buffer).is_some() || self.table.has_longer(&buffer)
     }
 
     /// 未確定の打鍵列から一文字削る。削るものがなければ `false`。

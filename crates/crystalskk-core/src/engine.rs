@@ -919,6 +919,14 @@ impl Engine {
             return;
         }
 
+        // 打ちかけの続きが規則になるなら、キーより規則を優先する。
+        if let Some(c) = self.romaji_continuation(key) {
+            let kana = self.romaji.feed(c);
+            let rendered = self.mode.render_kana(&kana);
+            self.emit(&rendered, out);
+            return;
+        }
+
         match key {
             Key::Ctrl('g') => {
                 // 打ちかけのローマ字が残っていれば、まずそれを捨てる。
@@ -959,7 +967,9 @@ impl Engine {
                 };
             }
             Key::Char('/') => {
-                self.romaji.clear();
+                // 打ちかけの `n` は `ん` にしてから始める。捨てると、
+                // 打ったはずの字が消える。
+                self.flush_romaji(out);
                 self.state = State::Composing(Composing {
                     abbrev: true,
                     ..Composing::default()
@@ -1095,6 +1105,20 @@ impl Engine {
     // --- 見出し語入力 --------------------------------------------------
 
     fn on_composing(&mut self, mut comp: Composing, key: Key, out: &mut Out) {
+        // 打ちかけの続きが規則になるなら、キーより規則を優先する。
+        // `.` (補完候補を受け取る) や空白 (変換) も同じ。
+        if !comp.abbrev
+            && let Some(c) = self.romaji_continuation(key)
+        {
+            let kana = self.romaji.feed(c);
+            match comp.okuri.as_mut() {
+                Some(okuri) => okuri.kana.push_str(&kana),
+                None => comp.midashi.push_str(&kana),
+            }
+            self.convert_if_okuri_complete(comp);
+            return;
+        }
+
         match key {
             Key::Ctrl('g') => {
                 self.romaji.clear();
@@ -1361,6 +1385,22 @@ impl Engine {
             Key::Ctrl(_) | Key::Up | Key::Down => false,
             _ => true,
         }
+    }
+
+    /// 打ちかけのローマ字の続きとして読むべき打鍵なら、その文字。
+    ///
+    /// SKK のキー (`l` `q` `/` 空白 など) と規則がぶつかったとき、**打ち
+    /// かけがあれば規則が勝つ**。雛形の `z/` (・) や `z ` (全角空白) は
+    /// こうでないと打てない。ddskk も同じ順で見る。
+    ///
+    /// 打ちかけが無ければ何も奪わない。
+    fn romaji_continuation(&self, key: Key) -> Option<char> {
+        let c = match key {
+            Key::Char(c) if !c.is_ascii_uppercase() => c,
+            Key::Space => ' ',
+            _ => return None,
+        };
+        self.romaji.continues(c).then_some(c)
     }
 
     /// 補完候補を受け取るキー。

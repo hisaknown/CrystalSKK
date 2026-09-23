@@ -272,6 +272,8 @@ zk	↑
 zl	→
 
 # 促音: 同じ子音を重ねると っ になり、二つめの子音は次の文字に使われます
+# (l と q は SKK のキーなので除いています。書き足すと、n や同じ字の
+# あとで英数やカタカナへ切り替えられなくなります。)
 bb	っ	b
 cc	っ	c
 dd	っ	d
@@ -280,10 +282,8 @@ gg	っ	g
 hh	っ	h
 jj	っ	j
 kk	っ	k
-ll	っ	l
 mm	っ	m
 pp	っ	p
-qq	っ	q
 rr	っ	r
 ss	っ	s
 tt	っ	t
@@ -302,10 +302,8 @@ ng	ん	g
 nh	ん	h
 nj	ん	j
 nk	ん	k
-nl	ん	l
 nm	ん	m
 np	ん	p
-nq	ん	q
 nr	ん	r
 ns	ん	s
 nt	ん	t
