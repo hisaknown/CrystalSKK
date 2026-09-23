@@ -364,6 +364,19 @@ impl TextService_Impl {
             open_close_cookie,
         });
 
+        // 切られていたら、入にする。**SKK では入が常態** (ADR-0013) で、
+        // 切ったままでは `Ctrl+J` すら届かない。入って半角英数なら、打鍵の
+        // 意味は切のときと変わらないので、邪魔にもならない。
+        //
+        // ここは入力方式として選ばれた瞬間にしか通らない。焦点が移るたびに
+        // これをやると、**利用者が切ったものを勝手に入れ直す**ことになる。
+        if let Some(thread_manager) = self.this.thread_manager()
+            && !compartment::is_open(&thread_manager)
+        {
+            log::write("切られていたので入にする");
+            compartment::set_open(&thread_manager, client_id, true);
+        }
+
         // 入っているなら、そのモードを掲示する。切なら何も言わない。
         self.this.sync_with_open_state();
         Ok(())
