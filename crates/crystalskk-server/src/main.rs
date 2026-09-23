@@ -54,8 +54,31 @@ fn status() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// 自分のものであるコンソールを手放す。
+///
+/// ログオンのたびに起きるよう登録してあるので、そこから立つと**窓が一つ
+/// 開いたままになる**。利用者が見るものではないので、閉じる。
+///
+/// ただし、ターミナルから自分で起動したときは残す。そちらは中を見たくて
+/// 動かしているのだから、黙られては困る。
+///
+/// 見分け方は「このコンソールに自分しか居ないか」である。自分だけなら
+/// 起動と同時に作られたもので、誰かと一緒なら borrowed したものになる。
+fn detach_own_console() {
+    // SAFETY: 数を尋ねて、自分だけなら手放す。どちらも副作用はない。
+    unsafe {
+        let mut processes = [0u32; 2];
+        let attached = windows::Win32::System::Console::GetConsoleProcessList(&mut processes);
+        if attached == 1 {
+            let _ = windows::Win32::System::Console::FreeConsole();
+        }
+    }
+}
+
 /// 辞書を読み、頼みを受け続ける。
 fn serve() -> ExitCode {
+    detach_own_console();
+
     let Some(_only_one) = Singleton::claim(&names::mutex()) else {
         // すでに居る。二つ立てるとユーザー辞書の書き手が二つになる。
         eprintln!("crystalskk-server: すでに動いています");

@@ -15,6 +15,7 @@
 //! 帰結として入れてある。
 
 use std::io;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,9 @@ use crystalskk_server::client;
 
 /// 実行ファイルの名前。
 pub const SERVER_NAME: &str = "crystalskk-server.exe";
+
+/// 窓を出さずに起こすための印。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 終わるのを待つ上限。
 const GIVE_UP_AFTER: Duration = Duration::from_secs(5);
@@ -63,7 +67,11 @@ pub fn start(directory: &Path) -> io::Result<()> {
             format!("{} がありません", exe.display()),
         ));
     }
-    std::process::Command::new(&exe).spawn()?;
+    // 窓を出さない。**黙って立ち上がるべきものが窓を開くと、利用者は
+    // 「何か始まった」と身構える。**
+    std::process::Command::new(&exe)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()?;
     Ok(())
 }
 

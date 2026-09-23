@@ -12,10 +12,17 @@
 //! だから導入とログオンでも起こしてある。ここは最後の手当てであって、
 //! 唯一の手立てではない。
 
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::log;
+
+/// 窓を出さずに起こす。
+///
+/// **黙って立ち上がるべきものが窓を開くと、入力の邪魔になる。** 辞書
+/// サーバは利用者が見るものではない。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 実行ファイルの名前。
 const SERVER_NAME: &str = "crystalskk-server.exe";
@@ -34,7 +41,7 @@ pub fn server() -> bool {
         return false;
     }
 
-    match Command::new(&exe).spawn() {
+    match Command::new(&exe).creation_flags(CREATE_NO_WINDOW).spawn() {
         Ok(_) => {
             // 起きるまでの間を置く。読み込みに 100 ミリ秒ほどかかる。
             std::thread::sleep(std::time::Duration::from_millis(STARTUP_WAIT_MS));
