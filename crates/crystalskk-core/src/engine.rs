@@ -914,6 +914,7 @@ impl Engine {
             Key::Char('q') if !comp.abbrev => {
                 self.absorb_pending(&mut comp);
                 let text = kana::to_katakana(&self.midashi_with_okuri(&comp));
+                self.learn_katakana(&comp, &text, out);
                 self.emit(&text, out);
                 self.state = State::Direct;
             }
@@ -1081,6 +1082,29 @@ impl Engine {
         }
     }
 
+    /// `q` でカタカナに確定したことを、辞書に覚えさせる。
+    ///
+    /// **その見出し語が辞書にあるときだけ覚える。** 「あ」を打って `q` と
+    /// したものまで覚えていては、辞書が使い捨ての語で埋まる。辞書に載って
+    /// いる見出し語なら、次は space でも同じカタカナが出てほしい。
+    ///
+    /// 送り仮名があるときは覚えない。カタカナにするのは送り仮名まで含めた
+    /// 全体なので (「おくり」→「オクリ」)、送りを別に持つ候補の形に
+    /// はまらない。
+    fn learn_katakana(&self, comp: &Composing, text: &str, out: &mut Out) {
+        if comp.okuri.is_some() {
+            return;
+        }
+        let query = query_of(comp);
+        if self.dict.lookup(&query).is_empty() {
+            return;
+        }
+        out.events.push(Event::Learn {
+            query,
+            word: text.to_owned(),
+        });
+    }
+
     /// 見出し語をそのまま確定するときの文字列。
     fn commit_text_of(&self, comp: &Composing) -> String {
         let text = self.midashi_with_okuri(comp);
@@ -1096,10 +1120,7 @@ impl Engine {
         self.absorb_pending(&mut comp);
         self.romaji.clear();
 
-        let query = match &comp.okuri {
-            Some(okuri) => Query::okuri_ari(&comp.midashi, okuri.head, okuri.kana.clone()),
-            None => Query::okuri_nashi(comp.midashi.clone()),
-        };
+        let query = query_of(&comp);
 
         let mut candidates = self.dict.lookup(&query);
         self.ranker.rank(&self.context, &query, &mut candidates);
@@ -1263,6 +1284,14 @@ fn would_handle_composing(comp: &Composing, key: Key) -> bool {
             .is_some_and(|completion| completion.next().is_some()),
         Key::Ctrl(_) | Key::Up | Key::Down => false,
         _ => true,
+    }
+}
+
+/// 引くための問い合わせを組み立てる。
+fn query_of(comp: &Composing) -> Query {
+    match &comp.okuri {
+        Some(okuri) => Query::okuri_ari(&comp.midashi, okuri.head, okuri.kana.clone()),
+        None => Query::okuri_nashi(comp.midashi.clone()),
     }
 }
 

@@ -315,6 +315,30 @@ fn q_commits_the_midashi_as_katakana() {
 }
 
 #[test]
+fn a_known_heading_learns_its_katakana() {
+    // **辞書に載っている見出し語なら、次は space でも同じカタカナが出て
+    // ほしい。** そのために覚えておく。
+    let mut s = Session::new();
+    s.type_keys("Kanjiq");
+    assert_eq!(
+        s.events,
+        [Event::Learn {
+            query: Query::okuri_nashi("かんじ"),
+            word: "カンジ".into()
+        }]
+    );
+}
+
+#[test]
+fn an_unknown_heading_learns_nothing() {
+    // 打ち捨てのかなまで覚えていては、辞書が使い捨ての語で埋まる。
+    let mut s = Session::new();
+    s.type_keys("Nanikaq");
+    assert_eq!(s.committed, "ナニカ");
+    assert!(s.events.is_empty());
+}
+
+#[test]
 fn ctrl_q_commits_the_midashi_as_halfwidth_katakana() {
     let mut s = Session::new();
     s.type_keys("Kanji");
