@@ -2,7 +2,9 @@
 
 Windows 向けの SKK 日本語入力メソッド。TSF の TIP として実装する。
 
-**入力できるところまで来た。** かな入力・変換・モード切り替えがメモ帳で動く。ただし候補ウィンドウがなく、未確定文字に下線も付かないので、常用にはまだ早い。
+**日々の入力に要る機能がひととおり揃った。** かな入力と変換、候補ウィンドウ (ストアアプリにも出る)、辞書登録、学習、下線による区切りの表示、動的補完が動く。辞書は設定に並べたものを自動で取得し、設定はすべて一つのファイルに書かれる。
+
+まだ無いもの: 配布用のインストーラ (いまはソースからビルドして導入する)、設定 GUI、設定スクリプト、キーバインドの設定。
 
 ## これは何か
 
@@ -62,6 +64,8 @@ cargo run -p crystalskk-cli -- --dict ./SKK-JISYO.L
   モード: あ ひらがな
 ```
 
+CLI も IME と同じ設定ファイルの形を使う。既定では今いる場所の `crystalskk-config.toml` と `romaji.txt` を使い、無ければ雛形から作る (場所は `--config` で変えられる)。
+
 `-i` を付けると、一打鍵ずつ受け取る対話モードになる。実際の打鍵の手触りはこちらで確かめる。Ctrl+C で終了。
 
 ```bash
@@ -70,14 +74,14 @@ cargo run -p crystalskk-cli -- -i --dict ./SKK-JISYO.L
 
 ### IME を導入する
 
-かな入力と変換が動く。候補ウィンドウはまだないので、候補は Space で送りながら未確定表示で見る。
+TIP (DLL) と辞書サーバをビルドしてから導入する。導入は `target/release` にあるものを写して登録し、辞書サーバを起こす。
 
 ```bash
-cargo build -p crystalskk-tip --release
+cargo build --workspace --release
 ```
 
 ```bash
-cargo run -p crystalskk-setup -- install
+cargo run -p crystalskk-setup --release -- install
 ```
 
 使う辞書は設定ファイルの `dictionaries.sources` に並べる (既定は L 辞書)。URL なら辞書サーバが裏で取得し、起動のたびに更新を確かめる。複数並べると、一つの辞書であるかのように並べた順で引く ([ADR-0022](docs/adr/0022-read-the-listed-dictionaries-as-one.md))。いま取り直したいとき、何が起きたかを見たいときは次を打つ。権限は要らない。
@@ -112,19 +116,31 @@ cargo run -p crystalskk-setup -- uninstall
 
 ### TIP の様子を見る
 
-TIP は他人のプロセスの中で動くので、標準出力もデバッガも当てにできない。環境変数を設定したアプリから使うと、`%LOCALAPPDATA%\CrystalSKK\tip.log` に記録が残る。
+TIP は他人のプロセスの中で動くので、標準出力もデバッガも当てにできない。代わりに `%LOCALAPPDATA%\CrystalSKK\tip.log` に記録を残す。既定は `info` (有効化や設定の読み込みなどの節目だけ) で、大きくなりすぎたら一代だけ退けて書き直す。
+
+細かさは導入先の目印ファイルで決める。管理者権限が要る。
 
 ```bash
-setx CRYSTALSKK_LOG 1
+cargo run -p crystalskk-setup -- log trace
 ```
 
-設定したあとに起動したアプリから記録される。サインインし直すと確実。有効化されたか、打鍵が届いているかを切り分けるのに使う。**入力のたびにファイルを開くので、常用しないこと。**
+段階は `off` / `error` (失敗だけ) / `info` / `trace` (打鍵ごと)。変えたあとに起動したアプリから効く。**`trace` は入力のたびにファイルを開くので、確かめ終えたら `info` か `off` に戻すこと。** 環境変数 `CRYSTALSKK_LOG` でも同じ段階を指定できる (詳しいほうが採られる) が、ストアアプリには環境変数が届かない。
 
 記録は UTF-8 なので、Windows PowerShell で読むときは符号化を指定する。
 
 ```bash
 Get-Content -Encoding UTF8 $env:LOCALAPPDATA\CrystalSKK\tip.log -Tail 40
 ```
+
+### アイコン
+
+アイコンの正本は `assets/icons/` の SVG で、TIP をビルドするときに各大きさに描いて埋め込む ([ADR-0024](docs/adr/0024-draw-the-icons-from-svg-at-build-time.md))。入力モードの絵は黒一色で描けばよく、色はタスクバーの明るさに合わせて動くときに付く。文字はアウトライン化しておくこと (`<text>` が残っているとビルドが止まる)。明るい地と暗い地に並べた見本は次で作れる。
+
+```bash
+cargo run -p crystalskk-art --example sheet -- sheet.png assets/icons/mode-hiragana.svg assets/icons/face.svg
+```
+
+### C を持ち込まない
 
 依存に C をビルドするクレート (`cc`) を入れないことを CI で検査している。新しい依存を足すときは `cargo tree --invert cc` が空であることを確認すること。
 
