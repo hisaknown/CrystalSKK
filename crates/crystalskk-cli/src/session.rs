@@ -32,6 +32,12 @@ impl CandidateSource for SharedUserDict {
     fn lookup(&self, query: &Query) -> Vec<Candidate> {
         self.0.borrow().lookup(query)
     }
+
+    /// 補完も中継する。**書かないと既定の「何も返さない」になり、
+    /// ユーザー辞書の語が補完に出てこない。**
+    fn complete(&self, prefix: &str, limit: usize) -> Vec<String> {
+        self.0.borrow().complete(prefix, limit)
+    }
 }
 
 /// 入力セッション。

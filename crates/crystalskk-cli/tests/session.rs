@@ -142,3 +142,19 @@ fn saving_is_skipped_when_nothing_was_learned() {
     assert!(!session.save_user_dictionary().expect("保存を試せる"));
     assert!(!path.exists(), "学習がなければ書き出さない");
 }
+
+#[test]
+fn registered_words_are_offered_for_completion() {
+    let (mut session, _) = session("complete-user");
+    type_keys(&mut session, "Mikoto\\skotoba\\n");
+    session.clear_document();
+
+    // 登録した見出しが、ユーザー辞書から補完に出る。
+    type_keys(&mut session, "Miko\\t");
+    let view = session.completion().expect("補完している");
+    assert!(
+        view.entries.iter().any(|e| e.heading == "みこと"),
+        "実際の候補: {:?}",
+        view.entries
+    );
+}
