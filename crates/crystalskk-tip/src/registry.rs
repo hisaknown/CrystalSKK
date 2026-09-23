@@ -11,8 +11,8 @@ use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::{Error, GUID, HSTRING, PCWSTR, Result};
 
@@ -110,6 +110,39 @@ fn delete_tree(root: HKEY, key: &HSTRING) -> Result<()> {
         Err(Error::from_hresult(status.to_hresult()))
     }
 }
+
+/// ログオンのたびに起きるものとして登録する。
+///
+/// 機械全体ではなく利用者ごとに書く。**辞書サーバは利用者のものなので、
+/// 他人のログオンで立てても意味がない。** 権限も要らない。
+pub fn write_run_entry(name: &str, command: &str) -> Result<()> {
+    write_string(HKEY_CURRENT_USER, RUN_KEY, Some(name), command)
+}
+
+/// 自動起動の登録を消す。
+pub fn delete_run_entry(name: &str) -> Result<()> {
+    let key = HSTRING::from(RUN_KEY);
+    let value = HSTRING::from(name);
+    let mut handle = HKEY::default();
+
+    // SAFETY: 出力先のハンドルは有効な場所を指す。開けたら必ず閉じる。
+    unsafe {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &key, None, KEY_WRITE, &mut handle) != ERROR_SUCCESS {
+            return Ok(());
+        }
+        let status = RegDeleteValueW(handle, &value);
+        let _ = RegCloseKey(handle);
+        // 無いものを消そうとしただけなら、それでよい (2 = ERROR_FILE_NOT_FOUND)。
+        if status == ERROR_SUCCESS || status.0 == 2 {
+            Ok(())
+        } else {
+            Err(Error::from_hresult(status.to_hresult()))
+        }
+    }
+}
+
+/// ログオンのたびに起きるものが並ぶ場所。
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// キーを作り、文字列の値を書く。`name` が `None` なら既定の値。
 fn write_string(root: HKEY, key: &str, name: Option<&str>, value: &str) -> Result<()> {

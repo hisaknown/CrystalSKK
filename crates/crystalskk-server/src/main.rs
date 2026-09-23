@@ -8,8 +8,7 @@ use std::process::ExitCode;
 use crystalskk_dict::{MemoryDict, UserDict, encoding};
 use crystalskk_ipc::{Request, Response};
 use crystalskk_server::service::{Next, Service};
-use crystalskk_server::{client, names, pipe};
-use crystalskk_tip::paths;
+use crystalskk_server::{client, names, paths, pipe};
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {

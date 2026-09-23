@@ -19,6 +19,7 @@
 
 pub mod client;
 pub mod names;
+pub mod paths;
 pub mod pipe;
 pub mod security;
 pub mod service;

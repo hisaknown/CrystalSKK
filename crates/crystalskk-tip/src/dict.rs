@@ -1,130 +1,149 @@
-//! 辞書の用意。
+//! 辞書との繋がり。
 //!
-//! # これは暫定である
+//! **TIP は辞書を持たない。** 持っているのは辞書サーバで、こちらは引きたい
+//! ものを頼む (ADR-0016)。
 //!
-//! TIP は入力先アプリのプロセスの中で動く。辞書をここで読むということは、
-//! **Word にも Chrome にも辞書の写しが一つずつ載る**ということである。
-//! PRD §7 が変換をサーバープロセスへ追い出すと決めたのは、まさにこれを
-//! 避けるためだった。
+//! # 逃げ道は作らない
 //!
-//! サーバーはまだない。それまでの繋ぎとして、ここで読む。
+//! 繋がらなかったときに自分で辞書を読む道は用意していない。読み手が二つに
+//! なれば書き手も二つになり、**学習が壊れる**。めったに通らない道は腐り
+//! もする。
 //!
-//! 代償を小さくするため、辞書は**引かれるまで読まない**。ほとんどの打鍵は
-//! 辞書を必要としないので、変換しないまま終わるアプリでは一度も読まれない。
+//! 代わりに、繋がらないことを**隠さない**。「辞書に無い」と「引けなかった」
+//! が混ざると、利用者からは「候補がおかしい」としか見えなくなる。
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crystalskk_core::Engine;
-use crystalskk_core::dict::{Candidate, CandidateSource, ChainedSource, Query};
-use crystalskk_dict::{MemoryDict, UserDict, encoding};
-
-use crate::paths;
+use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+use crystalskk_ipc::{Request, Response};
+use crystalskk_server::client;
 
 use crate::log;
 
-/// 引かれるまで読まない静的辞書。
-struct LazyDict {
-    /// 一度だけ読む。読めなければ空のまま。
-    loaded: OnceCell<MemoryDict>,
-}
-
-impl LazyDict {
-    fn new() -> Self {
-        Self {
-            loaded: OnceCell::new(),
-        }
-    }
-
-    fn dict(&self) -> &MemoryDict {
-        self.loaded.get_or_init(|| {
-            let Ok(path) = paths::system_dictionary() else {
-                log::error("辞書の置き場所が分からない");
-                return MemoryDict::new();
-            };
-            let Ok(bytes) = std::fs::read(&path) else {
-                log::error(&format!("辞書がない: {}", path.display()));
-                return MemoryDict::new();
-            };
-
-            let decoded = encoding::decode(&bytes);
-            let (dict, report) = MemoryDict::parse(&decoded.text);
-            log::write(&format!(
-                "辞書を読んだ: {} 件 ({}, 読み飛ばし {} 行)",
-                report.entries, decoded.encoding, report.skipped
-            ));
-            dict
-        })
-    }
-}
-
-impl CandidateSource for LazyDict {
-    fn lookup(&self, query: &Query) -> Vec<Candidate> {
-        self.dict().lookup(query)
-    }
-}
-
-/// 引きながら書き換えられるユーザー辞書。
+/// 繋がらなかったときに出す知らせ。
 ///
-/// エンジンは候補ソースを所有するが、学習ではそれを書き換える必要がある。
-/// エンジンに書き換えの口を持たせるより、共有の持ち手をこちら側で用意する
-/// ほうが、エンジンを純粋に保てる。
-#[derive(Clone)]
-pub struct SharedUserDict(Rc<RefCell<UserDict>>);
+/// **候補が空なのは「辞書に無い」からだ、と思わせない。** 引けなかったのか
+/// 辞書に無かったのかが混ざると、利用者には「候補がおかしい」としか見えない。
+pub const UNREACHABLE_NOTICE: &str = "辞書に繋がりません";
 
-impl SharedUserDict {
-    fn load() -> Self {
-        let path = paths::user_dictionary().unwrap_or_default();
-        let dict = match UserDict::load(&path) {
-            Ok((dict, report)) => {
-                log::write(&format!("ユーザー辞書を読んだ: {} 件", report.entries));
-                dict
+/// 辞書サーバを候補の出どころとして使う。
+///
+/// エンジンから見れば、ただの [`CandidateSource`] である。**パイプの
+/// 向こうにいることをエンジンは知らない。** ADR-0001 で切っておいた継ぎ目が
+/// そのまま使えた。
+#[derive(Debug, Default)]
+pub struct ServerSource {
+    /// 直近の引き方でサーバに届かなかったか。
+    unreachable: std::cell::Cell<bool>,
+}
+
+impl ServerSource {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// 直近の引き方でサーバに届かなかったか。
+    pub fn was_unreachable(&self) -> bool {
+        self.unreachable.get()
+    }
+}
+
+impl CandidateSource for ServerSource {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        match client::ask(&Request::Search(query.clone())) {
+            Ok(Response::Ok(candidates)) => {
+                self.unreachable.set(false);
+                candidates
+            }
+            Ok(Response::Error(reason)) => {
+                log::error(&format!("辞書サーバが断りました: {reason}"));
+                self.unreachable.set(true);
+                Vec::new()
             }
             Err(e) => {
-                log::error(&format!("ユーザー辞書を読めなかった: {e}"));
-                UserDict::new(path)
+                log::error(&format!("辞書サーバに繋がりません: {e}"));
+                self.unreachable.set(true);
+                Vec::new()
             }
-        };
-        Self(Rc::new(RefCell::new(dict)))
-    }
-
-    /// 確定した語を学習する。辞書登録も同じ操作になる。
-    pub fn learn(&self, query: &Query, word: &str) {
-        self.0.borrow_mut().learn(query, word);
-    }
-
-    /// 変更があれば書き出す。
-    pub fn save(&self) {
-        let mut dict = self.0.borrow_mut();
-        if !dict.is_dirty() {
-            return;
-        }
-        match dict.save() {
-            Ok(()) => log::write("ユーザー辞書を保存した"),
-            Err(e) => log::error(&format!("ユーザー辞書を保存できなかった: {e}")),
         }
     }
 }
 
-impl std::fmt::Debug for SharedUserDict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedUserDict").finish_non_exhaustive()
-    }
-}
-
-impl CandidateSource for SharedUserDict {
-    fn lookup(&self, query: &Query) -> Vec<Candidate> {
-        self.0.borrow().lookup(query)
-    }
-}
-
-/// 辞書を繋いだエンジンと、学習の書き込み先を作る。
+/// 引き手を共有するための持ち手。
 ///
-/// ユーザー辞書を先に置くのは、学習した語を先に出すため。
-pub fn build() -> (Engine, SharedUserDict) {
-    let user = SharedUserDict::load();
-    let sources: Vec<Box<dyn CandidateSource>> =
-        vec![Box::new(user.clone()), Box::new(LazyDict::new())];
-    let engine = Engine::new(Box::new(ChainedSource::new(sources)));
-    (engine, user)
+/// エンジンは候補の出どころを所有するが、「繋がったか」は TIP 側でも
+/// 知りたい。持ち手を分け合う。
+#[derive(Debug, Clone)]
+pub struct SharedSource(Rc<ServerSource>);
+
+impl SharedSource {
+    /// 直近の引き方でサーバに届かなかったか。
+    pub fn was_unreachable(&self) -> bool {
+        self.0.was_unreachable()
+    }
+}
+
+impl CandidateSource for SharedSource {
+    fn lookup(&self, query: &Query) -> Vec<Candidate> {
+        self.0.lookup(query)
+    }
+}
+
+/// 学習をサーバへ伝える係。
+///
+/// 書くのはサーバだけである。**こちらはファイルに触れない。**
+#[derive(Debug, Default, Clone)]
+pub struct Learning {
+    /// 伝えそこねた学習。次の折に送り直す。
+    pending: Rc<RefCell<Vec<Request>>>,
+}
+
+impl Learning {
+    /// 選ばれた候補を覚えさせる。
+    pub fn learn(&self, query: Query, word: String) {
+        self.send(Request::Learn { query, word });
+    }
+
+    /// 新しい語を登録させる。
+    pub fn register(&self, query: Query, word: String) {
+        self.send(Request::Register { query, word });
+    }
+
+    /// 書き出させる。
+    pub fn save(&self) {
+        self.send(Request::Save);
+    }
+
+    /// 頼みを一つ送る。送れなければ溜めておく。
+    ///
+    /// **学習は落としたくないが、入力を止めてまで守るものでもない。**
+    /// 次に送れたときに一緒に流す。
+    fn send(&self, request: Request) {
+        let mut pending = self.pending.borrow_mut();
+        pending.push(request);
+
+        let mut unsent = Vec::new();
+        for request in pending.drain(..) {
+            match client::ask(&request) {
+                Ok(Response::Ok(_)) => {}
+                Ok(Response::Error(reason)) => {
+                    log::error(&format!("学習を断られました: {reason}"));
+                }
+                Err(_) => unsent.push(request),
+            }
+        }
+        if !unsent.is_empty() {
+            log::error(&format!("学習を {} 件ためています", unsent.len()));
+        }
+        *pending = unsent;
+    }
+}
+
+/// エンジンと、学習を伝える係を用意する。
+pub fn build() -> (Engine, SharedSource, Learning) {
+    let source = SharedSource(Rc::new(ServerSource::new()));
+    let engine = Engine::new(Box::new(source.clone()));
+    (engine, source, Learning::default())
 }

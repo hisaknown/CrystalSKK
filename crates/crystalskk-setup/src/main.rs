@@ -25,6 +25,7 @@ mod dictionary;
 mod elevate;
 mod install;
 mod report;
+mod server;
 
 use report::Report;
 
@@ -161,6 +162,8 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
                 report.say("古い利用者ごとの登録を消しました。\n");
                 report.say("そちらが優先されるため、残っていると古い DLL が使われます。\n");
             }
+            install_server(&installed.dll, report);
+
             report.say("\n");
             report.say("設定 → 時刻と言語 → 言語と地域 → 日本語 → 言語のオプション →\n");
             report.say("キーボード に CrystalSKK が現れます。\n");
@@ -174,6 +177,46 @@ fn do_install(source: Option<&Path>, report: &Report) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),
+    }
+}
+
+/// 辞書サーバを入れ替え、起こし直す。
+///
+/// **辞書を持っているのはサーバだけ** (ADR-0016) なので、これが居ないと
+/// 変換が一件も引けない。入れ替えたらその場で起こす。
+fn install_server(dll: &Path, report: &Report) {
+    let Some(directory) = dll.parent() else {
+        return;
+    };
+    let Some(source) = server::default_source() else {
+        report.say("\n");
+        report.say("辞書サーバが見つかりません。変換ができません。\n");
+        report.say("cargo build -p crystalskk-server --release を実行してください。\n");
+        return;
+    };
+
+    match install::install_server(&source, directory) {
+        Ok(stopped) => {
+            if stopped {
+                report.say("\n");
+                report.say("動いていた辞書サーバに終わってもらいました。\n");
+            }
+        }
+        Err(e) => {
+            report.say(&format!("\n辞書サーバを入れ替えられません: {e}\n"));
+            return;
+        }
+    }
+
+    // ログオンのたびに起きるようにする。隔離されたアプリからは起こせない
+    // ので、**居ない場面を作らない**ことが効く。
+    if let Err(e) = server::register_autostart(directory) {
+        report.say(&format!("自動起動を登録できません: {e}\n"));
+    }
+
+    match server::start(directory) {
+        Ok(()) => report.say("辞書サーバを起こしました。\n"),
+        Err(e) => report.say(&format!("辞書サーバを起こせません: {e}\n")),
     }
 }
 
@@ -202,6 +245,13 @@ fn confirm_effective_registration() {
 }
 
 fn do_uninstall(purge: bool, report: &Report) -> ExitCode {
+    // 先に辞書サーバに終わってもらう。握られたままではファイルを消せず、
+    // 残しておく意味もない。
+    if server::stop() {
+        report.say("辞書サーバに終わってもらいました。\n");
+    }
+    server::unregister_autostart();
+
     match install::uninstall(purge) {
         Ok(()) => {
             report.say("CrystalSKK の登録を解除しました。\n");

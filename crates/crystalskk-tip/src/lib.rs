@@ -38,7 +38,6 @@ pub mod icon;
 pub mod keys;
 pub mod langbar;
 pub mod log;
-pub mod paths;
 pub mod preserved;
 pub mod profile;
 pub mod registry;

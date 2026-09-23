@@ -84,6 +84,33 @@ const ICON_SIZE: i32 = 32;
 ///
 /// `source` の DLL を置き場所へ写してから登録する。すでに同じ場所へ
 /// 登録されている場合は、上書きして登録し直す。
+/// 辞書サーバを入れ替える。
+///
+/// **先に終わってもらう。** 動いている exe は上書きできないうえ、落として
+/// しまうと書きかけの学習が消える。
+///
+/// 置けなくても導入そのものは続ける。サーバが古いままでも、語彙が同じなら
+/// 話は通じる。
+pub fn install_server(source: &Path, directory: &Path) -> io::Result<bool> {
+    let destination = directory.join(crate::server::SERVER_NAME);
+    let stopped = crate::server::stop();
+
+    if let Err(busy) = std::fs::copy(source, &destination) {
+        // まだ握られている。改名なら通るので退ける。
+        retire(&destination).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{} を入れ替えられません。上書き: {busy} / 退避: {e}",
+                    destination.display()
+                ),
+            )
+        })?;
+        std::fs::copy(source, &destination)?;
+    }
+    Ok(stopped)
+}
+
 pub fn install(source: &Path) -> io::Result<Installed> {
     if !source.is_file() {
         return Err(io::Error::new(
@@ -169,7 +196,7 @@ fn write_icon(directory: &Path) -> Option<PathBuf> {
 ///
 /// 読み込まれていても改名はできる。掴んでいるプロセスは実体を見ており、
 /// 名前を見ているわけではない。
-fn retire(destination: &Path) -> io::Result<()> {
+pub(crate) fn retire(destination: &Path) -> io::Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

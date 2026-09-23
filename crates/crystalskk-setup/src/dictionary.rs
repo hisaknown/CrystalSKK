@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 
-use crystalskk_tip::paths;
+use crystalskk_server::paths;
 
 use crate::access;
 

@@ -28,7 +28,8 @@ use crystalskk_core::engine::Event;
 use crystalskk_core::{Engine, InputMode};
 
 use crate::candwin::{CandidateWindow, Content, Page, Registration};
-use crate::dict::SharedUserDict;
+use crate::dict::UNREACHABLE_NOTICE;
+use crate::dict::{Learning, SharedSource};
 use crate::guard::guard;
 use crate::guids::{GUID_PRESERVED_KEY_OFF, GUID_PRESERVED_KEY_ON};
 use crate::langbar::ModeIndicator;
@@ -78,7 +79,9 @@ pub struct TextService {
     /// 変換の状態。
     engine: RefCell<Engine>,
     /// 学習の書き込み先。
-    user_dictionary: SharedUserDict,
+    learning: Learning,
+    /// 辞書サーバとの繋がり。引けたかどうかを見るのに持つ。
+    source: SharedSource,
     /// 未確定の文字列を見せている composition と、その文書。
     ///
     /// 打鍵をまたいで持ち越す。開いていなければ `None`。
@@ -108,11 +111,12 @@ impl Default for TextService {
 
 impl TextService {
     pub fn new() -> Self {
-        let (engine, user_dictionary) = dict::build();
+        let (engine, source, learning) = dict::build();
         Self {
             activation: RefCell::new(None),
             engine: RefCell::new(engine),
-            user_dictionary,
+            learning,
+            source,
             composition: RefCell::new(None),
             candidates: CandidateWindow::new(),
             owner: RefCell::new(None),
@@ -194,22 +198,18 @@ impl TextService {
 
     /// 学習と辞書登録をユーザー辞書へ反映する。
     ///
-    /// 登録だけはその場で書き出す。新しく覚えた語を落とすと利用者の
-    /// 手間がそのまま失われるため。並び替えの学習は無効化のときに
-    /// まとめて書く。打鍵のたびにファイルへ書きたくない (PRD N-01)。
+    /// 書くのは辞書サーバである。**こちらはファイルに触れない** (ADR-0016)。
+    /// 書き手が一つに絞られているので、学習が競り合って壊れることがない。
     fn apply_events(&self, events: &[Event]) {
-        let mut registered = false;
         for event in events {
             match event {
-                Event::Learn { query, word } => self.user_dictionary.learn(query, word),
+                Event::Learn { query, word } => {
+                    self.learning.learn(query.clone(), word.clone());
+                }
                 Event::Register { query, word } => {
-                    self.user_dictionary.learn(query, word);
-                    registered = true;
+                    self.learning.register(query.clone(), word.clone());
                 }
             }
-        }
-        if registered {
-            self.user_dictionary.save();
         }
     }
 
@@ -268,7 +268,7 @@ impl TextService {
         // 自前の窓だけで出す。
         let ours_to_draw = match &content {
             Content::Page(_) => self.announce_list(),
-            Content::Registration(_) => {
+            Content::Registration(_) | Content::Notice(_) => {
                 self.withdraw_list();
                 true
             }
@@ -357,6 +357,12 @@ impl TextService {
     /// 辞書登録を先に見る。登録中は候補の選択も入れ子で起きうるが、
     /// **利用者にとって手前にあるのは登録のほう**である。
     fn window_content(&self) -> Option<Content> {
+        // 辞書サーバに届かなかったなら、まずそれを言う。**「その語は辞書に
+        // ない」と見分けがつかないまま進ませない。**
+        if self.source.was_unreachable() {
+            return Some(Content::Notice(UNREACHABLE_NOTICE.to_owned()));
+        }
+
         let engine = self.engine.borrow();
 
         if let Some(registration) = engine.registration() {
@@ -427,7 +433,7 @@ impl TextService {
         self.withdraw_list();
         self.drop_composition();
         self.candidates.close();
-        self.user_dictionary.save();
+        self.learning.save();
         let Some(activation) = self.activation.borrow_mut().take() else {
             return Ok(());
         };

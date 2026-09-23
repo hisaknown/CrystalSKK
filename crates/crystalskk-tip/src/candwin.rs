@@ -61,6 +61,8 @@ pub enum Content {
     Page(Page),
     /// 辞書登録の入力欄。
     Registration(Registration),
+    /// 伝えたいこと。**黙って違う結果を出すより、言うほうがよい。**
+    Notice(String),
 }
 
 impl Content {
@@ -69,6 +71,7 @@ impl Content {
         match self {
             Self::Page(page) => page.lines(),
             Self::Registration(registration) => registration.lines(),
+            Self::Notice(text) => vec![format!("[{text}]")],
         }
     }
 

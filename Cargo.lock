@@ -101,7 +101,6 @@ dependencies = [
  "crystalskk-core",
  "crystalskk-dict",
  "crystalskk-ipc",
- "crystalskk-tip",
  "windows",
 ]
 
@@ -111,6 +110,8 @@ version = "0.1.0"
 dependencies = [
  "crystalskk-dict",
  "crystalskk-fetch",
+ "crystalskk-ipc",
+ "crystalskk-server",
  "crystalskk-tip",
  "windows",
 ]
@@ -120,7 +121,8 @@ name = "crystalskk-tip"
 version = "0.1.0"
 dependencies = [
  "crystalskk-core",
- "crystalskk-dict",
+ "crystalskk-ipc",
+ "crystalskk-server",
  "windows",
  "windows-core",
 ]
