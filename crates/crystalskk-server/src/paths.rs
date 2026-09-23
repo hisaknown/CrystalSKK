@@ -64,6 +64,27 @@ pub const SYSTEM_DICTIONARY_NAME: &str = "SKK-JISYO.L";
 /// ユーザー辞書の名前。
 pub const USER_DICTIONARY_NAME: &str = "user.dict";
 
+/// 変換の候補を並べる言語モデル一式の置き場所 (ADR-0031)。
+///
+/// **辞書と違い、プログラムの一部である。** 利用者は選ばず、書き換えない。
+/// だから辞書サーバの隣 (`%ProgramFiles%\CrystalSKK\ranker`) に置き、
+/// `server_directory` (辞書サーバのあるフォルダ) から求める。
+pub fn ranker_dir(server_directory: &std::path::Path) -> PathBuf {
+    server_directory
+        .parent()
+        .unwrap_or(server_directory)
+        .join("ranker")
+}
+
+/// 言語モデル (GGUF) の名前。
+pub const RANKER_MODEL: &str = "model.gguf";
+
+/// その語彙の名前。
+pub const RANKER_TOKENIZER: &str = "tokenizer.json";
+
+/// llama.cpp の DLL を置くフォルダの名前。
+pub const RANKER_RUNTIME: &str = "llama.cpp";
+
 /// 利用者ごとの領域。
 ///
 /// 隔離された入れ物の中から呼ばれても、**本物の場所**を返す。
@@ -105,6 +126,15 @@ mod tests {
         assert_eq!(
             user_dictionary().expect("求まる").parent(),
             Some(directory.as_path())
+        );
+    }
+
+    #[test]
+    fn the_ranker_sits_beside_the_server() {
+        let server = std::path::Path::new(r"C:\Program Files\CrystalSKK\bin");
+        assert_eq!(
+            ranker_dir(server),
+            PathBuf::from(r"C:\Program Files\CrystalSKK\ranker")
         );
     }
 

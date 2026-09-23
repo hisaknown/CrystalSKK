@@ -247,19 +247,20 @@ impl Service {
             .unwrap_or_default();
         self.library
             .configure(&loaded.settings.dictionaries, &directory);
-        self.configure_ranker(&loaded.settings.ranker, &directory);
+        let ranker_dir = ranker_dir();
+        self.configure_ranker(&loaded.settings.ranker, &ranker_dir);
         Ok(loaded)
     }
 
     /// 設定が変わっていれば、ランカーを作り直す。
     ///
     /// **作れなくても入力は止めない。** 記録に残し、辞書の順で答え続ける。
-    fn configure_ranker(&mut self, settings: &crystalskk_settings::Ranker, directory: &Path) {
+    fn configure_ranker(&mut self, settings: &crystalskk_settings::Ranker, ranker_dir: &Path) {
         if self.ranker_settings.as_ref() == Some(settings) {
             return;
         }
         self.ranker_settings = Some(settings.clone());
-        self.ranker = match language_model(settings, directory) {
+        self.ranker = match language_model(settings, ranker_dir) {
             Ok(Some(ranker)) => ranker,
             Ok(None) => Box::new(NoopRanker),
             Err(e) => {
@@ -323,23 +324,28 @@ fn file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// 言語モデル一式の置き場所。この実行ファイルの隣の `ranker` (ADR-0031)。
+fn ranker_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    crate::paths::ranker_dir(exe.parent().unwrap_or(Path::new(".")))
+}
+
 /// 設定どおりの、言語モデルで並べるランカー。切ってあれば `None`。
+///
+/// 言語モデルは `ranker_dir` に導入されたものを使う。選べない (ADR-0031)。
 fn language_model(
     settings: &crystalskk_settings::Ranker,
-    directory: &Path,
+    ranker_dir: &Path,
 ) -> Result<Option<Box<dyn Ranker>>, String> {
-    use crystalskk_settings::Ranker as Settings;
+    use crate::paths::{RANKER_MODEL, RANKER_RUNTIME, RANKER_TOKENIZER};
 
     if !settings.enabled {
         return Ok(None);
     }
-    let place = |written: &str, what: &str| {
-        Settings::resolve(written, directory).ok_or_else(|| format!("ranker.{what} が空です"))
-    };
     let scorer = crystalskk_lm::LlamaScorer::load(
-        &place(&settings.runtime, "runtime")?,
-        &place(&settings.model, "model")?,
-        &place(&settings.tokenizer, "tokenizer")?,
+        &ranker_dir.join(RANKER_RUNTIME),
+        &ranker_dir.join(RANKER_MODEL),
+        &ranker_dir.join(RANKER_TOKENIZER),
         settings.threads,
     )?;
     let policy = crystalskk_lm::Policy {
@@ -495,9 +501,6 @@ mod tests {
     fn ranker_settings(enabled: bool) -> crystalskk_settings::Ranker {
         crystalskk_settings::Ranker {
             enabled,
-            model: "model.gguf".to_owned(),
-            tokenizer: "tokenizer.json".to_owned(),
-            runtime: String::new(),
             weight: crystalskk_settings::Weight(1.0),
             deadline_ms: 100,
             before: 100,
@@ -508,23 +511,23 @@ mod tests {
 
     #[test]
     fn no_language_model_is_loaded_while_the_ranker_is_off() {
-        let ranker = language_model(&ranker_settings(false), Path::new("."));
+        let ranker = language_model(&ranker_settings(false), Path::new("nowhere"));
         assert!(matches!(ranker, Ok(None)));
     }
 
     #[test]
     fn a_ranker_that_cannot_be_built_says_why() {
-        let Err(e) = language_model(&ranker_settings(true), Path::new(".")) else {
+        let Err(e) = language_model(&ranker_settings(true), Path::new("nowhere")) else {
             panic!("作れないはず");
         };
-        assert!(e.contains("ranker.runtime"), "{e}");
+        assert!(e.contains("nowhere"), "{e}");
     }
 
     #[test]
     fn conversions_go_on_when_the_ranker_cannot_be_built() {
         // **並べ替えられなくても入力は止めない。** 辞書の順で答える。
         let mut service = service_with("かんじ /漢字/感じ/幹事/\n");
-        service.configure_ranker(&ranker_settings(true), Path::new("."));
+        service.configure_ranker(&ranker_settings(true), Path::new("nowhere"));
         assert_eq!(
             convert(&mut service, "かんじ", "会議の幹"),
             ["漢字", "感じ", "幹事"]

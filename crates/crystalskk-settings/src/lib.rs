@@ -73,16 +73,13 @@ pub struct Settings {
 /// 変換の候補を前後の文章から並べるための設定。
 ///
 /// 前後の文章を読むのは TIP、並べるのは辞書サーバである。両方がこれを使う。
+///
+/// **言語モデルは選べない。** プログラムの一部として一緒に導入され、置き場所も
+/// 決まっている (ADR-0031)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ranker {
     /// 並べ替えるか。
     pub enabled: bool,
-    /// 言語モデル (GGUF) の在りか。書かれたまま。
-    pub model: String,
-    /// 語彙 (tokenizer.json) の在りか。書かれたまま。
-    pub tokenizer: String,
-    /// llama.dll のあるフォルダ。書かれたまま。
-    pub runtime: String,
     /// 辞書の順の重み。
     pub weight: Weight,
     /// 並べ替えを待つ時間 (ミリ秒)。
@@ -93,17 +90,6 @@ pub struct Ranker {
     pub after: usize,
     /// 採点に使うスレッドの数。
     pub threads: usize,
-}
-
-impl Ranker {
-    /// 書かれた在りかを、読む場所に解く。相対なら設定ファイルの場所から。
-    /// 空なら `None`。
-    pub fn resolve(written: &str, settings_directory: &Path) -> Option<PathBuf> {
-        if written.is_empty() {
-            return None;
-        }
-        Some(settings_directory.join(written))
-    }
 }
 
 /// 0 以上の重み。
@@ -477,9 +463,6 @@ fn ranker(table: &Table) -> Result<Ranker, Error> {
         .ok_or_else(|| Error::new("ranker.weight は 0 以上の数で書いてください"))?;
     Ok(Ranker {
         enabled: boolean(table, "ranker", "enabled")?,
-        model: text(table, "ranker", "model")?,
-        tokenizer: text(table, "ranker", "tokenizer")?,
-        runtime: text(table, "ranker", "runtime")?,
         weight: Weight(weight as f32),
         deadline_ms: u32::try_from(count(table, "ranker", "deadline_ms")?)
             .map_err(|_| Error::new("ranker.deadline_ms が大きすぎます"))?,
@@ -735,14 +718,6 @@ fn amount(table: &Table, section: &str, key: &str) -> Result<usize, Error> {
         .as_integer()
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| Error::new(format!("{section}.{key} は 0 以上の整数で書いてください")))
-}
-
-/// 文字列。空でもよい。
-fn text(table: &Table, section: &str, key: &str) -> Result<String, Error> {
-    value(table, section, key)?
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| Error::new(format!("{section}.{key} は文字列で書いてください")))
 }
 
 /// 一文字の文字列。
@@ -1016,14 +991,9 @@ mod tests {
     }
 
     #[test]
-    fn the_ranker_is_off_until_it_is_pointed_at_a_model() {
+    fn the_ranker_is_off_in_the_template() {
         let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
         assert!(!ranker.enabled);
-        assert_eq!(ranker.model, "");
-        assert_eq!(
-            Ranker::resolve(&ranker.model, Path::new("C:\\settings")),
-            None
-        );
         assert_eq!(ranker.weight, Weight(1.0));
         assert_eq!((ranker.before, ranker.after), (100, 5));
     }
@@ -1046,7 +1016,7 @@ mod tests {
             ("until_list = 5", "until_list = 2.5", "整数"),
             ("weight = 1.0", "weight = -1.0", "ranker.weight"),
             ("after = 5", "after = -1", "0 以上の整数"),
-            ("model = \"\"", "model = 3", "文字列"),
+            ("threads = 4", "threads = \"four\"", "ranker.threads"),
         ];
         for (from, to, expected) in cases {
             let user = TEMPLATE.replace(from, to);
