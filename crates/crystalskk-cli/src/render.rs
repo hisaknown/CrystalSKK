@@ -2,7 +2,7 @@
 //!
 //! 行入力モードと対話モードで同じ見え方にするため、整形はここに集める。
 
-use crystalskk_core::engine::CandidateView;
+use crystalskk_core::engine::{CandidateView, CompletionView};
 
 use crate::session::Session;
 
@@ -55,6 +55,19 @@ fn page(view: &CandidateView) -> String {
 ///
 /// 一覧を出している間は付けない。どれか一つを選んでいるわけではないので、
 /// 一つぶんの注釈を出す先がない。
+/// 当てている補完。**一つきりなので、一行で足りる。**
+pub fn completion(view: &CompletionView) -> String {
+    if view.taken {
+        view.heading.clone()
+    } else {
+        format!(
+            "{}: {}",
+            crystalskk_core::engine::COMPLETION_TAKE,
+            view.heading
+        )
+    }
+}
+
 pub fn annotation(view: &CandidateView) -> Option<&str> {
     if view.listing {
         return None;

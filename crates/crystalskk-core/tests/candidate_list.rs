@@ -402,15 +402,47 @@ fn the_guess_is_not_part_of_what_was_typed() {
 }
 
 #[test]
-fn taking_the_guess_makes_it_typed() {
+fn taking_the_guess_converts_and_commits_it() {
+    // **一打鍵で終わる。** 当て推量が出ている時点で見出し語は辞書にあると
+    // 分かっているので、変換の結果を選ばせる手間は要らない。
     let mut engine = completing();
-    typed(&mut engine, "Kann.");
-    let preedit = engine.preedit();
-    assert!(
-        preedit.segments.iter().all(|s| s.role != Role::Completion),
-        "受け取れば当て推量ではなくなる"
-    );
-    assert_eq!(preedit.display(), "▽かんじ");
+    for c in "Kann.".chars() {
+        let key = if c == '.' {
+            Key::Char('.')
+        } else {
+            Key::Char(c)
+        };
+        let response = engine.press(key);
+        if !response.commit.is_empty() {
+            assert_eq!(response.commit, "漢字");
+        }
+    }
+    assert_eq!(engine.preedit().display(), "", "確定まで進んでいる");
+}
+
+#[test]
+fn the_window_shows_what_the_dot_would_take() {
+    let mut engine = completing();
+    typed(&mut engine, "Kann");
+    let view = engine.completion().expect("当て推量が出ている");
+    assert_eq!(view.heading, "かんじ");
+    assert!(!view.taken, "まだ受け取っていない");
+}
+
+#[test]
+fn the_window_follows_the_tab() {
+    let mut engine = completing();
+    typed(&mut engine, "Kann		");
+    let view = engine.completion().expect("当て推量が出ている");
+    assert_eq!(view.heading, "かんじゃ");
+    assert!(view.taken, "Tab で当てたものは受け取り済み");
+}
+
+#[test]
+fn nothing_is_offered_before_there_is_enough_to_go_on() {
+    let mut engine = completing();
+    typed(&mut engine, "Ka");
+    assert!(engine.completion().is_none());
 }
 
 #[test]

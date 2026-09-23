@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, ChainedSource, Query};
-use crystalskk_core::engine::{CandidateView, Event, Role};
+use crystalskk_core::engine::{CandidateView, CompletionView, Event, Role};
 use crystalskk_core::{Engine, InputMode, Key};
 use crystalskk_dict::{MemoryDict, UserDict, encoding};
 
@@ -206,6 +206,11 @@ impl Session {
 
     pub fn registration_depth(&self) -> usize {
         self.engine.registration_depth()
+    }
+
+    /// いま当てている補完。
+    pub fn completion(&self) -> Option<CompletionView> {
+        self.engine.completion()
     }
 
     pub fn candidates(&self) -> Option<CandidateView> {

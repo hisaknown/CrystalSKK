@@ -61,6 +61,8 @@ pub enum Content {
     Page(Page),
     /// 辞書登録の入力欄。
     Registration(Registration),
+    /// いま当てている補完。
+    Completion(Completion),
     /// 伝えたいこと。**黙って違う結果を出すより、言うほうがよい。**
     Notice(String),
 }
@@ -71,12 +73,42 @@ impl Content {
         match self {
             Self::Page(page) => page.lines(),
             Self::Registration(registration) => registration.lines(),
+            Self::Completion(completion) => completion.lines(),
             Self::Notice(text) => vec![format!("[{text}]")],
         }
     }
 
     fn is_empty(&self) -> bool {
         self.lines().is_empty()
+    }
+}
+
+/// いま当てている補完。
+///
+/// **一行しか出ない。** 出る候補は一つきりで、選ぶ操作が無いからである
+/// (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せるだけ。
+#[derive(Debug, Default, Clone)]
+pub struct Completion {
+    /// 当てている見出し語。打った分も含めた全体。
+    pub heading: String,
+    /// もう受け取ったものか。
+    pub taken: bool,
+}
+
+impl Completion {
+    fn lines(&self) -> Vec<String> {
+        if self.taken {
+            // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
+            // しないのに、出したままにはできない。**
+            vec![self.heading.clone()]
+        } else {
+            // 一覧と同じ「キー: 語」の形にする。押すキーがそのまま左に出る。
+            vec![format!(
+                "{}: {}",
+                crystalskk_core::engine::COMPLETION_TAKE,
+                self.heading
+            )]
+        }
     }
 }
 
@@ -580,6 +612,27 @@ mod tests {
             number,
             count,
         }
+    }
+
+    #[test]
+    fn the_guess_shows_the_key_that_takes_it() {
+        let line = Content::Completion(Completion {
+            heading: "かんじ".to_owned(),
+            taken: false,
+        })
+        .lines();
+        assert_eq!(line, [".: かんじ"]);
+    }
+
+    #[test]
+    fn a_taken_guess_shows_no_key() {
+        // 同じキーが同じことをしないのに、案内を出したままにはできない。
+        let line = Content::Completion(Completion {
+            heading: "かんじゃ".to_owned(),
+            taken: true,
+        })
+        .lines();
+        assert_eq!(line, ["かんじゃ"]);
     }
 
     #[test]

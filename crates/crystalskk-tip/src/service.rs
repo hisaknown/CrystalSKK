@@ -30,7 +30,7 @@ use windows::core::{
 use crystalskk_core::engine::Event;
 use crystalskk_core::{Engine, InputMode};
 
-use crate::candwin::{CandidateWindow, Content, Page, Registration};
+use crate::candwin::{CandidateWindow, Completion, Content, Page, Registration};
 use crate::dict::UNREACHABLE_NOTICE;
 use crate::dict::{Learning, SharedSource};
 use crate::guard::guard;
@@ -277,7 +277,9 @@ impl TextService {
         // 自前の窓だけで出す。
         let ours_to_draw = match &content {
             Content::Page(_) => self.announce_list(),
-            Content::Registration(_) | Content::Notice(_) => {
+            // 補完は候補の一覧ではない。システムの一覧に混ぜると、
+            // アプリには「変換候補が出た」と見えてしまう。
+            Content::Registration(_) | Content::Notice(_) | Content::Completion(_) => {
                 self.withdraw_list();
                 true
             }
@@ -392,16 +394,26 @@ impl TextService {
             }));
         }
 
-        let view = engine.candidates().filter(|view| view.listing)?;
-        let okuri = view.okuri.as_deref().unwrap_or("");
-        Some(Content::Page(Page {
-            entries: view
-                .page()
-                .into_iter()
-                .map(|(label, candidate)| (label, format!("{}{okuri}", candidate.word)))
-                .collect(),
-            number: view.page_number() + 1,
-            count: view.page_count(),
+        if let Some(view) = engine.candidates().filter(|view| view.listing) {
+            let okuri = view.okuri.as_deref().unwrap_or("");
+            return Some(Content::Page(Page {
+                entries: view
+                    .page()
+                    .into_iter()
+                    .map(|(label, candidate)| (label, format!("{}{okuri}", candidate.word)))
+                    .collect(),
+                number: view.page_number() + 1,
+                count: view.page_count(),
+            }));
+        }
+
+        // 一番下に置く。**候補の一覧が出ているあいだは、そちらが手前で
+        // ある。** 補完は「まだ変換していない」段階のものなので、二つが
+        // 重なることもない。
+        let completion = engine.completion()?;
+        Some(Content::Completion(Completion {
+            heading: completion.heading,
+            taken: completion.taken,
         }))
     }
 

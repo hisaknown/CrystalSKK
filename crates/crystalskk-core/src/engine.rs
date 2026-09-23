@@ -144,6 +144,18 @@ pub const PAGE_SIZE: usize = SELECTION_KEYS.len();
 /// 一覧に移る最初の候補の位置。
 const FIRST_LISTED: usize = UNTIL_CANDIDATE_LIST - 1;
 
+/// 補完として窓に出す内容。
+///
+/// **出るのは一つきりである。** 一覧にしないのは、選ぶ操作が無いから
+/// である (ADR-0019)。窓は「いま `.` を打てば何になるか」を見せるだけ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionView {
+    /// 当てている見出し語。打った分も含めた全体。
+    pub heading: String,
+    /// もう受け取ったものか。Tab で当てた後は受け取り済みになる。
+    pub taken: bool,
+}
+
 /// 候補ウィンドウに出す内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateView {
@@ -597,6 +609,21 @@ impl Engine {
         });
     }
 
+    /// 当て推量を受け取り、変換して、確定まで進める。
+    ///
+    /// **一打鍵で終わらせる。** 当て推量が出ている時点で見出し語は辞書に
+    /// あると分かっているので、変換の結果を選ばせる手間を省ける。選び直し
+    /// たければ、受け取らずに space を打てばよい。
+    ///
+    /// 変換が候補を出さなかったとき (辞書登録に入ったときなど) は、その
+    /// 状態のまま置く。**勝手に畳まない。**
+    fn convert_and_commit(&mut self, comp: Composing, out: &mut Out) {
+        self.convert(comp);
+        if let State::Selecting(sel) = std::mem::take(&mut self.state) {
+            self.commit_selection(sel, out);
+        }
+    }
+
     /// 補完を一つ当てる。当てられなければ `false`。
     ///
     /// Tab は次へ巡り、`.` は先頭を取る。**どちらも同じ操作で、押す前の
@@ -677,6 +704,21 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// いま当てている補完。出すものが無ければ `None`。
+    ///
+    /// 未確定の表示とは別に返す。**窓に出すかどうかは表示側が決める。**
+    pub fn completion(&self) -> Option<CompletionView> {
+        let State::Composing(comp) = &self.state else {
+            return None;
+        };
+        let completion = comp.completion.as_ref()?;
+        let index = completion.chosen.unwrap_or(0);
+        Some(CompletionView {
+            heading: completion.entries.get(index)?.clone(),
+            taken: completion.chosen.is_some(),
+        })
     }
 
     /// 候補選択中なら候補ウィンドウの内容。それ以外は `None`。
@@ -941,7 +983,7 @@ impl Engine {
             // Tab と同じ操作である。
             Key::Char(c) if c == COMPLETION_TAKE && shows_ghost(&comp) => {
                 self.take_completion(&mut comp);
-                self.state = State::Composing(comp);
+                self.convert_and_commit(comp, out);
             }
             Key::Space => self.convert(comp),
             Key::Backspace => {

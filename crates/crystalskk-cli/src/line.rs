@@ -66,6 +66,9 @@ fn report(session: &Session, out: &mut impl Write) -> io::Result<()> {
             writeln!(out, "  注釈:   {annotation}")?;
         }
     }
+    if let Some(completion) = session.completion() {
+        writeln!(out, "  補完:   {}", render::completion(&completion))?;
+    }
     writeln!(out, "  モード: {}", render::mode(session))?;
     if let Some(key) = session.last_unhandled() {
         writeln!(out, "  素通し: {}", keys::display(key))?;
