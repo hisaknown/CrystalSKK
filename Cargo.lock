@@ -95,6 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crystalskk-server"
+version = "0.1.0"
+dependencies = [
+ "crystalskk-core",
+ "crystalskk-dict",
+ "crystalskk-ipc",
+ "crystalskk-tip",
+ "windows",
+]
+
+[[package]]
 name = "crystalskk-setup"
 version = "0.1.0"
 dependencies = [
