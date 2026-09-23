@@ -26,6 +26,18 @@ pub struct LoadReport {
 pub struct MemoryDict {
     okuri_ari: BTreeMap<String, Vec<Candidate>>,
     okuri_nashi: BTreeMap<String, Vec<Candidate>>,
+    /// 見出しを**新しく使った順**に並べたもの。送りありかどうかを添える。
+    ///
+    /// **SKK のユーザー辞書は使った順に並んでいる。** 読み書きでこれを
+    /// 崩すと、他の SKK から持ち込んだ辞書の順序が失われる。書き出すときは
+    /// この順に従う。
+    ///
+    /// 補完もこの順で出す。辞書順に「かん」で始まる見出しを並べても、
+    /// 使う語が先に出るとは限らない。**直前に使った語ほど、また使う。**
+    ///
+    /// 静的辞書には使った順が無いので空のままになる ([`MemoryDict::parse`]
+    /// は順序を覚えない)。17 万件ぶんの見出しを二重に持つ意味がない。
+    order: Vec<(bool, String)>,
 }
 
 impl MemoryDict {
@@ -37,7 +49,22 @@ impl MemoryDict {
     ///
     /// 区画の注釈行 (`;; okuri-ari entries.`) があればそれに従い、
     /// なければ見出しの形から推測する。
+    ///
+    /// **並び順は覚えない。** 静的辞書のためのもので、17 万件の見出しを
+    /// 二重に持つ意味がない。書き戻す辞書は [`Self::parse_ordered`] で読む。
     pub fn parse(text: &str) -> (Self, LoadReport) {
+        Self::read(text, false)
+    }
+
+    /// 並び順を覚えながら読み込む。
+    ///
+    /// ユーザー辞書はこちらで読む。**ファイルの並びがそのまま「使った順」
+    /// である** — SKK の辞書はそう書かれる。書き出すときも同じ順に戻す。
+    pub fn parse_ordered(text: &str) -> (Self, LoadReport) {
+        Self::read(text, true)
+    }
+
+    fn read(text: &str, remember_order: bool) -> (Self, LoadReport) {
         let mut dict = Self::new();
         let mut report = LoadReport::default();
         let mut section: Option<bool> = None;
@@ -55,6 +82,9 @@ impl MemoryDict {
                     let okuri_ari = section.unwrap_or_else(|| format::is_okuri_ari_key(&key));
                     if dict.merge(&key, okuri_ari, candidates) {
                         report.merged += 1;
+                    } else if remember_order {
+                        // 読んだ順が使った順。先頭ほど新しい。
+                        dict.order.push((okuri_ari, key.clone()));
                     }
                     report.entries += 1;
                 }
@@ -115,6 +145,7 @@ impl MemoryDict {
     /// SKK の学習と辞書登録は、どちらも「この見出しではこの語を最初に出す」
     /// という同じ操作に帰着する。だから両者を分けていない。
     pub fn learn(&mut self, query: &Query, word: &str) {
+        self.touch(query.is_okuri_ari(), &query.key);
         let entry = self
             .table_mut(query.is_okuri_ari())
             .entry(query.key.clone())
@@ -131,7 +162,36 @@ impl MemoryDict {
 
     /// 見出しを一件削除する。消すものがなければ `false`。
     pub fn remove(&mut self, key: &str, okuri_ari: bool) -> bool {
+        self.order
+            .retain(|(ari, seen)| *ari != okuri_ari || seen != key);
         self.table_mut(okuri_ari).remove(key).is_some()
+    }
+
+    /// 見出しを「いま使った」ことにする。先頭へ移す。
+    fn touch(&mut self, okuri_ari: bool, key: &str) {
+        self.order
+            .retain(|(ari, seen)| *ari != okuri_ari || seen != key);
+        self.order.insert(0, (okuri_ari, key.to_owned()));
+    }
+
+    /// 前方一致する送りなしの見出しを、**使った順**に最大 `limit` 件返す。
+    ///
+    /// 補完はこれを使う (PRD F-11, F-18)。入力中の見出しそのものは返さない。
+    ///
+    /// 静的辞書には使った順が無いので、何も返らない。**補完はユーザー辞書
+    /// から引くものである** — 17 万件の見出しから前方一致を並べても、
+    /// 使う語が先に来る保証がない。CorvusSKK も ddskk もそうしている。
+    pub fn complete_recent(&self, prefix: &str, limit: usize) -> Vec<&str> {
+        if prefix.is_empty() {
+            return Vec::new();
+        }
+        self.order
+            .iter()
+            .filter(|(okuri_ari, _)| !okuri_ari)
+            .map(|(_, key)| key.as_str())
+            .filter(|key| key.starts_with(prefix) && *key != prefix)
+            .take(limit)
+            .collect()
     }
 
     /// 前方一致する送りなしの見出しを、辞書順に最大 `limit` 件返す。
@@ -148,6 +208,29 @@ impl MemoryDict {
             .take(limit)
             .map(|(key, _)| key.as_str())
             .collect()
+    }
+
+    /// 片方の区画を書き出す。
+    ///
+    /// 使った順を先に、覚えのないものを辞書順で続ける。**順序を知らない
+    /// 見出しも落とさない。**
+    fn write_section(&self, out: &mut String, okuri_ari: bool) {
+        let table = self.table(okuri_ari);
+        let mut written: Vec<&str> = Vec::new();
+
+        for (_, key) in self.order.iter().filter(|(ari, _)| *ari == okuri_ari) {
+            if let Some(candidates) = table.get(key) {
+                out.push_str(&format::format_line(key, candidates));
+                out.push('\n');
+                written.push(key);
+            }
+        }
+        for (key, candidates) in table {
+            if !written.contains(&key.as_str()) {
+                out.push_str(&format::format_line(key, candidates));
+                out.push('\n');
+            }
+        }
     }
 
     /// 収録している見出しの総数。
@@ -170,16 +253,12 @@ impl MemoryDict {
     pub fn to_skk_text(&self) -> String {
         let mut out = String::new();
         out.push_str(";; -*- mode: fundamental; coding: utf-8 -*-\n");
+        // **使った順に書く。** SKK のユーザー辞書は元からこの順で、
+        // 読み書きでこれを崩すと、持ち込んだ辞書の順序が失われる。
         out.push_str(";; okuri-ari entries.\n");
-        for (key, candidates) in self.okuri_ari.iter().rev() {
-            out.push_str(&format::format_line(key, candidates));
-            out.push('\n');
-        }
+        self.write_section(&mut out, true);
         out.push_str(";; okuri-nasi entries.\n");
-        for (key, candidates) in &self.okuri_nashi {
-            out.push_str(&format::format_line(key, candidates));
-            out.push('\n');
-        }
+        self.write_section(&mut out, false);
         out
     }
 }
@@ -339,19 +418,70 @@ skk /SKK/
     }
 
     #[test]
-    fn writes_back_in_the_conventional_order() {
+    fn writes_back_in_the_order_it_was_read() {
+        // **SKK のユーザー辞書は使った順に並んでいる。** 読み書きでこれを
+        // 崩すと、他の SKK から持ち込んだ辞書の順序が失われる。
+        let text = concat!(
+            ";; okuri-ari entries.
+",
+            "たべr /食べ/
+",
+            "おくr /送/
+",
+            ";; okuri-nasi entries.
+",
+            "かんじゃ /患者/
+",
+            "skk /SKK/
+",
+            "かんじ /漢字/
+",
+        );
+        let (dict, _) = MemoryDict::parse_ordered(text);
+        let text = dict.to_skk_text();
+        let written: Vec<&str> = text.lines().filter(|line| !line.starts_with(';')).collect();
+        assert_eq!(
+            written,
+            vec![
+                "たべr /食べ/",
+                "おくr /送/",
+                "かんじゃ /患者/",
+                "skk /SKK/",
+                "かんじ /漢字/",
+            ]
+        );
+    }
+
+    #[test]
+    fn what_was_just_used_moves_to_the_front() {
+        let text = concat!(
+            ";; okuri-nasi entries.
+",
+            "かんじゃ /患者/
+",
+            "かんじ /漢字/
+",
+        );
+        let (mut dict, _) = MemoryDict::parse_ordered(text);
+        dict.learn(&Query::okuri_nashi("かんじ"), "漢字");
+
+        let first = dict
+            .to_skk_text()
+            .lines()
+            .find(|line| !line.starts_with(';'))
+            .map(str::to_owned);
+        assert_eq!(first.as_deref(), Some("かんじ /漢字/"));
+    }
+
+    #[test]
+    fn a_dictionary_read_without_order_is_written_in_dictionary_order() {
+        // 静的辞書には使った順が無い。落とさずに書ければよい。
         let dict = sample();
         let text = dict.to_skk_text();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[1], ";; okuri-ari entries.");
-        // 送りありは降順。
-        assert_eq!(lines[2], "たべr /食べ/");
-        assert_eq!(lines[3], "おくr /送/贈/");
-        assert_eq!(lines[4], ";; okuri-nasi entries.");
-        // 送りなしは昇順。UTF-8 のバイト順なので ASCII の見出しが先に来る。
-        assert_eq!(lines[5], "skk /SKK/");
-        assert_eq!(lines[6], "かんじ /漢字/感じ/幹事/");
-        assert_eq!(lines[7], "かんじゃ /患者/");
+        assert_eq!(lines[2], "おくr /送/贈/");
+        assert_eq!(lines[3], "たべr /食べ/");
     }
 
     #[test]

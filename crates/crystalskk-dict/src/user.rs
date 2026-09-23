@@ -45,7 +45,10 @@ impl UserDict {
             Err(e) => return Err(e),
         };
         let decoded = encoding::decode(&bytes);
-        let (dict, report) = MemoryDict::parse(&decoded.text);
+        // **並び順を覚えて読む。** ユーザー辞書は使った順に並んでおり、
+        // 書き戻すときも同じ順に戻す。崩すと、他の SKK から持ち込んだ
+        // 辞書の順序が失われる。
+        let (dict, report) = MemoryDict::parse_ordered(&decoded.text);
         Ok((
             Self {
                 dict,
