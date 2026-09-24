@@ -48,3 +48,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0029](0029-a-missing-dictionary-is-told-not-guessed.md) | 欠けた辞書は知らせ、辞書登録には進ませない | Accepted | ADR-0016, ADR-0022 |
 | [0030](0030-rank-candidates-with-a-small-language-model-in-the-server.md) | 候補の並びを、サーバに常駐させた小さな言語モデルで文脈から決める | Accepted | ADR-0001, ADR-0016, ADR-0019, ADR-0020, PRD F-19 |
 | [0031](0031-ship-the-ranker-model-with-the-program.md) | 候補を並べる言語モデルはプログラムと一緒に配り、llama.cpp は公式から取得する | Accepted | ADR-0020, ADR-0030 |
+| [0032](0032-bound-every-wait-on-the-server.md) | 辞書サーバを待つ時間には、どこでも上限を設ける | Accepted | PRD §3, ADR-0016 |

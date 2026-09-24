@@ -11,9 +11,14 @@
 
 use std::io;
 
-use windows::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE};
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{
+    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE,
+    WAIT_OBJECT_0,
+};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
@@ -22,7 +27,9 @@ use windows::Win32::System::Pipes::{
     CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, SetNamedPipeHandleState, WaitNamedPipeW,
 };
-use windows::core::HSTRING;
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use windows::core::{HSTRING, PCWSTR};
 
 use crate::security::PipeSecurity;
 
@@ -103,19 +110,86 @@ impl Listener {
 ///
 /// 一回ごとに繋いで切る。**握ったままにしないので、サーバが入れ替わっても
 /// 次から新しいほうに繋がる。**
-pub fn ask(name: &str, request: &str, wait_ms: u32) -> io::Result<String> {
+///
+/// # 待つのは `timeout_ms` まで
+///
+/// 繋ぐ・送る・受け取るの**全部を合わせて**この長さで打ち切る。呼ぶのは
+/// 入力先アプリの UI スレッドなので、サーバが答えなければアプリごと固まる。
+/// 以前は繋ぐところにしか期限がなく、繋がったあとサーバが忙しいと、
+/// スタートメニューの検索欄が数秒止まった。
+///
+/// 誤りの種類で、何が起きたかを見分けられる。
+///
+/// | 種類 | 起きたこと |
+/// |---|---|
+/// | [`io::ErrorKind::NotFound`] | サーバが居ない (待ち合わせ場所が無い) |
+/// | [`io::ErrorKind::ResourceBusy`] | 居るが、ずっと使用中で繋がらなかった |
+/// | [`io::ErrorKind::TimedOut`] | 送ったが答えが来なかった。**頼みは届いたかもしれない** |
+pub fn ask(name: &str, request: &str, timeout_ms: u32) -> io::Result<String> {
     let wide = HSTRING::from(name);
+    let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
 
     // SAFETY: 名前はこの関数で用意したもの。開いた持ち手は必ず閉じる。
     unsafe {
-        let handle = OwnedHandle(connect(&wide, wait_ms)?);
+        let handle = OwnedHandle(connect(&wide, deadline)?);
 
         let mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
-        SetNamedPipeHandleState(handle.0, Some(&mode), None, None)
-            .map_err(|e: windows::core::Error| io::Error::other(e.message()))?;
+        SetNamedPipeHandleState(handle.0, Some(&mode), None, None).map_err(os_error)?;
 
-        write_message(handle.0, request)?;
-        read_message(handle.0)
+        let event = OwnedHandle(CreateEventW(None, true, false, PCWSTR::null()).map_err(os_error)?);
+        let bytes = request.as_bytes();
+        overlapped(handle.0, event.0, deadline, |ov| {
+            WriteFile(handle.0, Some(bytes), None, Some(ov))
+        })?;
+        let mut buffer = vec![0u8; BUFFER];
+        let read = overlapped(handle.0, event.0, deadline, |ov| {
+            ReadFile(handle.0, Some(&mut buffer), None, Some(ov))
+        })?;
+        buffer.truncate(read as usize);
+        String::from_utf8(buffer).map_err(io::Error::other)
+    }
+}
+
+/// 読み書きを一つ始め、期限まで待つ。運んだバイト数を返す。
+///
+/// 期限を過ぎたら取り消し、**取り消しが済むまで待ってから**返る。済む前に
+/// 返ると、読み書きの先 (呼び出し側の入れ物) が消えたあとに OS が書き込む。
+///
+/// # Safety
+///
+/// `handle` が `FILE_FLAG_OVERLAPPED` で開いた持ち手、`event` が手動で
+/// 戻す事象であること。`start` が渡す入れ物は、この関数が返るまで生きて
+/// いること。
+unsafe fn overlapped(
+    handle: HANDLE,
+    event: HANDLE,
+    deadline: Instant,
+    start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
+) -> io::Result<u32> {
+    let mut ov = OVERLAPPED {
+        hEvent: event,
+        ..Default::default()
+    };
+    // SAFETY: 呼び出し側の約束による。
+    unsafe {
+        let _ = ResetEvent(event);
+        if let Err(e) = start(&mut ov)
+            && e.code() != ERROR_IO_PENDING.to_hresult()
+        {
+            return Err(os_error(e));
+        }
+        if WaitForSingleObject(event, millis_until(deadline)) != WAIT_OBJECT_0 {
+            let _ = CancelIoEx(handle, Some(&ov));
+        }
+        let mut moved = 0u32;
+        match GetOverlappedResult(handle, &ov, &mut moved, true) {
+            Ok(()) => Ok(moved),
+            Err(e) if e.code() == ERROR_OPERATION_ABORTED.to_hresult() => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "辞書サーバが答えません",
+            )),
+            Err(e) => Err(os_error(e)),
+        }
     }
 }
 
@@ -132,8 +206,7 @@ pub fn ask(name: &str, request: &str, wait_ms: u32) -> io::Result<String> {
 /// # Safety
 ///
 /// `name` が有効な文字列であること。
-unsafe fn connect(name: &HSTRING, wait_ms: u32) -> io::Result<HANDLE> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(u64::from(wait_ms));
+unsafe fn connect(name: &HSTRING, deadline: Instant) -> io::Result<HANDLE> {
     loop {
         // SAFETY: 呼び出し側の約束による。
         let opened = unsafe {
@@ -145,26 +218,51 @@ unsafe fn connect(name: &HSTRING, wait_ms: u32) -> io::Result<HANDLE> {
                 OPEN_EXISTING,
                 // **サーバにこちらの身分を借りさせない。** TIP は他人の
                 // プロセスの中で動くので、なりすましの踏み台にされては困る。
-                FILE_FLAGS_AND_ATTRIBUTES(SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0),
+                // 読み書きは期限つきで待つので、重ねて行える形で開く。
+                FILE_FLAGS_AND_ATTRIBUTES(
+                    SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0 | FILE_FLAG_OVERLAPPED.0,
+                ),
                 None,
             )
         };
         match opened {
             Ok(handle) => return Ok(handle),
-            Err(e) if e.code() != windows::core::HRESULT::from(ERROR_PIPE_BUSY) => {
-                return Err(io::Error::other(e.message()));
-            }
+            Err(e) if e.code() != ERROR_PIPE_BUSY.to_hresult() => return Err(os_error(e)),
             Err(_) => {}
         }
 
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return Err(io::Error::other("辞書サーバが取り込み中です"));
+        let left = millis_until(deadline);
+        if left == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "辞書サーバが取り込み中です",
+            ));
         }
         // SAFETY: 呼び出し側の約束による。空くまで待つ。
         unsafe {
-            let _ = WaitNamedPipeW(name, u32::try_from(left.as_millis()).unwrap_or(u32::MAX));
+            let _ = WaitNamedPipeW(name, left);
         }
+    }
+}
+
+/// 期限までの残り。過ぎていれば 0。
+fn millis_until(deadline: Instant) -> u32 {
+    let left = deadline.saturating_duration_since(Instant::now());
+    u32::try_from(left.as_millis()).unwrap_or(u32::MAX)
+}
+
+/// Windows の誤りを、種類の分かる形にする。
+///
+/// Win32 の誤りなら番号をそのまま渡す。**「居ない」(`NotFound`) を
+/// 見分けられないと、呼んだ側がサーバを起こすべきか判断できない。**
+fn os_error(e: windows::core::Error) -> io::Error {
+    // Win32 の誤りは HRESULT の下位 16 ビットに番号を持つ。
+    #[allow(clippy::cast_sign_loss, reason = "HRESULT をビット列として見る")]
+    let code = e.code().0 as u32;
+    if code & 0xFFFF_0000 == 0x8007_0000 {
+        io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+    } else {
+        io::Error::other(e.message())
     }
 }
 

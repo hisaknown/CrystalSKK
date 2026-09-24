@@ -95,25 +95,11 @@ impl ServerSource {
         candidates
     }
 
-    /// 候補を頼む。居なければ起こして、もう一度だけ頼む。
+    /// 候補を頼む。居なければ起こして、起きるのを少しだけ待つ。
     fn ask_for_candidates(&self, request: &Request) -> Vec<Candidate> {
-        match client::ask(request) {
-            Ok(response) => return self.answer(response),
-            Err(e) => log::write(&format!("辞書サーバが居ません ({e})。起こします")),
-        }
-
-        // 居なかった。起こして、もう一度だけ尋ねる。
-        if !launch::server() {
-            *self.trouble.borrow_mut() = Some(UNREACHABLE_NOTICE.to_owned());
-            return Vec::new();
-        }
-        match client::ask(request) {
-            Ok(response) => {
-                log::write("辞書サーバが起きました");
-                self.answer(response)
-            }
+        match ask_waking(request) {
+            Ok(response) => self.answer(response),
             Err(_) => {
-                log::error("起こしても辞書サーバに繋がりません");
                 *self.trouble.borrow_mut() = Some(UNREACHABLE_NOTICE.to_owned());
                 Vec::new()
             }
@@ -252,6 +238,12 @@ impl Learning {
                 Ok(Response::Error(reason)) => {
                     log::error(&format!("学習を断られました: {reason}"));
                 }
+                // 送ったが答えが来なかった。**届いてはいるかもしれない**
+                // ので送り直さない。二重に覚えさせるより、一度落とすほうが
+                // 害が小さい。
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    log::error(&format!("学習の返事が来ません。送り直しません: {e}"));
+                }
                 Err(_) => unsent.push(request),
             }
         }
@@ -293,18 +285,37 @@ pub fn ask_to_do(request: &Request) -> Result<String, String> {
     }
 }
 
-/// サーバに頼む。居なければ起こして、もう一度だけ頼む。
-///
-/// 返す誤りは**そのまま利用者に見せる文**になっている。
+/// サーバに頼む。繋がらなければ**そのまま利用者に見せる文**を返す。
 fn ask_server(request: &Request) -> Result<Response, String> {
-    match client::ask(request) {
-        Ok(response) => Ok(response),
+    ask_waking(request).map_err(|_| UNREACHABLE_NOTICE.to_owned())
+}
+
+/// サーバに頼む。居なければ起こして、起きるのを少しだけ待つ。
+///
+/// 起こすのは**居ない**ときだけである。居るのに答えない (忙しい、壊れて
+/// いる) なら、起こしても尋ね直しても直らず、アプリを止める時間が
+/// 重なるだけになる。
+fn ask_waking(request: &Request) -> std::io::Result<Response> {
+    let absent = match client::ask(request) {
+        Ok(response) => return Ok(response),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => e,
         Err(e) => {
-            log::write(&format!("辞書サーバが居ません ({e})。起こします"));
-            if !launch::server() {
-                return Err(UNREACHABLE_NOTICE.to_owned());
-            }
-            client::ask(request).map_err(|_| UNREACHABLE_NOTICE.to_owned())
+            log::error(&format!("辞書サーバに頼めません: {e}"));
+            return Err(e);
+        }
+    };
+    log::write(&format!("辞書サーバが居ません ({absent})。起こします"));
+    if !launch::server() {
+        return Err(absent);
+    }
+    match launch::wait_until_up(|| client::ask(request)) {
+        Ok(response) => {
+            log::write("辞書サーバが起きました");
+            Ok(response)
+        }
+        Err(e) => {
+            log::error(&format!("起こしても辞書サーバに繋がりません: {e}"));
+            Err(e)
         }
     }
 }

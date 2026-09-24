@@ -11,12 +11,19 @@ use crystalskk_ipc::{Request, Response};
 
 use crate::{names, pipe};
 
-/// 待つ長さ。打鍵の途中なので、長く待つわけにいかない。
-const WAIT_MS: u32 = 200;
+/// 一つの頼みに待つ長さ。繋ぐところから答えを読み終えるまでを合わせて数える
+/// (ADR-0032)。
+///
+/// 呼ぶのは入力先アプリの UI スレッドなので、**これがそのままアプリの
+/// 固まる長さの上限になる**。狙いは異常なときにいつまでも止まらないこと
+/// で、普段の答えは数ミリ秒で返る。並べ替えのある変換も、これに収まる。
+const TIMEOUT_MS: u32 = 500;
 
 /// サーバへ頼みを一つ送る。
+///
+/// 誤りの種類の意味は [`pipe::ask`] を見よ。
 pub fn ask(request: &Request) -> io::Result<Response> {
-    let line = pipe::ask(&names::pipe(), &request.encode(), WAIT_MS)?;
+    let line = pipe::ask(&names::pipe(), &request.encode(), TIMEOUT_MS)?;
     Response::decode(&line).ok_or_else(|| io::Error::other(format!("答えを読めません: {line:?}")))
 }
 
