@@ -398,6 +398,13 @@ impl Model {
     }
 }
 
+// SAFETY: 生のポインタを持つので自動では `Send` にならない。llama.cpp の
+// モデルと文脈は作ったスレッドに縛られない (スレッドごとの領域を使わない)
+// ので、**同時に触らない限り**別のスレッドへ渡してよい。`Sync` にはしない
+// ので、同時に触ることは型が許さない。サーバは裏のスレッドで読み込み、
+// 答えるスレッドへ渡す (ADR-0030)。
+unsafe impl Send for Model {}
+
 impl Drop for Model {
     fn drop(&mut self) {
         let f = &self.runtime.f;

@@ -8,6 +8,7 @@
 //! 解釈するか、それだけを担う。**運び方と、答え方を分けてある。**
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Context, NoopRanker, Query, Ranker};
@@ -38,7 +39,12 @@ pub struct Service {
     /// いまのランカーを作った設定。変わったときだけ作り直す。言語モデルの
     /// 読み込みは重い。
     ranker_settings: Option<crystalskk_settings::Ranker>,
+    /// 裏で作っているランカー。できたら [`Self::poll_ranker`] で受け取る。
+    ranker_loading: Option<mpsc::Receiver<Built>>,
 }
+
+/// 裏で作ったランカー。並べ替えない設定なら `None`。
+type Built = Result<Option<Box<dyn Ranker + Send>>, String>;
 
 impl std::fmt::Debug for Service {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,6 +64,7 @@ impl Service {
             settings,
             ranker: Box::new(NoopRanker),
             ranker_settings: None,
+            ranker_loading: None,
         }
     }
 
@@ -78,8 +85,9 @@ impl Service {
 
     /// 一つの頼みに答える。
     pub fn handle(&mut self, request: Request) -> (Response, Next) {
-        // 裏で読み終えた辞書があれば、答える前に差し替える。
+        // 裏で読み終えた辞書やランカーがあれば、答える前に差し替える。
         self.library.poll();
+        self.poll_ranker();
         match request {
             Request::Search(query) => (self.search(&query), Next::Listen),
             Request::Convert {
@@ -254,20 +262,60 @@ impl Service {
 
     /// 設定が変わっていれば、ランカーを作り直す。
     ///
+    /// **作るのは裏で行う。** 言語モデルの読み込みには 0.3〜0.7 秒ほど、
+    /// ログオン直後ならもっとかかる。答えるスレッドで作ると、そのあいだ
+    /// どのアプリの頼みも待たされる。サーバが起きて最初の設定の問い合わせで
+    /// ここを通るので、**起きた直後から変換できなくなる**。できるまでは
+    /// 辞書の順で答える。
+    ///
     /// **作れなくても入力は止めない。** 記録に残し、辞書の順で答え続ける。
     fn configure_ranker(&mut self, settings: &crystalskk_settings::Ranker, ranker_dir: &Path) {
         if self.ranker_settings.as_ref() == Some(settings) {
             return;
         }
         self.ranker_settings = Some(settings.clone());
-        self.ranker = match language_model(settings, ranker_dir) {
-            Ok(Some(ranker)) => ranker,
-            Ok(None) => Box::new(NoopRanker),
-            Err(e) => {
-                eprintln!("crystalskk-server: 候補を並べ替えずに続けます: {e}");
-                Box::new(NoopRanker)
+        // 前の設定で作ったものは使わない。作りかけも受け取らない。
+        self.ranker = Box::new(NoopRanker);
+        self.ranker_loading = None;
+        if !settings.enabled {
+            return;
+        }
+        let settings = settings.clone();
+        let ranker_dir = ranker_dir.to_path_buf();
+        self.start_ranker(move || language_model(&settings, &ranker_dir));
+    }
+
+    /// ランカーを裏で作り始める。
+    fn start_ranker(&mut self, build: impl FnOnce() -> Built + Send + 'static) {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            // 受け手が居なくなっていれば (設定が変わった) 捨てる。
+            let _ = sender.send(build());
+        });
+        self.ranker_loading = Some(receiver);
+    }
+
+    /// 裏で作り終えたランカーがあれば、差し替える。頼みに答える前に呼ぶ。
+    fn poll_ranker(&mut self) {
+        let Some(receiver) = &self.ranker_loading else {
+            return;
+        };
+        let built = match receiver.try_recv() {
+            Ok(built) => built,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("言語モデルを読み込む途中で止まりました".to_owned())
             }
         };
+        self.ranker_loading = None;
+        match built {
+            Ok(Some(ranker)) => {
+                eprintln!("crystalskk-server: 候補を並べる言語モデルを読みました");
+                self.ranker = ranker;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("crystalskk-server: 候補を並べ替えずに続けます: {e}"),
+        }
     }
 
     /// 雛形で上書きする。**元の中身は隣に退避する。**
@@ -333,10 +381,7 @@ fn ranker_dir() -> PathBuf {
 /// 設定どおりの、言語モデルで並べるランカー。切ってあれば `None`。
 ///
 /// 言語モデルは `ranker_dir` に導入されたものを使う。選べない (ADR-0031)。
-fn language_model(
-    settings: &crystalskk_settings::Ranker,
-    ranker_dir: &Path,
-) -> Result<Option<Box<dyn Ranker>>, String> {
+fn language_model(settings: &crystalskk_settings::Ranker, ranker_dir: &Path) -> Built {
     use crate::paths::{RANKER_MODEL, RANKER_RUNTIME, RANKER_TOKENIZER};
 
     if !settings.enabled {
@@ -523,11 +568,65 @@ mod tests {
         assert!(e.contains("nowhere"), "{e}");
     }
 
+    /// 裏で作っているランカーを待つ。試験用。
+    fn settle_ranker(service: &mut Service) {
+        for _ in 0..500 {
+            service.poll_ranker();
+            if service.ranker_loading.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("ランカーができない");
+    }
+
+    #[test]
+    fn conversions_do_not_wait_for_the_ranker_to_be_built() {
+        // 作るのに時間がかかっても、そのあいだは辞書の順で答える。
+        let mut service = service_with("かんじ /漢字/感じ/幹事/
+");
+        service.start_ranker(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(Some(Box::new(Echo)))
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["漢字", "感じ", "幹事"]
+        );
+        assert!(started.elapsed() < Duration::from_millis(200), "待たされた");
+
+        // できたら、それで並べる。
+        settle_ranker(&mut service);
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["幹事", "漢字", "感じ"]
+        );
+    }
+
+    #[test]
+    fn a_ranker_built_for_old_settings_is_thrown_away() {
+        let mut service = service_with("かんじ /漢字/感じ/幹事/
+");
+        service.start_ranker(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(Some(Box::new(Echo)))
+        });
+        // 作っているあいだに、並べ替えを切った。
+        service.configure_ranker(&ranker_settings(false), Path::new("nowhere"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            convert(&mut service, "かんじ", "会議の幹"),
+            ["漢字", "感じ", "幹事"]
+        );
+    }
+
     #[test]
     fn conversions_go_on_when_the_ranker_cannot_be_built() {
         // **並べ替えられなくても入力は止めない。** 辞書の順で答える。
         let mut service = service_with("かんじ /漢字/感じ/幹事/\n");
         service.configure_ranker(&ranker_settings(true), Path::new("nowhere"));
+        settle_ranker(&mut service);
         assert_eq!(
             convert(&mut service, "かんじ", "会議の幹"),
             ["漢字", "感じ", "幹事"]
