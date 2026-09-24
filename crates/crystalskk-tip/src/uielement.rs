@@ -70,6 +70,8 @@ pub struct CandidateListElement {
     documents: RefCell<Option<ITfDocumentMgr>>,
     /// 自前の窓を出してよいか。アプリが自分で描くときは偽になる。
     ours_to_draw: RefCell<bool>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for CandidateListElement {
@@ -93,6 +95,7 @@ impl CandidateListElement {
             snapshot: RefCell::new(ListSnapshot::default()),
             documents: RefCell::new(None),
             ours_to_draw: RefCell::new(true),
+            _alive: crate::factory::ObjectGuard::new(),
         }
     }
 

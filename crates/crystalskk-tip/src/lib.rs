@@ -110,7 +110,7 @@ pub unsafe extern "system" fn DllGetClassObject(
         return CLASS_E_CLASSNOTAVAILABLE;
     }
 
-    let factory: IClassFactory = ClassFactory.into();
+    let factory: IClassFactory = ClassFactory::default().into();
     // SAFETY: `riid` と `ppv` は上で確かめた有効な場所を指す。
     unsafe { factory.query(riid, ppv) }
 }

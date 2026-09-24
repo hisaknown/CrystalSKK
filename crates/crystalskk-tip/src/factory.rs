@@ -23,13 +23,23 @@ pub fn can_unload() -> bool {
 }
 
 /// 生存数を一つ増やし、落ちるときに減らす見張り。
+///
+/// **この DLL が作る COM オブジェクトは、例外なくこれを欄に持つ。** 持たない
+/// ものが一つでもあると、TSF やアプリがまだ握っているのに `DllCanUnloadNow`
+/// が「降ろしてよい」と答えてしまう。アプリが `CoFreeUnusedLibraries` を
+/// 呼んだ時点で DLL は降ろされ、次の呼び出しや、この DLL の中を指す窓の
+/// 手続きへのメッセージが、消えた番地へ飛んで**アプリごと落ちる**。
+/// 実際に X-Mouse Button Control がこれで落ちた。CorvusSKK も同じ位置で
+/// `DllAddRef` / `DllRelease` を呼んでいる。
+///
+/// 中身を隠してあるので、[`ObjectGuard::new`] を通さずには作れない。
 #[derive(Debug)]
-pub struct ObjectGuard;
+pub struct ObjectGuard(());
 
 impl ObjectGuard {
     pub fn new() -> Self {
         OBJECT_COUNT.fetch_add(1, Ordering::Release);
-        Self
+        Self(())
     }
 }
 
@@ -48,7 +58,10 @@ impl Drop for ObjectGuard {
 /// [`TextService`] を作るファクトリ。
 #[implement(IClassFactory)]
 #[derive(Default)]
-pub struct ClassFactory;
+pub struct ClassFactory {
+    /// 生きている間、DLL を降ろさせない。
+    _alive: ObjectGuard,
+}
 
 impl std::fmt::Debug for ClassFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

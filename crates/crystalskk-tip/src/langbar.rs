@@ -55,6 +55,8 @@ pub struct ModeIndicator {
     /// 渡す先は TIP 本体で、本体もこの表示を持っている。**無効化のときに
     /// 外さないと、互いに持ち合ったまま解放されない。**
     handler: RefCell<Option<Handler>>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for ModeIndicator {
@@ -79,6 +81,7 @@ impl ModeIndicator {
             next_cookie: RefCell::new(1),
             theme: std::cell::Cell::new(crate::theme::Theme::current()),
             handler: RefCell::new(None),
+            _alive: crate::factory::ObjectGuard::new(),
         }
     }
 

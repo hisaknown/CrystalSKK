@@ -146,6 +146,11 @@ pub struct TextService {
     /// 小窓を出している入力先を聞く。アプリの画面が動いたら、窓を
     /// 付いていかせる。
     layout: RefCell<Option<(ITfContext, u32)>>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    ///
+    /// **最後の欄に置く。** 欄は書いた順に落ちるので、ここに置けば、持って
+    /// いる窓 (手続きがこの DLL の中にある) を壊し終えてから数が減る。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl Default for TextService {
@@ -173,6 +178,7 @@ impl TextService {
             settings_asked: std::cell::Cell::new(None),
             announced: RefCell::new(None),
             layout: RefCell::new(None),
+            _alive: crate::factory::ObjectGuard::new(),
         }
     }
 

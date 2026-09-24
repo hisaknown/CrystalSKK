@@ -260,6 +260,8 @@ impl Atoms {
 #[implement(ITfDisplayAttributeInfo)]
 pub struct AttributeInfo {
     attribute: Attribute,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for AttributeInfo {
@@ -272,7 +274,10 @@ impl std::fmt::Debug for AttributeInfo {
 
 impl AttributeInfo {
     pub fn new(attribute: Attribute) -> Self {
-        Self { attribute }
+        Self {
+            attribute,
+            _alive: crate::factory::ObjectGuard::new(),
+        }
     }
 }
 
@@ -476,6 +481,8 @@ mod tests {
 pub struct AttributeEnum {
     /// 次に返す位置。
     next: std::cell::Cell<usize>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for AttributeEnum {

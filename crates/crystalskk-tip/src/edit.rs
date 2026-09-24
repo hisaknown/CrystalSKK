@@ -67,6 +67,8 @@ pub struct Update {
     extent: RefCell<Option<RECT>>,
     /// 入力先アプリの窓。候補の窓の親にする。
     owner: RefCell<Option<HWND>>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for Update {
@@ -257,6 +259,7 @@ fn read(context: &ITfContext, client_id: u32, then: impl FnOnce(&ITfContext, u32
     let session = ComObject::new(Read {
         context: context.clone(),
         then: RefCell::new(Some(Box::new(then))),
+        _alive: crate::factory::ObjectGuard::new(),
     });
     let requested: ITfEditSession = session.to_interface();
     // SAFETY: 文脈と識別子は TSF から受け取ったもの。
@@ -276,6 +279,8 @@ type AfterRead = Box<dyn FnOnce(&ITfContext, u32)>;
 struct Read {
     context: ITfContext,
     then: RefCell<Option<AfterRead>>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for Read {
@@ -323,6 +328,7 @@ pub fn surroundings(
             *slot.borrow_mut() =
                 read_surroundings(context, ec, composition.as_ref(), before, after);
         }))),
+        _alive: crate::factory::ObjectGuard::new(),
     });
     let requested: ITfEditSession = session.to_interface();
     // SAFETY: 文脈と識別子は TSF から受け取ったもの。
@@ -699,6 +705,7 @@ pub fn update(
         composition: RefCell::new(composition),
         extent: RefCell::new(None),
         owner: RefCell::new(None),
+        _alive: crate::factory::ObjectGuard::new(),
     });
     let requested: ITfEditSession = session.to_interface();
 
@@ -721,6 +728,7 @@ pub fn update(
 pub fn terminate(context: &ITfContext, client_id: u32, composition: ITfComposition) {
     let session: ITfEditSession = Terminate {
         composition: RefCell::new(Some(composition)),
+        _alive: crate::factory::ObjectGuard::new(),
     }
     .into();
 
@@ -735,6 +743,8 @@ pub fn terminate(context: &ITfContext, client_id: u32, composition: ITfCompositi
 #[implement(ITfEditSession)]
 struct Terminate {
     composition: RefCell<Option<ITfComposition>>,
+    /// 生きている間、DLL を降ろさせない ([`crate::factory::ObjectGuard`])。
+    _alive: crate::factory::ObjectGuard,
 }
 
 impl std::fmt::Debug for Terminate {
