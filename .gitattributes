@@ -1,0 +1,7 @@
+# 改行は LF、文字コードは UTF-8 (BOM なし) に固定する。CLAUDE.md を参照。
+* text=auto eol=lf
+
+*.ico binary
+*.png binary
+*.onnx binary
+*.bin binary
