@@ -1016,7 +1016,7 @@ impl TextService_Impl {
     }
 
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
-    fn would_handle_key(&self, wparam: WPARAM) -> BOOL {
+    fn would_handle_key(&self, context: Ref<ITfContext>, wparam: WPARAM) -> BOOL {
         // 打ち始めたら、カーソルのそばのモードの窓は消す。**打っている字に
         // かぶる。** モードを変える打鍵なら、処理のあとで出し直す。
         self.this.mode_window.hide();
@@ -1027,7 +1027,7 @@ impl TextService_Impl {
         // 取れなければ食べずに渡し、なぜ動かないのかを窓で言う。
         self.this.ensure_settings();
         if !self.this.engine.borrow().is_configured() {
-            self.this.show_window(None, None);
+            self.show_window_at_caret(context.as_ref());
             return false.into();
         }
         let translated = keys::translate(wparam);
@@ -1042,6 +1042,27 @@ impl TextService_Impl {
             keys::log_translation(wparam, translated);
         }
         handled.into()
+    }
+
+    /// 小窓を出す。置く場所がまだ分からなければ、カーソルの位置を尋ねて
+    /// そこに出す。
+    ///
+    /// 置く場所は、未確定の文字列を書いたときに分かる。**設定を受け取れて
+    /// いないとエンジンは何も書かない**ので、その入力先で一度も打って
+    /// いなければ場所が分からず、なぜ日本語にならないのかを言えなかった。
+    /// ログオン直後に開いたアプリで最初に打つ、というよくある場面である。
+    fn show_window_at_caret(&self, context: Option<&ITfContext>) {
+        if self.this.anchor.borrow().is_some() {
+            self.this.show_window(None, None);
+            return;
+        }
+        let (Some(context), Some(client_id)) = (context, self.this.client_id()) else {
+            return;
+        };
+        let service = self.to_object();
+        edit::caret(context, client_id, move |caret, owner| {
+            service.show_window(Some(caret), owner);
+        });
     }
 }
 
@@ -1280,11 +1301,11 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
 
     fn OnTestKeyDown(
         &self,
-        _pic: Ref<ITfContext>,
+        pic: Ref<ITfContext>,
         wparam: WPARAM,
         _lparam: LPARAM,
     ) -> Result<BOOL> {
-        guard("OnTestKeyDown", || Ok(self.would_handle_key(wparam)))
+        guard("OnTestKeyDown", || Ok(self.would_handle_key(pic, wparam)))
     }
 
     fn OnKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
