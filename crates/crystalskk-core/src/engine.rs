@@ -1174,8 +1174,29 @@ impl Engine {
             }
             Key::Space => self.convert(comp),
             Key::Backspace => {
-                if self.romaji.backspace() {
+                let erased = self.romaji.backspace();
+                // 送り仮名の途中なら、一文字と一緒に区切りも消す。`▽おく*r`
+                // は `▽おく` になる。区切りだけ残っても、続けて打つか
+                // もう一度消すしかない。ddskk (`skk-delete-okuri-mark`) も
+                // CorvusSKK もこうする。
+                if let Some(okuri) = comp.okuri.take() {
+                    let mut kana = okuri.kana;
+                    if !erased {
+                        kana.pop();
+                    }
+                    comp.midashi.push_str(&kana);
                     self.state = State::Composing(comp);
+                    return;
+                }
+                if erased {
+                    self.state = State::Composing(comp);
+                    return;
+                }
+                // 読みを消し切っても `▽` は残す。**印だけ残して打ち直す**
+                // のは SKK でよくある操作である。空の `▽` でもう一度押すと
+                // 直接入力へ戻る。ddskk も CorvusSKK もこうする。
+                if comp.midashi.is_empty() && comp.okuri.is_none() {
+                    self.state = State::Direct;
                     return;
                 }
                 match comp.okuri.as_mut() {
@@ -1188,11 +1209,7 @@ impl Engine {
                         comp.midashi.pop();
                     }
                 }
-                if comp.midashi.is_empty() && comp.okuri.is_none() && !comp.abbrev {
-                    self.state = State::Direct;
-                } else {
-                    self.state = State::Composing(comp);
-                }
+                self.state = State::Composing(comp);
             }
             Key::Char(c) if comp.abbrev => {
                 comp.midashi.push(c);
@@ -1354,6 +1371,12 @@ impl Engine {
         self.romaji.clear();
 
         let query = query_of(&comp);
+        if comp.midashi.is_empty() && comp.okuri.is_none() {
+            // 空の `▽` では引くものが無い。確定して `▽` を抜ける。確定する
+            // 文字は無い。ddskk (`skk-henkan`) もこうする。
+            self.state = State::Direct;
+            return;
+        }
 
         let mut candidates = self.dict.lookup_for_conversion(&query, &self.context);
         self.ranker.rank(&self.context, &query, &mut candidates);
@@ -1448,7 +1471,14 @@ impl Engine {
                     self.start_registration(sel.query, sel.origin, Some(resume));
                 }
             }
-            Key::Char('x') | Key::Up => {
+            // 一覧が出ていないときの Backspace は、確定してから一文字消す。
+            // ddskk (`skk-delete-implies-kakutei` の既定 t) も CorvusSKK
+            // (「後退に確定を含める」の既定) もこうする。確定した後は
+            // ただの文字なので、送り仮名の区切りも残らない。
+            Key::Backspace if !sel.listing() => self.commit_selection_but_last(sel, out),
+            // 一覧が出ているあいだは、Backspace も前の一覧へ戻る。ddskk も
+            // CorvusSKK もこうする。
+            Key::Char('x') | Key::Up | Key::Backspace => {
                 if sel.listing() {
                     let start = sel.page_start();
                     let first = sel.layout.first_listed();
@@ -1468,7 +1498,7 @@ impl Engine {
                 }
             }
             Key::Enter | Key::Ctrl('j') => self.commit_selection(sel, out),
-            Key::Ctrl('g') | Key::Backspace | Key::Escape => {
+            Key::Ctrl('g') | Key::Escape => {
                 self.back_to_composing(sel.origin);
             }
             Key::Char(c) if sel.listing() && sel.layout.labels().contains(&c) => {
@@ -1505,8 +1535,24 @@ impl Engine {
     }
 
     fn commit_selection(&mut self, sel: Selecting, out: &mut Out) {
+        self.commit_selection_trimmed(sel, false, out);
+    }
+
+    /// 選んでいる候補を、最後の一文字を除いて確定する。
+    ///
+    /// 一文字消すのは確定した文字列からで、学習はそのまま行う。選んだ
+    /// 候補は正しく、打ち直したいのは末尾だけだからである。ddskk も
+    /// 個人辞書を更新する。
+    fn commit_selection_but_last(&mut self, sel: Selecting, out: &mut Out) {
+        self.commit_selection_trimmed(sel, true, out);
+    }
+
+    fn commit_selection_trimmed(&mut self, sel: Selecting, drop_last: bool, out: &mut Out) {
         let candidate = sel.candidates[sel.index].clone();
-        let text = candidate.to_text(sel.query.okuri.as_deref());
+        let mut text = candidate.to_text(sel.query.okuri.as_deref());
+        if drop_last {
+            text.pop();
+        }
         self.emit(&text, out);
         out.events.push(Event::Learn {
             query: sel.query,

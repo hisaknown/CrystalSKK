@@ -49,3 +49,5 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0030](0030-rank-candidates-with-a-small-language-model-in-the-server.md) | 候補の並びを、サーバに常駐させた小さな言語モデルで文脈から決める | Accepted | ADR-0001, ADR-0016, ADR-0019, ADR-0020, PRD F-19 |
 | [0031](0031-ship-the-ranker-model-with-the-program.md) | 候補を並べる言語モデルはプログラムと一緒に配り、llama.cpp は公式から取得する | Accepted | ADR-0020, ADR-0030 |
 | [0032](0032-bound-every-wait-on-the-server.md) | 辞書サーバを待つ時間には、どこでも上限を設ける | Accepted | PRD §3, ADR-0016 |
+| [0033](0033-mark-an-empty-reading.md) | 読みが空になったら、変換開始の目印を出す | Accepted | ADR-0018, PRD Q-09 |
+| [0034](0034-backspace-while-selecting-commits.md) | ▼ での Backspace は確定してから一文字消す | Accepted | ADR-0018, ADR-0033 |

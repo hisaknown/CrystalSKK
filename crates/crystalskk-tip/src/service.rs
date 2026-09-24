@@ -985,7 +985,9 @@ impl TextService_Impl {
             Vec::new()
         } else {
             let atoms = *self.this.atoms.borrow();
-            crate::display::document_segments(&response.preedit.segments, atoms)
+            let settings = self.this.settings.borrow();
+            let markers = settings.as_ref().map(|settings| &settings.markers);
+            crate::display::document_segments(&response.preedit.segments, atoms, markers)
         };
         let sink: ITfCompositionSink = self.to_interface();
         // 借用を編集セッションより長く持たない。呼んだ先から戻って

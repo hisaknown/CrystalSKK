@@ -68,6 +68,26 @@ pub struct Settings {
     pub dictionaries: Vec<Source>,
     /// 変換の候補を前後の文章から並べる (ADR-0030)。
     pub ranker: Ranker,
+    /// 未確定の印を、文書に書くときの文字 (ADR-0033)。
+    pub markers: Markers,
+}
+
+/// 未確定の印を、文書に書くときの文字。**TIP だけが使う。** CLI は
+/// 下線を引けないので、記号のまま出す。
+///
+/// どれも何文字でもよく、空でもよい。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Markers {
+    /// 見出し語入力中 (`▽`)。読みがあってもなくても出す。
+    pub composing: String,
+    /// 見出し語入力中で、読みがまだ無いとき (`▽` だけのとき) に、
+    /// `composing` の後ろに足すもの。**読みを消し切っても、変換を
+    /// 始めたところが見える。**
+    pub composing_empty: String,
+    /// 候補選択中 (`▼`)。
+    pub selecting: String,
+    /// 見出し語と送り仮名の区切り (`*`)。
+    pub okuri: String,
 }
 
 /// 変換の候補を前後の文章から並べるための設定。
@@ -449,6 +469,15 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         },
         dictionaries: sources(section(&doc, "dictionaries")?)?,
         colors: colors(section(&doc, "colors")?)?,
+        markers: {
+            let markers = section(&doc, "markers")?;
+            Markers {
+                composing: string(markers, "markers", "composing")?,
+                composing_empty: string(markers, "markers", "composing_empty")?,
+                selecting: string(markers, "markers", "selecting")?,
+                okuri: string(markers, "markers", "okuri")?,
+            }
+        },
         ranker: ranker(section(&doc, "ranker")?)?,
     })
 }
@@ -720,6 +749,18 @@ fn amount(table: &Table, section: &str, key: &str) -> Result<usize, Error> {
         .ok_or_else(|| Error::new(format!("{section}.{key} は 0 以上の整数で書いてください")))
 }
 
+/// 文字列。空でもよい。
+fn string(table: &Table, section: &str, key: &str) -> Result<String, Error> {
+    value(table, section, key)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::new(format!(
+                "{section}.{key} は文字列で書いてください (例: \"▽\")"
+            ))
+        })
+}
+
 /// 一文字の文字列。
 fn one_char(table: &Table, section: &str, key: &str) -> Result<char, Error> {
     let text = value(table, section, key)?.as_str();
@@ -886,6 +927,17 @@ mod tests {
         // 雛形に書き忘れたら、ここで落ちる。
         let settings = parse(TEMPLATE, ROMAJI_TEMPLATE).expect("雛形はそのまま使える");
         assert!(settings.engine.completion.dynamic);
+    }
+
+    #[test]
+    fn the_template_shows_a_space_only_when_the_reading_is_empty() {
+        // SKKFEP や CorvusSKK と同じく、読みが無くなって初めて空白を出す。
+        // 普通の空白ではなく U+00A0 にする。U+0020 は下線を省くアプリがある。
+        let settings = parse(TEMPLATE, ROMAJI_TEMPLATE).expect("雛形はそのまま使える");
+        assert_eq!(settings.markers.composing, "");
+        assert_eq!(settings.markers.composing_empty, "\u{00A0}");
+        assert_eq!(settings.markers.selecting, "");
+        assert_eq!(settings.markers.okuri, "");
     }
 
     #[test]

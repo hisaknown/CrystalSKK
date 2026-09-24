@@ -37,23 +37,26 @@
 //! である。
 //!
 //! そこで送り仮名は模様を変える。太い実線と破線なら、繋がっていても境が
-//! 分かる。見出し語との境は `*` が受け持つので、点線と破線の差が細かくても
-//! 困らない。
+//! 分かる。見出し語との境は点線と破線の差で示す。細かい差なので、見分け
+//! にくければ `[markers]` の `okuri` で `*` などを置ける。
 //!
 //! 波線は使わない。綴り間違いの印として定着しているので、入力中の文字に
 //! 使うと「間違っている」と読まれる。
 //!
-//! # 印は出さず、区切りだけ残す
+//! # 印を何で書くかは設定で決める
 //!
-//! `▽` `▼` `*` は文書に出さない (PRD Q-09)。**状態は下線で分かる**ので、
-//! 記号まで並べると文字列が読みにくくなる。
+//! `▽` `▼` `*` を文書に何で書くかは `[markers]` の設定に従う (ADR-0033)。
+//! 雛形は記号を出さない。**状態は下線で分かる**ので、記号まで並べると
+//! 文字列が読みにくくなる (PRD Q-09)。
 //!
-//! ただし二つは役目が違う。
+//! 雛形はどの印も何も出さない。ただし**読みが空のときだけ空白を置く**
+//! (`composing_empty`)。読みを全部消したとき、変換開始の目印が見えないと
+//! 書き直せない。SKKFEP も CorvusSKK もこうしている。
 //!
-//! - **`▽` `▼` は状態を表す。** 下線が同じことを言っているので、何も
-//!   出さない。空白を置くと、書いている文が一文字ぶん右へずれる
-//! - **`*` は境を示す。** 下線の点線と破線は見分けが付きにくいので、
-//!   空白で区切りを見せる
+//! 置くのは U+00A0 で、普通の空白 (U+0020) ではない。**区間の端の普通の
+//! 空白には、下線を引かないアプリがある。**
+//!
+//! 見慣れた記号のほうがよい人は、設定で `▽` `▼` `*` に戻せる。
 //!
 //! **CLI は記号のまま出す。** ターミナルに下線を引けないので、記号が唯一の
 //! 手がかりになる。同じ `Preedit` から違う見せ方をしているだけである。
@@ -65,7 +68,8 @@ use windows::Win32::UI::TextServices::{
 };
 use windows::core::{BSTR, ComObject, GUID, Result, implement};
 
-use crystalskk_core::engine::{Role, Segment};
+use crystalskk_core::engine::{Marker, Role, Segment};
+use crystalskk_settings::Markers;
 
 use crate::guard::guard;
 use crate::guids::{
@@ -170,40 +174,55 @@ impl Attribute {
     }
 }
 
-/// 状態の印 (`▽` `▼`) を文書に出すときの文字。
-///
-/// 出さない。下線が同じことを言っている。
-pub const MARKER_TEXT: &str = "";
-
-/// 区切り (`*`) を文書に出すときの文字。
-///
-/// 空白を置く。**下線の模様だけでは、見出し語と送り仮名の境が見分け
-/// にくい。**
-pub const SEPARATOR_TEXT: &str = " ";
-
 /// 未確定の表示を、文書へ書く形に組み立てる。
 ///
 /// 区切りごとに「貼る番号」と「出す文字」の組にする。ここで決まるのは
 /// 二つ。
 ///
-/// - **印は空白に置き換える。** 記号は出さない
+/// - **印は設定の文字に置き換える。** 設定をまだ読めていなければ
+///   (`None`)、エンジンの記号のまま出す。`▽` の後ろに何も無ければ
+///   `composing_empty` を足す
 /// - **印の見え方は続く部分に合わせる。** 印だけ違う線になると、一つの
 ///   塊が途中で切れて見える
-pub fn document_segments(segments: &[Segment], atoms: Option<Atoms>) -> Vec<(u32, String)> {
+pub fn document_segments(
+    segments: &[Segment],
+    atoms: Option<Atoms>,
+    markers: Option<&Markers>,
+) -> Vec<(u32, String)> {
     segments
         .iter()
         .enumerate()
         .map(|(index, segment)| {
             let role = match segment.role {
-                Role::Marker | Role::Separator => segments
-                    .get(index + 1)
-                    .map_or(segment.role, |next| next.role),
+                Role::Marker | Role::Separator => segments.get(index + 1).map_or(
+                    // 続く部分が無いのは、読みが空の `▽` か `▼` である。
+                    // **`▽` は見出し語の見え方にする。** 読みを消し切った
+                    // ところで線が変わると、別の状態に移ったように見える。
+                    if segment.text == Marker::Composing.prefix() {
+                        Role::Midashi
+                    } else {
+                        segment.role
+                    },
+                    |next| next.role,
+                ),
                 role => role,
             };
             let atom = atoms.map_or(0, |atoms| atoms.for_role(role));
-            let text = match segment.role {
-                Role::Marker => MARKER_TEXT.to_owned(),
-                Role::Separator => SEPARATOR_TEXT.to_owned(),
+            let text = match (segment.role, markers) {
+                (Role::Marker, Some(markers)) if segment.text == Marker::Selecting.prefix() => {
+                    markers.selecting.clone()
+                }
+                (Role::Marker, Some(markers)) => {
+                    // 後ろに文字が一つも無ければ、読みはまだ空である。
+                    // 打ちかけのローマ字も見出し語の区切りに入っている。
+                    let empty = segments[index + 1..].iter().all(|s| s.text.is_empty());
+                    if empty {
+                        format!("{}{}", markers.composing, markers.composing_empty)
+                    } else {
+                        markers.composing.clone()
+                    }
+                }
+                (Role::Separator, Some(markers)) => markers.okuri.clone(),
                 _ => segment.text.clone(),
             };
             (atom, text)
@@ -409,28 +428,149 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_markers_leave_and_the_separator_becomes_a_space() {
-        // `▽おく*り` は `おく り` になる。**状態の印は消し、境だけ残す。**
-        let written = document_segments(
-            &[
-                segment(Role::Marker, "▽"),
-                segment(Role::Midashi, "おく"),
-                segment(Role::Separator, "*"),
-                segment(Role::Okuri, "り"),
-            ],
-            None,
-        );
-        let text: String = written.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(text, "おく り");
+    fn markers(composing: &str, selecting: &str, okuri: &str) -> Markers {
+        Markers {
+            composing: composing.to_owned(),
+            composing_empty: String::new(),
+            selecting: selecting.to_owned(),
+            okuri: okuri.to_owned(),
+        }
+    }
+
+    fn written(segments: &[Segment], markers: Option<&Markers>) -> String {
+        document_segments(segments, None, markers)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
     }
 
     #[test]
-    fn the_text_does_not_shift_when_conversion_starts() {
-        // 印に空白を置くと、書いている文が一文字ぶん右へずれる。
-        let written = document_segments(&[segment(Role::Marker, "▽")], None);
-        let text: String = written.iter().map(|(_, t)| t.as_str()).collect();
-        assert!(text.is_empty(), "印は場所を取らない");
+    fn the_markers_are_written_as_the_settings_say() {
+        // 雛形の値では、`▽おく*り` は `おくり` になる。
+        let okuri = [
+            segment(Role::Marker, "▽"),
+            segment(Role::Midashi, "おく"),
+            segment(Role::Separator, "*"),
+            segment(Role::Okuri, "り"),
+        ];
+        let shipped = Markers {
+            composing_empty: "\u{00A0}".to_owned(),
+            ..markers("", "", "")
+        };
+        assert_eq!(written(&okuri, Some(&shipped)), "おくり");
+
+        // 見慣れた記号にも戻せる。
+        let traditional = markers("▽", "▼", "*");
+        assert_eq!(written(&okuri, Some(&traditional)), "▽おく*り");
+    }
+
+    #[test]
+    fn an_empty_reading_leaves_a_mark() {
+        // 読みを全部消しても、変換を始めたところが見える。
+        let set = Markers {
+            composing_empty: " ".to_owned(),
+            ..markers("", "", " ")
+        };
+        let empty = [segment(Role::Marker, "▽")];
+        assert_eq!(written(&empty, Some(&set)), " ");
+        // 打ちかけのローマ字があれば、読みはもう空ではない。
+        let pending = [segment(Role::Marker, "▽"), segment(Role::Midashi, "k")];
+        assert_eq!(written(&pending, Some(&set)), "k");
+        // 記号を出す設定でも足される。
+        let traditional = Markers {
+            composing_empty: "_".to_owned(),
+            ..markers("▽", "▼", "*")
+        };
+        assert_eq!(written(&empty, Some(&traditional)), "▽_");
+    }
+
+    /// 雛形の設定で動かしたエンジンに打鍵を送り、確定した文字列と、
+    /// 文書に書く未確定の文字列を返す。**印の置き換えはエンジンの出力に
+    /// かけて確かめる。** 手で組んだ区切りでは、エンジンと食い違っても
+    /// 気付けない。
+    fn typed(keys: &[crystalskk_core::Key], okuri: &str) -> (String, String) {
+        use crystalskk_core::dict::{Candidate, CandidateSource, Query};
+
+        struct Dict;
+        impl CandidateSource for Dict {
+            fn lookup(&self, query: &Query) -> Vec<Candidate> {
+                match query.key.as_str() {
+                    "おくr" => vec![Candidate::new("送")],
+                    _ => Vec::new(),
+                }
+            }
+        }
+
+        let settings = crystalskk_settings::parse(
+            crystalskk_settings::TEMPLATE,
+            crystalskk_settings::ROMAJI_TEMPLATE,
+        )
+        .expect("雛形はそのまま使える");
+        let mut engine = crystalskk_core::Engine::new(Box::new(Dict));
+        engine.configure(settings.engine);
+        let markers = Markers {
+            okuri: okuri.to_owned(),
+            ..settings.markers
+        };
+
+        let mut committed = String::new();
+        for key in keys {
+            committed.push_str(&engine.press(*key).commit);
+        }
+        let preedit = written(&engine.preedit().segments, Some(&markers));
+        (committed, preedit)
+    }
+
+    fn keys(text: &str) -> Vec<crystalskk_core::Key> {
+        use crystalskk_core::Key;
+        text.chars()
+            .map(|c| match c {
+                '\u{8}' => Key::Backspace,
+                c => Key::Char(c),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn backspace_in_the_okuri_takes_the_separator_whatever_it_is_written_as() {
+        // 区切りを何も出さない雛形でも、`*` を出す設定でも、送り仮名の
+        // 途中で消すと区切りごと消える。
+        for (okuri, before) in [("", "おくr"), ("*", "おく*r")] {
+            assert_eq!(typed(&keys("OkuR"), okuri).1, before, "okuri = {okuri:?}");
+            assert_eq!(
+                typed(&keys("OkuR\u{8}"), okuri),
+                (String::new(), "おく".to_owned()),
+                "okuri = {okuri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backspace_while_selecting_leaves_no_separator_whatever_it_is_written_as() {
+        // 確定した後はただの文字なので、区切りは文書に残らない。
+        for okuri in ["", "*"] {
+            assert_eq!(
+                typed(&keys("OkuRi\u{8}"), okuri),
+                ("送".to_owned(), String::new()),
+                "okuri = {okuri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_states_can_be_written_differently() {
+        let set = markers("a", "b", "");
+        let selecting = [segment(Role::Marker, "▼"), segment(Role::Candidate, "送")];
+        assert_eq!(written(&selecting, Some(&set)), "b送");
+        let composing = [segment(Role::Marker, "▽")];
+        assert_eq!(written(&composing, Some(&set)), "a");
+    }
+
+    #[test]
+    fn without_settings_the_symbols_are_kept() {
+        // 設定を読めていないうちは、エンジンの記号のまま出す。
+        let okuri = [segment(Role::Marker, "▽"), segment(Role::Separator, "*")];
+        assert_eq!(written(&okuri, None), "▽*");
     }
 
     #[test]
@@ -445,6 +585,7 @@ mod tests {
         let written = document_segments(
             &[segment(Role::Separator, "*"), segment(Role::Okuri, "り")],
             Some(atoms),
+            None,
         );
         assert_eq!(written[0].0, written[1].0, "区切りは送り仮名に合わせる");
     }
@@ -452,8 +593,21 @@ mod tests {
     #[test]
     fn a_trailing_marker_keeps_its_own_look() {
         // 続く部分が無いときは、自分の役目のまま。**落ちたりしない。**
-        let written = document_segments(&[segment(Role::Marker, "▼")], None);
+        let written = document_segments(&[segment(Role::Marker, "▼")], None, None);
         assert_eq!(written.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_reading_is_underlined_like_a_reading() {
+        // 読みを消し切っても、線は見出し語のまま。変換中の線にはならない。
+        let atoms = Atoms {
+            input: 1,
+            okuri: 2,
+            converted: 3,
+            completion: 4,
+        };
+        let written = document_segments(&[segment(Role::Marker, "▽")], Some(atoms), None);
+        assert_eq!(written[0].0, atoms.input);
     }
 
     #[test]

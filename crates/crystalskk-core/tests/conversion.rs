@@ -453,10 +453,68 @@ fn backspace_walks_back_through_the_midashi() {
     assert_eq!(s.preedit(), "▽かん");
     s.type_keys("\u{8}");
     assert_eq!(s.preedit(), "▽か");
-    // 見出し語が空になれば直接入力へ戻る。
+    // 読みを消し切っても `▽` は残る。印だけ残して打ち直せる。
     s.type_keys("\u{8}");
+    assert_eq!(s.preedit(), "▽");
+    s.type_keys("ki");
+    assert_eq!(s.preedit(), "▽き");
+    // 空の `▽` でもう一度押すと直接入力へ戻る。
+    s.type_keys("\u{8}\u{8}");
     assert_eq!(s.preedit(), "");
     assert_eq!(s.marker(), Marker::None);
+}
+
+#[test]
+fn converting_an_empty_midashi_leaves_the_midashi() {
+    // 引くものが無いので、登録を始めずに `▽` を抜ける。ddskk と同じ。
+    let mut s = Session::new();
+    s.type_keys("K\u{8} ");
+    assert_eq!(s.preedit(), "");
+    assert_eq!(s.marker(), Marker::None);
+    assert_eq!(s.committed, "");
+}
+
+#[test]
+fn backspace_in_the_okuri_takes_the_separator_too() {
+    // 区切りだけ残っても、続けて打つかもう一度消すしかない。
+    let mut s = Session::new();
+    s.type_keys("OkuR");
+    assert_eq!(s.preedit(), "▽おく*r");
+    s.type_keys("\u{8}");
+    assert_eq!(s.preedit(), "▽おく");
+    s.type_keys("Ri");
+    assert_eq!(
+        s.preedit(),
+        "▼送り",
+        "区切りを消した後も送り仮名を打ち直せる"
+    );
+}
+
+#[test]
+fn backspace_while_selecting_commits_all_but_the_last_character() {
+    // ddskk の `skk-delete-implies-kakutei` の既定と同じ。確定した後は
+    // ただの文字なので、送り仮名の区切りも残らない。
+    let mut s = Session::new();
+    s.type_keys("OkuRi\u{8}");
+    assert_eq!(s.committed, "送");
+    assert_eq!(s.preedit(), "");
+    // 選んだ候補は正しいので、学習はする。
+    assert_eq!(
+        s.events,
+        [Event::Learn {
+            query: Query::okuri_ari("おく", 'r', "り"),
+            word: "送".into()
+        }]
+    );
+}
+
+#[test]
+fn x_still_steps_back_to_the_midashi() {
+    // Backspace が確定に変わっても、前の候補へ戻る道は x に残る。
+    let mut s = Session::new();
+    s.type_keys("OkuRix");
+    assert_eq!(s.preedit(), "▽おくり");
+    assert_eq!(s.committed, "");
 }
 
 #[test]
