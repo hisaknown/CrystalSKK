@@ -583,6 +583,11 @@ impl TextService {
     ///
     /// 受け取れないあいだは打鍵がすべてアプリへ素通しになる。利用者が
     /// ファイルを直したり、サーバが起きたりすれば、次の打鍵で動き出す。
+    ///
+    /// **打鍵だけをきっかけにしない。** 入力先が移ったときと、入切が
+    /// 変わったときにも呼ぶ。ログオン直後のスタートメニューの検索欄で、
+    /// 設定の無いまま打鍵がこちらへ届かず、入切は効くのに `Ctrl+J` が
+    /// 効かないまま直らないことがあった。
     /// **尋ねるのは数秒に一度まで**にする。打鍵のたびにサーバを起こそうと
     /// すれば、そのたびにプロセスを作ることになる。
     fn ensure_settings(&self) {
@@ -1021,6 +1026,7 @@ impl TextService_Impl {
         // かぶる。** モードを変える打鍵なら、処理のあとで出し直す。
         self.this.mode_window.hide();
         if !self.this.accepts_keys() {
+            log::trace("入力方式が切か、入力先が打鍵を断っているので素通しする");
             return false.into();
         }
         // TSF はまずここを尋ねる。**設定が無ければ、ここで取りに行く。**
@@ -1155,6 +1161,7 @@ impl ITfCompartmentEventSink_Impl for TextService_Impl {
                 return Ok(());
             };
             if *guid == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+                self.this.ensure_settings();
                 self.this.sync_with_open_state();
                 // 入切が変わったら、カーソルのそばに出す。
                 if self.this.indicates(|i| i.on_switch) {
@@ -1255,6 +1262,7 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
             let Some(document) = pdimfocus.as_ref() else {
                 return Ok(());
             };
+            self.this.ensure_settings();
             if self.this.indicates(|i| i.on_focus) {
                 // SAFETY: 問い合わせるだけ。
                 let context = unsafe { document.GetTop() }.ok();
