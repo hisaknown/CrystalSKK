@@ -503,13 +503,16 @@ impl TextService {
     ///
     /// 設定をまだ受け取っていなければ Windows の標準の色。**設定が読めない
     /// ことを知らせる窓**は、設定が無くても出さなければならない。
+    ///
+    /// 大きさと書体の設定も、ここで描く側に渡す ([`crate::draw::configure`])。
+    /// 小窓を出すときは必ずここを通る。
     fn palette(&self) -> crate::theme::Palette {
-        self.settings
-            .borrow()
-            .as_ref()
-            .map_or_else(crate::theme::Palette::system, |s| {
-                crate::theme::Palette::resolve(&s.colors)
-            })
+        let settings = self.settings.borrow();
+        let Some(settings) = settings.as_ref() else {
+            return crate::theme::Palette::system();
+        };
+        crate::draw::configure(&settings.popup);
+        crate::theme::Palette::resolve(&settings.colors)
     }
 
     /// いまの設定でカーソルのそばに出すことになっているか。

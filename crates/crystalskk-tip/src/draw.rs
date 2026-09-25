@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
@@ -41,8 +41,51 @@ thread_local! {
         // SAFETY: 工場を作るだけ。
         unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()
     };
+    /// 設定の大きさと書体。設定を受け取るたびに差し替える ([`configure`])。
+    static LOOK: RefCell<Look> = RefCell::new(Look::default());
     /// 窓ごとの描く先。作るのは重いので、窓があるあいだ使い回す。
     static TARGETS: RefCell<Vec<(isize, ID2D1HwndRenderTarget)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 設定の大きさと書体。
+#[derive(Debug, Clone)]
+struct Look {
+    /// 大きさ (百分率)。
+    scale: u16,
+    /// 書体の名前。`None` は Windows のメッセージの書体。
+    font: Option<String>,
+    /// 文字の大きさ (ポイント)。`None` は Windows のメッセージの書体の大きさ。
+    font_size: Option<u16>,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            scale: 100,
+            font: None,
+            font_size: None,
+        }
+    }
+}
+
+/// 設定の大きさと書体を覚える。以後に出す窓から効く。
+pub fn configure(popup: &crystalskk_settings::Popup) {
+    LOOK.with(|look| {
+        *look.borrow_mut() = Look {
+            scale: popup.scale,
+            font: popup.font.clone(),
+            font_size: popup.font_size,
+        };
+    });
+}
+
+/// 画面座標の `point` に窓を出すときの、描く拡大率。
+///
+/// モニターの拡大率 ([`dpi::at`]) に、設定の大きさを掛け合わせる。拡大率ごと
+/// 変えるので、文字も余白も絵もまとめて大きくなり、釣り合いが崩れない。
+pub fn dpi_at(point: POINT) -> u32 {
+    let scale = LOOK.with(|look| u32::from(look.borrow().scale));
+    (dpi::at(point) * scale / 100).max(1)
 }
 
 /// `0xRRGGBB` を Direct2D の色にする。
@@ -91,9 +134,10 @@ pub struct Font {
 }
 
 impl Font {
-    /// システムのメッセージの書体。読めなければ Yu Gothic UI の 9pt。
+    /// 案内の書体。設定に書体や大きさがあればそれ、無ければシステムの
+    /// メッセージの書体。それも読めなければ Yu Gothic UI の 9pt。
     pub fn message() -> Self {
-        dpi::message_font_spec().map_or_else(
+        let system = dpi::message_font_spec().map_or_else(
             || Self {
                 family: HSTRING::from("Yu Gothic UI"),
                 size: 12.0,
@@ -104,7 +148,21 @@ impl Font {
                 size,
                 weight,
             },
-        )
+        );
+        LOOK.with(|look| {
+            let look = look.borrow();
+            Self {
+                family: look
+                    .font
+                    .as_deref()
+                    .map_or(system.family.clone(), HSTRING::from),
+                // ポイントを DIP にする。1 ポイントは 1/72 インチ、1 DIP は 1/96 インチ。
+                size: look
+                    .font_size
+                    .map_or(system.size, |pt| f32::from(pt) * 96.0 / 72.0),
+                weight: system.weight,
+            }
+        })
     }
 
     /// 大きさを `ratio` 倍にした書体。

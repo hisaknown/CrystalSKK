@@ -307,7 +307,7 @@ impl CandidateWindow {
         // 描く中身を窓に預ける。描画はいつ来るか分からないので、
         // 窓自身が持っていなければならない。
         // 窓を出すモニターの拡大率で描く (`crate::dpi`)。
-        let dpi = dpi::at(POINT {
+        let dpi = draw::dpi_at(POINT {
             x: anchor.left,
             y: anchor.bottom,
         });

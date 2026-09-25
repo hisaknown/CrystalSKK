@@ -110,7 +110,7 @@ impl ModeWindow {
         }
 
         // 窓を出すモニターの拡大率で描く (`crate::dpi`)。
-        let dpi = dpi::at(POINT {
+        let dpi = draw::dpi_at(POINT {
             x: caret.left,
             y: caret.bottom,
         });
@@ -143,7 +143,7 @@ impl ModeWindow {
             return;
         }
         let hwnd = *self.hwnd.borrow();
-        let dpi = dpi::at(POINT {
+        let dpi = draw::dpi_at(POINT {
             x: caret.left,
             y: caret.bottom,
         });

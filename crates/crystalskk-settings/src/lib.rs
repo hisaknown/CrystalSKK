@@ -64,6 +64,8 @@ pub struct Settings {
     pub mode_indicator: ModeIndicator,
     /// 候補の窓と、カーソルのそばの窓の色。
     pub colors: Colors,
+    /// 候補の窓と、カーソルのそばの窓の大きさと書体。
+    pub popup: Popup,
     /// 引く辞書。並べた順に引く。**使うのは辞書サーバだけ。**
     pub dictionaries: Vec<Source>,
     /// 変換の候補を前後の文章から並べる (ADR-0030)。
@@ -196,6 +198,68 @@ pub struct ModeIndicator {
     pub on_focus: bool,
     /// 出しておく時間 (ミリ秒)。
     pub duration_ms: u32,
+}
+
+/// 候補の窓と、カーソルのそばの窓の大きさと書体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Popup {
+    /// 大きさ (百分率)。モニターの拡大率に掛け合わせる。
+    pub scale: u16,
+    /// 書体の名前。`None` は Windows のメッセージの書体。
+    pub font: Option<String>,
+    /// 文字の大きさ (ポイント)。`None` は Windows のメッセージの書体の大きさ。
+    pub font_size: Option<u16>,
+}
+
+/// 大きさの範囲 (百分率)。
+const SCALE_RANGE: std::ops::RangeInclusive<i64> = 50..=300;
+
+/// 文字の大きさの範囲 (ポイント)。
+const FONT_SIZE_RANGE: std::ops::RangeInclusive<i64> = 6..=72;
+
+fn popup(table: &Table) -> Result<Popup, Error> {
+    let scale = value(table, "popup", "scale")?
+        .as_integer()
+        .filter(|n| SCALE_RANGE.contains(n))
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| {
+            Error::new(format!(
+                "popup.scale は {} から {} の整数で書いてください",
+                SCALE_RANGE.start(),
+                SCALE_RANGE.end()
+            ))
+        })?;
+    let font = match value(table, "popup", "font")?.as_str() {
+        Some("system") => None,
+        Some(name) if !name.trim().is_empty() => Some(name.trim().to_owned()),
+        _ => {
+            return Err(Error::new(
+                "popup.font は \"system\" か書体の名前で書いてください (例: \"BIZ UDPGothic\")",
+            ));
+        }
+    };
+    let size = value(table, "popup", "font_size")?;
+    let font_size = if size.as_str() == Some("system") {
+        None
+    } else {
+        Some(
+            size.as_integer()
+                .filter(|n| FONT_SIZE_RANGE.contains(n))
+                .and_then(|n| u16::try_from(n).ok())
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "popup.font_size は \"system\" か {} から {} の整数 (ポイント) で書いてください",
+                        FONT_SIZE_RANGE.start(),
+                        FONT_SIZE_RANGE.end()
+                    ))
+                })?,
+        )
+    };
+    Ok(Popup {
+        scale,
+        font,
+        font_size,
+    })
 }
 
 /// 候補の窓と、カーソルのそばの窓の色。
@@ -473,6 +537,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
         },
         dictionaries: sources(section(&doc, "dictionaries")?)?,
         colors: colors(section(&doc, "colors")?)?,
+        popup: popup(section(&doc, "popup")?)?,
         markers: {
             let markers = section(&doc, "markers")?;
             Markers {
@@ -1225,6 +1290,43 @@ mod tests {
         assert_eq!(colors.light.text, Color::Rgb(0x00_00_00));
         assert_eq!(colors.dark.background, Color::Rgb(0x2B_2B_2B));
         assert_eq!(colors.dark.text, Color::Rgb(0xFF_FF_FF));
+    }
+
+    #[test]
+    fn the_popups_follow_windows_until_told_otherwise() {
+        let popup = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().popup;
+        assert_eq!(
+            popup,
+            Popup {
+                scale: 100,
+                font: None,
+                font_size: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_popups_can_be_resized_and_given_a_font() {
+        let user = TEMPLATE
+            .replacen("scale = 100", "scale = 125", 1)
+            .replacen("font = \"system\"", "font = \"BIZ UDPGothic\"", 1)
+            .replacen("font_size = \"system\"", "font_size = 11", 1);
+        let popup = parse(&user, ROMAJI_TEMPLATE).unwrap().popup;
+        assert_eq!(popup.scale, 125);
+        assert_eq!(popup.font.as_deref(), Some("BIZ UDPGothic"));
+        assert_eq!(popup.font_size, Some(11));
+    }
+
+    #[test]
+    fn popup_values_out_of_range_are_told() {
+        for (from, to) in [
+            ("scale = 100", "scale = 10"),
+            ("font = \"system\"", "font = \"\""),
+            ("font_size = \"system\"", "font_size = 200"),
+        ] {
+            let user = TEMPLATE.replacen(from, to, 1);
+            assert!(parse(&user, ROMAJI_TEMPLATE).is_err(), "{to}");
+        }
     }
 
     #[test]

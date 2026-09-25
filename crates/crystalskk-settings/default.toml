@@ -151,6 +151,23 @@ selected_background = "system"
 selected_text = "system"
 key = "accent"
 
+[popup]
+# 候補の窓と、カーソルのそばのモードの窓の見た目。
+
+# 大きさ (百分率、50 から 300)。モニターの拡大率に掛け合わせます。
+# 文字も余白も絵も、まとめて大きくなります。
+scale = 100
+
+# 候補の窓の書体の名前 (例: "BIZ UDPGothic"、"Meiryo UI")。"system" なら
+# Windows のメッセージの書体 (Yu Gothic UI など) に従います。
+# 無い書体を書くと、Windows が似た書体で代わりに描きます。
+font = "system"
+
+# 候補の窓の文字の大きさ (ポイント、6 から 72)。"system" なら Windows の
+# メッセージの書体の大きさ (ふつうは 9) に従います。行の高さや余白も
+# 文字に合わせて変わります。
+font_size = "system"
+
 [dictionaries]
 # 引く辞書。ユーザー辞書のあとに、上から順に引きます。候補もこの順に並び、
 # 同じ語は先に出たほうにまとめます。補完もすべての辞書から引きます。
