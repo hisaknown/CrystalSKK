@@ -9,28 +9,36 @@
 //!   ([`crate::theme::Palette`])。暗ければ黒い地に白い絵。
 //! - **焦点を奪わず、クリックも受けない。** 一瞬出るだけの窓に、打鍵や
 //!   クリックを取られてはならない。
+//! - 候補の窓と同じく、角を丸めて地を透かし、Direct2D で描く
+//!   ([`crate::popup`]、[`crate::draw`])。
 
 use std::cell::{Cell, RefCell};
 
 use crystalskk_core::InputMode;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice,
+    BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    PAINTSTRUCT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
-    GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, KillTimer, LWA_ALPHA, RegisterClassExW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
-    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, IsWindowVisible, KillTimer, RegisterClassExW,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST,
+    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::dpi;
 use crate::guard::guard;
 use crate::theme::Palette;
+use crate::{dpi, draw};
 use crate::{icon, log, popup};
 
 /// 絵の大きさ。100% のときの画素数。拡大率に合わせて伸ばす。
@@ -59,6 +67,8 @@ pub struct ModeWindow {
     dpi: Cell<u32>,
     /// 角を DWM が丸めているか。丸めているなら枠も DWM が描く。
     rounded: Cell<bool>,
+    /// 地を DWM に透かさせているか。
+    backdrop: Cell<bool>,
 }
 
 impl ModeWindow {
@@ -81,9 +91,13 @@ impl ModeWindow {
         };
         self.shown.set(Some(mode));
         self.palette.set(Some(palette));
-        if self.rounded.get() {
+        let rounded = self.rounded.get();
+        if rounded {
             popup::set_border(hwnd, palette.border);
         }
+        // 地を透かすのは、角を丸められる Windows 11 のときだけ。
+        self.backdrop
+            .set(rounded && popup::set_backdrop(hwnd, popup::is_dark(palette.background)));
         // SAFETY: 窓は自分で作ったもの。描く中身は `self` にあり、窓より長く
         // 生きる (窓は `close` か `Drop` で壊す)。
         unsafe {
@@ -108,6 +122,9 @@ impl ModeWindow {
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, side, side, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            if self.backdrop.get() {
+                popup::keep_lit(hwnd);
+            }
             // 出し直すたびに時計を掛け直す。
             SetTimer(Some(hwnd), TIMER, duration_ms, None);
         }
@@ -177,14 +194,9 @@ impl ModeWindow {
         // SAFETY: 種別は直前に登録したもの。
         let hwnd = unsafe {
             CreateWindowExW(
-                WINDOW_EX_STYLE(
-                    WS_EX_NOACTIVATE.0
-                        | WS_EX_TOOLWINDOW.0
-                        | WS_EX_TOPMOST.0
-                        // クリックを下へ通す。重ねた窓でないと効かない。
-                        | WS_EX_LAYERED.0
-                        | WS_EX_TRANSPARENT.0,
-                ),
+                // 重ねた窓 (`WS_EX_LAYERED`) にはしない。DWM が地を透かさない。
+                // クリックは `WM_NCHITTEST` で下へ通す。
+                WINDOW_EX_STYLE(WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TOPMOST.0),
                 CLASS_NAME,
                 PCWSTR::null(),
                 WS_POPUP,
@@ -200,11 +212,6 @@ impl ModeWindow {
         };
         match hwnd {
             Ok(hwnd) => {
-                // 重ねた窓は、濃さを決めるまで何も映らない。
-                // SAFETY: 窓は直前に作ったもの。
-                unsafe {
-                    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-                }
                 *self.hwnd.borrow_mut() = hwnd;
                 self.rounded.set(popup::round_corners(hwnd));
                 Some(hwnd)
@@ -269,57 +276,88 @@ fn work_area(caret: RECT) -> RECT {
     }
 }
 
-/// 描く。地、縁、絵の色は `palette` に従う。`framed` なら縁を描く。
-fn pixels(
-    mode: Option<InputMode>,
-    side: i32,
-    palette: Palette,
-    dpi: u32,
-    framed: bool,
-) -> Vec<u32> {
-    let Palette {
-        background,
-        text: ink,
-        border,
-        ..
-    } = palette;
-
-    let side_u = side.max(0) as usize;
-    let mut out = vec![background; side_u * side_u];
-    for i in (0..side_u).filter(|_| framed) {
-        out[i] = border;
-        out[(side_u - 1) * side_u + i] = border;
-        out[i * side_u] = border;
-        out[i * side_u + side_u - 1] = border;
-    }
-
-    let glyph = u32::try_from(side - 2 * dpi::scale(PADDING, dpi)).unwrap_or(16);
+/// 描く。地、縁、絵の色は `palette` に従う。
+///
+/// 絵は窓の真ん中に、拡大率に合った大きさのものを画素そのままで置く。
+/// **伸び縮みさせると滲む。**
+fn paint(hwnd: HWND, window: &ModeWindow) {
+    let (Some(mode), Some(palette)) = (window.shown.get(), window.palette.get()) else {
+        return;
+    };
+    let dpi = window.dpi.get();
+    let (rounded, backdrop) = (window.rounded.get(), window.backdrop.get());
+    #[allow(clippy::cast_precision_loss)]
+    let (side, scale) = (
+        side(dpi) as f32 * dpi::BASE as f32 / dpi as f32,
+        dpi::BASE as f32 / dpi as f32,
+    );
+    let glyph = u32::try_from(dpi::scale(GLYPH, dpi)).unwrap_or(16);
     let (size, coverage) = icon::mode_coverage(mode, glyph);
-    let size = size as usize;
-    // 選ばれた絵が大きめでも、真ん中に置いてはみ出た分は切る。
-    let offset = (side_u as isize - size as isize) / 2;
-    for y in 0..size {
-        for x in 0..size {
-            let (tx, ty) = (x as isize + offset, y as isize + offset);
-            if tx < 1 || ty < 1 || tx >= side_u as isize - 1 || ty >= side_u as isize - 1 {
-                continue;
-            }
-            let alpha = u32::from(coverage[y * size + x]);
-            let at = ty as usize * side_u + tx as usize;
-            out[at] = blend(ink, out[at], alpha);
+    let tinted = premultiplied(coverage, palette.text);
+
+    draw::with_target(hwnd, dpi, |target| {
+        let ground = draw::ground(palette.background, backdrop, palette.backdrop_opacity);
+        // SAFETY: 描いている最中の描く先を塗りつぶすだけ。
+        unsafe { target.Clear(Some(&ground)) };
+
+        // 縁。角を丸めているなら DWM が描く (`crate::popup`)。
+        if !rounded
+            // SAFETY: 描いている最中の描く先に、筆を作らせるだけ。
+            && let Ok(border) =
+                unsafe { target.CreateSolidColorBrush(&draw::color(palette.border), None) }
+        {
+            let half = scale / 2.0;
+            let edge = draw::rect(half, half, side - half, side - half);
+            // SAFETY: 描いている最中の描く先に、線を引かせるだけ。
+            unsafe { target.DrawRectangle(&edge, &border, scale, None) };
         }
-    }
-    out
+
+        let properties = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 0.0,
+            dpiY: 0.0,
+        };
+        let pixels = D2D_SIZE_U {
+            width: size,
+            height: size,
+        };
+        // SAFETY: 絵の画素は `size` 四方あり、一行の長さも渡している。
+        let Ok(bitmap) = (unsafe {
+            target.CreateBitmap(pixels, Some(tinted.as_ptr().cast()), size * 4, &properties)
+        }) else {
+            return;
+        };
+        // 画素そのままの大きさで真ん中に置く。窓より大きければ、はみ出た分は切れる。
+        #[allow(clippy::cast_precision_loss)]
+        let extent = size as f32 * scale;
+        let at = ((side - extent) / 2.0 / scale).round() * scale;
+        let place = draw::rect(at, at, at + extent, at + extent);
+        // SAFETY: 描いている最中の描く先に、絵を置かせるだけ。
+        unsafe {
+            target.DrawBitmap(
+                &bitmap,
+                Some(&place),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+            );
+        }
+    });
 }
 
-/// 上に `alpha` の濃さで重ねる。
-fn blend(over: u32, under: u32, alpha: u32) -> u32 {
-    let channel = |shift: u32| {
-        let o = (over >> shift) & 0xFF;
-        let u = (under >> shift) & 0xFF;
-        ((o * alpha + u * (255 - alpha)) / 255) << shift
-    };
-    channel(16) | channel(8) | channel(0)
+/// 濃さに色を付け、Direct2D の画素 (`0xAARRGGBB`、色は濃さを掛けた値) にする。
+fn premultiplied(coverage: &[u8], ink: u32) -> Vec<u32> {
+    let channel = |shift: u32, alpha: u32| ((((ink >> shift) & 0xFF) * alpha + 127) / 255) << shift;
+    coverage
+        .iter()
+        .map(|alpha| {
+            let alpha = u32::from(*alpha);
+            (alpha << 24) | channel(16, alpha) | channel(8, alpha) | channel(0, alpha)
+        })
+        .collect()
 }
 
 const CLASS_NAME: PCWSTR = w!("CrystalSKKModeIndicator");
@@ -374,53 +412,24 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: 描画の手順どおり。預けた指し先は、生きている間だけ入っている。
                 unsafe {
                     let mut ps = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(hwnd, &mut ps);
+                    let _ = BeginPaint(hwnd, &mut ps);
                     let owner =
                         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ModeWindow).as_ref();
-                    if let Some((mode, palette, o_dpi, rounded)) = owner.and_then(|o| {
-                        Some((
-                            o.shown.get()?,
-                            o.palette.get()?,
-                            o.dpi.get(),
-                            o.rounded.get(),
-                        ))
-                    }) {
-                        let dpi = o_dpi;
-                        let side = side(dpi);
-                        let drawn = pixels(mode, side, palette, dpi, !rounded);
-                        let info = BITMAPINFO {
-                            bmiHeader: BITMAPINFOHEADER {
-                                biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
-                                biWidth: side,
-                                // 負にすると上の行が先になる。
-                                biHeight: -side,
-                                biPlanes: 1,
-                                biBitCount: 32,
-                                biCompression: BI_RGB.0,
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        };
-                        SetDIBitsToDevice(
-                            hdc,
-                            0,
-                            0,
-                            side as u32,
-                            side as u32,
-                            0,
-                            0,
-                            0,
-                            side as u32,
-                            drawn.as_ptr().cast(),
-                            &info,
-                            DIB_RGB_COLORS,
-                        );
+                    if let Some(owner) = owner {
+                        paint(hwnd, owner);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
                 Ok(())
             });
             LRESULT(0)
+        }
+        // クリックは下の窓へ通す。
+        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // 透かした地を保つため、いつも前面にいるものとして扱わせる。
+        WM_NCACTIVATE => {
+            // SAFETY: 前面かどうかだけを差し替えて、既定の処理に委ねる。
+            unsafe { DefWindowProcW(hwnd, message, WPARAM(1), lparam) }
         }
         WM_TIMER if wparam.0 == TIMER => {
             // SAFETY: 自分の窓の時計を止めて隠す。
@@ -430,7 +439,10 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_DESTROY => LRESULT(0),
+        WM_DESTROY => {
+            draw::forget(hwnd);
+            LRESULT(0)
+        }
         // SAFETY: 既定の処理に委ねる。
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
@@ -474,32 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn colours_are_blended() {
-        assert_eq!(blend(0xFF_FF_FF, 0x00_00_00, 255), 0xFF_FF_FF);
-        assert_eq!(blend(0xFF_FF_FF, 0x00_00_00, 0), 0x00_00_00);
-    }
-
-    #[test]
-    fn the_glyph_is_drawn_in_the_palette_inside_the_border() {
-        let palette = Palette {
-            background: 0x2B_2B_2B,
-            text: 0xFF_FF_FF,
-            border: 0x00_78_D4,
-            selected_background: 0x00_78_D4,
-            selected_text: 0xFF_FF_FF,
-            key: 0x00_78_D4,
-            backdrop_opacity: 100,
-        };
-        let side = 20;
-        let drawn = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE, true);
-        assert_eq!(drawn.len(), (side * side) as usize);
-        assert_eq!(drawn[0], palette.border, "縁");
-        let rounded = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE, false);
-        assert_eq!(
-            rounded[0], palette.background,
-            "角を丸めたら縁は DWM に任せる"
-        );
-        assert_eq!(drawn[(side + 2) as usize], palette.background, "地");
-        assert!(drawn.contains(&palette.text), "絵は文字の色で描かれる");
+    fn the_glyph_is_inked_with_its_coverage() {
+        let drawn = premultiplied(&[0, 255, 128], 0xFF_80_00);
+        assert_eq!(drawn[0], 0, "濃さの無いところは透明");
+        assert_eq!(drawn[1], 0xFF_FF_80_00, "濃いところは色そのまま");
+        assert_eq!(drawn[2], 0x80_80_40_00, "半分の濃さなら色も半分");
     }
 }

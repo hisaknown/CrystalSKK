@@ -56,6 +56,22 @@ pub fn color(rgb: u32) -> D2D1_COLOR_F {
     }
 }
 
+/// 窓の地の色。
+///
+/// 透かしているなら、地の色を `opacity` (百分率) の濃さで重ね、DWM の地を
+/// 少しだけ見せる。**透かしたままでは、後ろが明るいと暗い窓の文字が読めない。**
+pub fn ground(rgb: u32, backdrop: bool, opacity: u8) -> D2D1_COLOR_F {
+    let solid = color(rgb);
+    if backdrop {
+        D2D1_COLOR_F {
+            a: f32::from(opacity.min(100)) / 100.0,
+            ..solid
+        }
+    } else {
+        solid
+    }
+}
+
 /// DIP の長さを、`dpi` の画素数にする。切り上げる。
 pub fn pixels(dip: f32, dpi: u32) -> i32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]

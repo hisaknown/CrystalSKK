@@ -3,7 +3,7 @@
 //! Windows 11 のメニューや吹き出しに揃え、角を丸めて影を付ける。どちらも
 //! DWM に頼むので、自分では描かない。
 
-use windows::Win32::Foundation::{COLORREF, HWND};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -12,7 +12,8 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETDROPSHADOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    SPI_GETDROPSHADOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SystemParametersInfoW,
+    WM_NCACTIVATE,
 };
 use windows::core::BOOL;
 
@@ -101,6 +102,18 @@ pub fn set_backdrop(hwnd: HWND, dark: bool) -> bool {
         };
         let extended = DwmExtendFrameIntoClientArea(hwnd, &margins).is_ok();
         on && extended
+    }
+}
+
+/// 透かした地を保つ。
+///
+/// 透かした地は、窓が前面でないと単色に落ちる。小窓は焦点を奪えないので、
+/// 前面にいるものとして扱わせる。窓の手続きのほうでも、`WM_NCACTIVATE` を
+/// いつも前面として既定の処理に渡すこと。
+pub fn keep_lit(hwnd: HWND) {
+    // SAFETY: 自分の窓に知らせを送るだけ。
+    unsafe {
+        let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(1)), Some(LPARAM(0)));
     }
 }
 

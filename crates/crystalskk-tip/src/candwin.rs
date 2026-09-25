@@ -31,7 +31,7 @@
 use std::cell::{Cell, RefCell};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ROUNDED_RECT,
 };
@@ -41,9 +41,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_HWNDPARENT, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST,
     IsWindowVisible, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SendMessageW, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE,
-    WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_PAINT,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -353,10 +353,8 @@ impl CandidateWindow {
             );
             // 焦点は奪わない。打っている最中にカーソルが消えてはならない。
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            // 透かした地は、窓が前面でないと単色に落ちる。焦点は奪えないので、
-            // 前面にいるものとして扱わせる (`WM_NCACTIVATE`)。
             if backdrop {
-                let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(1)), Some(LPARAM(0)));
+                popup::keep_lit(hwnd);
             }
         }
     }
@@ -624,16 +622,7 @@ fn paint(hwnd: HWND, painted: &Painted) {
             }
         };
 
-        // 地。透かしているなら地の色を薄く重ねて、DWM の地を少しだけ見せる。
-        // **透かしたままでは、後ろが明るいと暗い窓の文字が読めない。**
-        let ground = if *backdrop {
-            D2D1_COLOR_F {
-                a: f32::from(palette.backdrop_opacity) / 100.0,
-                ..draw::color(palette.background)
-            }
-        } else {
-            draw::color(palette.background)
-        };
+        let ground = draw::ground(palette.background, *backdrop, palette.backdrop_opacity);
         // SAFETY: 描いている最中の描く先を塗りつぶすだけ。
         unsafe { target.Clear(Some(&ground)) };
 
