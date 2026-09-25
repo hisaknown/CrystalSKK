@@ -66,6 +66,20 @@ impl Theme {
 
 /// `Personalize` の下の明暗の値を読む。1 なら明るい。
 fn read(name: PCWSTR, fallback: Theme) -> Theme {
+    match personalize(name) {
+        None => fallback,
+        Some(0) => Theme::Dark,
+        Some(_) => Theme::Light,
+    }
+}
+
+/// 「透明効果」が入っているか。読めなければ入っているとする (Windows の既定)。
+pub(crate) fn transparency() -> bool {
+    personalize(w!("EnableTransparency")) != Some(0)
+}
+
+/// `Personalize` の下の値を読む。
+fn personalize(name: PCWSTR) -> Option<u32> {
     let mut value: u32 = 0;
     let mut size = u32::try_from(size_of::<u32>()).unwrap_or(4);
     // SAFETY: 書き込み先はこの関数の変数で、大きさも渡している。
@@ -80,11 +94,7 @@ fn read(name: PCWSTR, fallback: Theme) -> Theme {
             Some(&raw mut size),
         )
     };
-    match (status.is_ok(), value) {
-        (false, _) => fallback,
-        (true, 0) => Theme::Dark,
-        (true, _) => Theme::Light,
-    }
+    status.is_ok().then_some(value)
 }
 
 /// アプリの上に出す小窓 (候補の窓、カーソルのそばの窓) の色。どれも `0xRRGGBB`。
@@ -99,6 +109,8 @@ pub struct Palette {
     pub selected_text: u32,
     /// 押すキーを囲む枠と、選んでいる行の印。
     pub key: u32,
+    /// 透かした地に重ねる地の色の濃さ (百分率)。
+    pub backdrop_opacity: u8,
 }
 
 impl Palette {
@@ -140,6 +152,7 @@ impl Palette {
             selected_background,
             selected_text,
             key: pick(set.key, COLOR_HIGHLIGHT),
+            backdrop_opacity: colors.backdrop_opacity.min(100),
         }
     }
 
@@ -155,6 +168,8 @@ impl Palette {
             selected_background: system(COLOR_HIGHLIGHT),
             selected_text: system(COLOR_HIGHLIGHTTEXT),
             key: system(COLOR_HIGHLIGHT),
+            // 標準の色だけの組は透かさない。
+            backdrop_opacity: 100,
         }
     }
 }

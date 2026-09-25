@@ -119,12 +119,20 @@ okuri = ""
 # 従います。
 theme = "auto"
 
+# Windows 11 では、窓の地を少し透かします (すりガラス)。その上に重ねる地の
+# 色の濃さを、0 から 100 で書きます。小さいほど透け、100 で透けなくなります。
+# Windows の「透明効果」を切っているときと、ハイコントラストのときは透かし
+# ません。
+backdrop_opacity = 65
+
 # 色は "#RRGGBB" で書くほか、次の名前が使えます。
 #   "system"  Windows の標準の色 (地・文字・枠・選んでいる行ごとに決まっている)
 #   "accent"  Windows のアクセントカラー
+# 明るい組。Windows の標準の地の色は真っ白なので、地は Windows 11 の
+# メニューに近い色で書いてあります。暗い組と揃えて、文字も色で書いてあります。
 [colors.light]
-background = "system"
-text = "system"
+background = "#F9F9F9"
+text = "#000000"
 border = "system"
 # 選んでいる行 (帯) の地と文字。"system" なら、地は地と文字の色を少し
 # 混ぜた色、文字は本文と同じ色になります。

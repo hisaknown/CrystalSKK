@@ -203,6 +203,8 @@ pub struct ModeIndicator {
 pub struct Colors {
     /// 明るい組と暗い組の、どちらを使うか。
     pub theme: ThemeChoice,
+    /// 窓の地を透かすときに重ねる地の色の濃さ (百分率)。100 なら透けない。
+    pub backdrop_opacity: u8,
     pub light: ColorSet,
     pub dark: ColorSet,
 }
@@ -787,8 +789,16 @@ fn colors(table: &Table) -> Result<Colors, Error> {
             ));
         }
     };
+    let backdrop_opacity = value(table, "colors", "backdrop_opacity")?
+        .as_integer()
+        .and_then(|n| u8::try_from(n).ok())
+        .filter(|n| *n <= 100)
+        .ok_or_else(|| {
+            Error::new("colors.backdrop_opacity は 0 から 100 の整数で書いてください")
+        })?;
     Ok(Colors {
         theme,
+        backdrop_opacity,
         light: color_set(table, "light")?,
         dark: color_set(table, "dark")?,
     })
@@ -1207,10 +1217,12 @@ mod tests {
     }
 
     #[test]
-    fn the_template_keeps_the_look_that_was_there() {
+    fn the_template_grounds_are_close_to_windows_11_menus() {
+        // 標準の地の色 (`COLOR_WINDOW`) は真っ白で、ダークモードにも従わない。
         let colors = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().colors;
         assert_eq!(colors.theme, ThemeChoice::Auto);
-        assert_eq!(colors.light.background, Color::System);
+        assert_eq!(colors.light.background, Color::Rgb(0xF9_F9_F9));
+        assert_eq!(colors.light.text, Color::Rgb(0x00_00_00));
         assert_eq!(colors.dark.background, Color::Rgb(0x2B_2B_2B));
         assert_eq!(colors.dark.text, Color::Rgb(0xFF_FF_FF));
     }
@@ -1219,7 +1231,7 @@ mod tests {
     fn colours_are_read_in_three_ways() {
         let user = TEMPLATE
             .replacen("border = \"system\"", "border = \"accent\"", 1)
-            .replacen("text = \"system\"", "text = \"#1a2B3c\"", 1);
+            .replacen("text = \"#000000\"", "text = \"#1a2B3c\"", 1);
         let light = parse(&user, ROMAJI_TEMPLATE).unwrap().colors.light;
         assert_eq!(light.border, Color::Accent);
         assert_eq!(light.text, Color::Rgb(0x1A_2B_3C), "大文字小文字は問わない");

@@ -31,7 +31,7 @@
 use std::cell::{Cell, RefCell};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ROUNDED_RECT,
 };
@@ -41,9 +41,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_HWNDPARENT, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST,
     IsWindowVisible, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SendMessageW, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE,
+    WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -315,11 +315,14 @@ impl CandidateWindow {
         if rounded {
             popup::set_border(hwnd, palette.border);
         }
+        // 地を透かすのは、角を丸められる Windows 11 のときだけ。
+        let backdrop = rounded && popup::set_backdrop(hwnd, popup::is_dark(palette.background));
         let stored = Box::into_raw(Box::new(Painted {
             content: content.clone(),
             palette,
             dpi,
             rounded,
+            backdrop,
         }));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
@@ -350,6 +353,11 @@ impl CandidateWindow {
             );
             // 焦点は奪わない。打っている最中にカーソルが消えてはならない。
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // 透かした地は、窓が前面でないと単色に落ちる。焦点は奪えないので、
+            // 前面にいるものとして扱わせる (`WM_NCACTIVATE`)。
+            if backdrop {
+                let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(1)), Some(LPARAM(0)));
+            }
         }
     }
 
@@ -539,6 +547,11 @@ unsafe extern "system" fn window_proc(
             });
             LRESULT(0)
         }
+        // 透かした地を保つため、いつも前面にいるものとして扱わせる。
+        WM_NCACTIVATE => {
+            // SAFETY: 前面かどうかだけを差し替えて、既定の処理に委ねる。
+            unsafe { DefWindowProcW(hwnd, message, WPARAM(1), lparam) }
+        }
         WM_DESTROY => {
             draw::forget(hwnd);
             // SAFETY: 預けたのは自分の箱。二度落とさないよう 0 に戻す。
@@ -562,6 +575,7 @@ fn paint(hwnd: HWND, painted: &Painted) {
         palette,
         dpi,
         rounded,
+        backdrop,
     } = painted;
     let (palette, dpi) = (*palette, *dpi);
     let font = draw::Font::message();
@@ -610,8 +624,18 @@ fn paint(hwnd: HWND, painted: &Painted) {
             }
         };
 
+        // 地。透かしているなら地の色を薄く重ねて、DWM の地を少しだけ見せる。
+        // **透かしたままでは、後ろが明るいと暗い窓の文字が読めない。**
+        let ground = if *backdrop {
+            D2D1_COLOR_F {
+                a: f32::from(palette.backdrop_opacity) / 100.0,
+                ..draw::color(palette.background)
+            }
+        } else {
+            draw::color(palette.background)
+        };
         // SAFETY: 描いている最中の描く先を塗りつぶすだけ。
-        unsafe { target.Clear(Some(&draw::color(palette.background))) };
+        unsafe { target.Clear(Some(&ground)) };
 
         // 枠。地と同じ色では、背景に溶けて境目が分からない。角を丸めて
         // いるなら DWM が丸みに沿って描く (`crate::popup`)。
@@ -739,6 +763,8 @@ struct Painted {
     dpi: u32,
     /// 角を DWM が丸めているか。
     rounded: bool,
+    /// 地を DWM に透かさせているか。
+    backdrop: bool,
 }
 
 /// 窓の大きさ (画素)。

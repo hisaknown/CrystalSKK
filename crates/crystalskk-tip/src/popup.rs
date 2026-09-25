@@ -5,9 +5,12 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::Graphics::Dwm::{
-    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
+    DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DwmExtendFrameIntoClientArea,
+    DwmSetWindowAttribute,
 };
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
     SPI_GETDROPSHADOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
@@ -53,6 +56,60 @@ pub fn set_border(hwnd: HWND, rgb: u32) {
     }
 }
 
+/// 窓の地を透かすか (Acrylic)。透かせたら `true`。
+///
+/// 地の透け方と色合いは Windows が決める。**Windows 11 のメニューや吹き出しと
+/// 同じ `DWMSBT_TRANSIENTWINDOW` にし**、明暗は `dark` で教える。透かすには、
+/// 窓の中身を透明にしたうえで、DWM の縁を中身いっぱいに広げる。
+///
+/// 次のときは透かさず、これまでどおり地の色で塗る。
+///
+/// - 「透明効果」を切っているとき。利用者が透けるのを嫌っている。
+/// - ハイコントラストのとき。配色を上書きしない。
+/// - Windows がこの頼みを知らないとき (Windows 10、Windows 11 の 22H2 より前)。
+pub fn set_backdrop(hwnd: HWND, dark: bool) -> bool {
+    let wanted = crate::theme::transparency() && !crate::theme::high_contrast();
+    let kind = if wanted {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    };
+    let dark = BOOL::from(dark);
+    // SAFETY: 渡す値はこの関数の変数で、大きさも渡している。
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&raw const dark).cast(),
+            u32::try_from(size_of::<BOOL>()).unwrap_or(4),
+        );
+        let set = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            (&raw const kind).cast(),
+            u32::try_from(size_of::<DWM_SYSTEMBACKDROP_TYPE>()).unwrap_or(4),
+        )
+        .is_ok();
+        let on = wanted && set;
+        // -1 は「中身いっぱい」。0 で元に戻る。
+        let inset = if on { -1 } else { 0 };
+        let margins = MARGINS {
+            cxLeftWidth: inset,
+            cxRightWidth: inset,
+            cyTopHeight: inset,
+            cyBottomHeight: inset,
+        };
+        let extended = DwmExtendFrameIntoClientArea(hwnd, &margins).is_ok();
+        on && extended
+    }
+}
+
+/// 地の色が暗いか。透かしたときの色合いを、塗るはずだった地に揃える。
+pub fn is_dark(rgb: u32) -> bool {
+    let (r, g, b) = ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    r * 299 + g * 587 + b * 114 < 128 * 1000
+}
+
 /// Windows が窓の下に影を出すか。「ウィンドウの下に影を表示する」を
 /// 切っていれば、`CS_DROPSHADOW` を付けても影は出ない。
 fn shadowed() -> bool {
@@ -68,4 +125,16 @@ fn shadowed() -> bool {
     }
     .is_ok();
     ok && on.as_bool()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn darkness_follows_the_ground() {
+        assert!(is_dark(0x2B_2B_2B));
+        assert!(!is_dark(0xFF_FF_FF));
+        assert!(!is_dark(0xF3_F3_F3));
+    }
 }

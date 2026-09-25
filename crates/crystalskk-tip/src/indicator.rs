@@ -488,6 +488,7 @@ mod tests {
             selected_background: 0x00_78_D4,
             selected_text: 0xFF_FF_FF,
             key: 0x00_78_D4,
+            backdrop_opacity: 100,
         };
         let side = 20;
         let drawn = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE, true);
