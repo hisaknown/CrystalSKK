@@ -53,3 +53,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0034](0034-backspace-while-selecting-commits.md) | ▼ での Backspace は確定してから一文字消す | Accepted | ADR-0018, ADR-0033 |
 | [0035](0035-show-the-keys-as-keycaps.md) | 小窓は押すキーを枠で囲んで見せ、Windows 11 の見た目に揃える | Accepted | ADR-0015, ADR-0019, ADR-0020, ADR-0024, ADR-0025, ADR-0026 |
 | [0036](0036-publish-the-ranker-model-as-a-release-asset.md) | 候補を並べる言語モデルは GitHub Release に置き、導入のときに取得する | Accepted | ADR-0030, ADR-0031 |
+| [0037](0037-the-msi-stages-files-and-setup-does-the-rest.md) | MSI はファイルを置き場に置くだけにし、入れ替えと登録は crystalskk-setup が行う | Accepted | ADR-0007, ADR-0016, ADR-0031, ADR-0036 |
