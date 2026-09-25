@@ -54,6 +54,8 @@ impl Session {
             ("skk", &["SKK"][..]),
             ("ことば", &["言葉"][..]),
             ("ぱそこん", &["パソコン", "パソ魂"][..]),
+            ("さい>", &["再", "最"][..]),
+            (">てき", &["的"][..]),
         ]);
         Self {
             engine: common::engine(Box::new(dict)),
@@ -728,4 +730,54 @@ fn paste_while_converting_inside_registration_is_swallowed() {
     assert!(s.engine.paste("尊").handled);
     assert_eq!(s.preedit(), "▽かんじ");
     assert_eq!(s.engine.registration().unwrap().buffer, "");
+}
+
+/// 接頭辞。`>` は見出し語を閉じ、その場で変換する。ddskk
+/// (`skk-process-prefix-or-suffix`) と同じく、space を待たない。
+#[test]
+fn greater_than_converts_a_prefix_at_once() {
+    let mut s = Session::new();
+    s.type_keys("Sai>");
+    assert_eq!(s.preedit(), "▼再");
+    s.type_keys(" ");
+    assert_eq!(s.preedit(), "▼最");
+    s.type_keys("\n");
+    assert_eq!(s.committed, "最");
+    assert_eq!(
+        s.events,
+        [Event::Learn {
+            query: Query::okuri_nashi("さい>"),
+            word: "最".into()
+        }]
+    );
+}
+
+/// 打ちかけの `n` は `ん` にしてから閉じる。
+#[test]
+fn greater_than_absorbs_a_pending_n() {
+    let mut s = Session::new();
+    s.type_keys("Hon>");
+    // 辞書に無いので登録に入る。見出しに `ん` が入っていればよい。
+    assert_eq!(s.engine.preedit().registering.as_deref(), Some("ほん>"));
+}
+
+/// 接尾辞。候補選択中の `>` は、いまの候補を確定して `▽>` を始める。
+#[test]
+fn greater_than_after_a_candidate_starts_a_suffix() {
+    let mut s = Session::new();
+    s.type_keys("Kanji >");
+    assert_eq!(s.committed, "漢字");
+    assert_eq!(s.preedit(), "▽>");
+    s.type_keys("teki ");
+    assert_eq!(s.preedit(), "▼的");
+    s.type_keys("\n");
+    assert_eq!(s.committed, "漢字的");
+}
+
+/// 空の `▽` での `>` は、接尾辞の見出しを始めるだけ。引くものがまだ無い。
+#[test]
+fn greater_than_in_an_empty_midashi_waits_for_the_rest() {
+    let mut s = Session::new();
+    s.type_keys("K\u{8}>");
+    assert_eq!(s.preedit(), "▽>");
 }

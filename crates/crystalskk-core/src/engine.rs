@@ -1229,6 +1229,20 @@ impl Engine {
                 self.convert_and_commit(comp, out);
             }
             Key::Space => self.convert(comp),
+            // 接頭辞。`>` を付けて見出し語を閉じ、**その場で変換する**。
+            // `Sai>` で `▼再` になる。ddskk (`skk-process-prefix-or-suffix`)
+            // もこうする。空の `▽` では引くものがまだ無いので、接尾辞の
+            // 見出しを始めるだけにする。
+            Key::Char('>') if !comp.abbrev && comp.okuri.is_none() => {
+                self.absorb_pending(&mut comp);
+                let empty = comp.midashi.is_empty();
+                comp.midashi.push('>');
+                if empty {
+                    self.state = State::Composing(comp);
+                } else {
+                    self.convert(comp);
+                }
+            }
             Key::Backspace => {
                 let erased = self.romaji.backspace();
                 // 送り仮名の途中なら、一文字と一緒に区切りも消す。`▽おく*r`
@@ -1559,6 +1573,15 @@ impl Engine {
             }
             Key::Char(c) if sel.listing() && sel.layout.labels().contains(&c) => {
                 self.choose_from_page(sel, c, out);
+            }
+            // 接尾辞。いまの候補を確定し、`▽>` から次の見出し語を始める。
+            // `Kanji` SPC `>teki` SPC で「漢字的」。ddskk もこうする。
+            Key::Char('>') => {
+                self.commit_selection(sel, out);
+                self.state = State::Composing(Composing {
+                    midashi: ">".into(),
+                    ..Composing::default()
+                });
             }
             Key::Char(_) | Key::Ctrl('q') => {
                 // 暗黙の確定。確定させた上で、このキーを直接入力として解釈し直す。
