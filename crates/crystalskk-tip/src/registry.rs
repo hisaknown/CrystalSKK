@@ -6,13 +6,18 @@
 //!
 //! 解除は利用者ごとの領域も見る。ADR-0006 の時期に書かれたものが
 //! 残っている可能性があるため。
+//!
+//! 64 ビットの Windows では、`HKEY_LOCAL_MACHINE\Software\Classes` が
+//! 64 ビット用と 32 ビット用に分かれている。32 ビットのアプリは 32 ビット用
+//! を見るので、32 ビットの DLL はそちらに登録する (ADR-0037)。どちらに
+//! 書くかは [`View`] で選ぶ。
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, HMODULE};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WRITE,
+    REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::{Error, GUID, HSTRING, PCWSTR, Result};
 
@@ -42,20 +47,44 @@ pub fn module_path(module: HMODULE) -> Result<String> {
     Ok(String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
+/// 機械全体の登録のうち、どちらの側に書くか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// 動いているプロセスと同じ側。64 ビットのプロセスなら 64 ビット用。
+    Own,
+    /// 32 ビット用。64 ビットのプロセスから 32 ビットの DLL を登録するときに使う。
+    Wow32,
+}
+
+impl View {
+    fn flags(self) -> REG_SAM_FLAGS {
+        match self {
+            Self::Own => REG_SAM_FLAGS(0),
+            Self::Wow32 => KEY_WOW64_32KEY,
+        }
+    }
+}
+
 /// COM のクラスとして、指定した場所の DLL を登録する。
 ///
 /// 場所を引数で受け取るのは、セットアップツールが**自分ではない DLL** を
 /// 登録できるようにするため。DLL が自分を登録するときは
 /// [`module_path()`] で自分の場所を調べて渡す。
 pub fn register_class(dll_path: &str) -> Result<()> {
+    register_class_in(View::Own, dll_path)
+}
+
+/// [`register_class`] を、`view` の側に対して行う。
+pub fn register_class_in(view: View, dll_path: &str) -> Result<()> {
     let key = class_key();
-    write_string(HKEY_LOCAL_MACHINE, &key, None, CLASS_DESCRIPTION)?;
+    write_string(HKEY_LOCAL_MACHINE, view, &key, None, CLASS_DESCRIPTION)?;
 
     let server = format!(r"{key}\InprocServer32");
-    write_string(HKEY_LOCAL_MACHINE, &server, None, dll_path)?;
+    write_string(HKEY_LOCAL_MACHINE, view, &server, None, dll_path)?;
     // TSF の TIP は常にアパートメントスレッドで動く。
     write_string(
         HKEY_LOCAL_MACHINE,
+        view,
         &server,
         Some("ThreadingModel"),
         "Apartment",
@@ -80,6 +109,31 @@ pub fn unregister_class() -> Result<()> {
     machine.or(per_user)
 }
 
+/// 32 ビット用の側のクラス登録を消す。登録されていなくても成功とみなす。
+pub fn unregister_wow32_class() -> Result<()> {
+    let parent = HSTRING::from(r"Software\Classes\CLSID");
+    let mut handle = HKEY::default();
+    // SAFETY: 出力先のハンドルは有効な場所を指す。開けたら必ず閉じる。
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            &parent,
+            None,
+            KEY_READ | KEY_WRITE | KEY_WOW64_32KEY,
+            &mut handle,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Ok(());
+    }
+    let result = delete_tree(handle, &HSTRING::from(guid_to_string(&CLSID_CRYSTALSKK)));
+    // SAFETY: 直前に開いたハンドルを閉じる。
+    unsafe {
+        let _ = RegCloseKey(handle);
+    }
+    result
+}
+
 /// 利用者ごとのクラス登録だけを消す。
 ///
 /// COM は `HKEY_CURRENT_USER` を `HKEY_LOCAL_MACHINE` より先に見る。
@@ -92,12 +146,17 @@ pub fn unregister_per_user_class() -> Result<()> {
 
 /// 利用者ごとに登録されている DLL の場所。
 pub fn per_user_dll_path() -> Option<String> {
-    read_dll_path(HKEY_CURRENT_USER)
+    read_dll_path(HKEY_CURRENT_USER, View::Own)
 }
 
 /// 機械全体に登録されている DLL の場所。
 pub fn machine_dll_path() -> Option<String> {
-    read_dll_path(HKEY_LOCAL_MACHINE)
+    read_dll_path(HKEY_LOCAL_MACHINE, View::Own)
+}
+
+/// 機械全体の 32 ビット用の側に登録されている DLL の場所。
+pub fn wow32_dll_path() -> Option<String> {
+    read_dll_path(HKEY_LOCAL_MACHINE, View::Wow32)
 }
 
 fn delete_tree(root: HKEY, key: &HSTRING) -> Result<()> {
@@ -112,7 +171,7 @@ fn delete_tree(root: HKEY, key: &HSTRING) -> Result<()> {
 }
 
 /// キーを作り、文字列の値を書く。`name` が `None` なら既定の値。
-fn write_string(root: HKEY, key: &str, name: Option<&str>, value: &str) -> Result<()> {
+fn write_string(root: HKEY, view: View, key: &str, name: Option<&str>, value: &str) -> Result<()> {
     let key = HSTRING::from(key);
     let mut handle = HKEY::default();
 
@@ -124,7 +183,7 @@ fn write_string(root: HKEY, key: &str, name: Option<&str>, value: &str) -> Resul
             None,
             PCWSTR::null(),
             REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
+            KEY_WRITE | view.flags(),
             None,
             &mut handle,
             None,
@@ -161,15 +220,16 @@ fn write_string(root: HKEY, key: &str, name: Option<&str>, value: &str) -> Resul
 ///
 /// 機械全体の登録を先に見て、次に利用者ごとの登録を見る。
 pub fn registered_dll_path() -> Option<String> {
-    read_dll_path(HKEY_LOCAL_MACHINE).or_else(|| read_dll_path(HKEY_CURRENT_USER))
+    read_dll_path(HKEY_LOCAL_MACHINE, View::Own)
+        .or_else(|| read_dll_path(HKEY_CURRENT_USER, View::Own))
 }
 
-fn read_dll_path(root: HKEY) -> Option<String> {
+fn read_dll_path(root: HKEY, view: View) -> Option<String> {
     let key = HSTRING::from(format!(r"{}\InprocServer32", class_key()));
     let mut handle = HKEY::default();
 
     // SAFETY: 出力先のハンドルは有効な場所を指す。
-    let status = unsafe { RegOpenKeyExW(root, &key, None, KEY_READ, &mut handle) };
+    let status = unsafe { RegOpenKeyExW(root, &key, None, KEY_READ | view.flags(), &mut handle) };
     if status != ERROR_SUCCESS {
         return None;
     }

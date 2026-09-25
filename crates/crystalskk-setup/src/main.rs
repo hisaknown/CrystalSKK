@@ -173,6 +173,7 @@ fn do_install(source: Option<&Path>, ranker_from: Option<&Path>, report: &Report
                 report.say("古い利用者ごとの登録を消しました。\n");
                 report.say("そちらが優先されるため、残っていると古い DLL が使われます。\n");
             }
+            install_wow32(report);
             install_server(&installed.dll, ranker_from, report);
 
             report.say("\n");
@@ -188,6 +189,41 @@ fn do_install(source: Option<&Path>, ranker_from: Option<&Path>, report: &Report
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string(), Some(report)),
+    }
+}
+
+/// 32 ビットのアプリ向けの DLL を置いて登録する (ADR-0037)。
+///
+/// 無くても導入は続ける。32 ビットのアプリで使えないだけである。
+fn install_wow32(report: &Report) {
+    report.say(
+        "
+",
+    );
+    let Some(source) = default_wow32_source() else {
+        report.say(
+            "32 ビットの DLL が見つかりません。32 ビットのアプリでは使えません。
+",
+        );
+        report.say(
+            "cargo build -p crystalskk-tip --release --target i686-pc-windows-msvc              を実行してください。
+",
+        );
+        return;
+    };
+    match install::install_wow32(&source) {
+        Ok(dll) => {
+            report.say(&format!(
+                "32 ビット: {} → {}
+",
+                source.display(),
+                dll.display()
+            ));
+        }
+        Err(e) => report.say(&format!(
+            "32 ビットの DLL を置けません: {e}
+"
+        )),
     }
 }
 
@@ -248,6 +284,10 @@ fn confirm_effective_registration() {
 
     println!();
     println!("実際に使われる DLL: {}", effective.display());
+    match &status.wow32 {
+        Some(dll) => println!("32 ビットのアプリ向け: {}", dll.display()),
+        None => println!("32 ビットのアプリ向けの登録はありません。"),
+    }
 
     if status.per_user.is_some() {
         println!();
@@ -374,6 +414,18 @@ fn default_source() -> Option<PathBuf> {
         candidates.push(directory.join(install::DLL_NAME));
     }
     candidates.push(PathBuf::from("target/debug").join(install::DLL_NAME));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// 32 ビットの DLL。手元のビルドか、自分の隣の `x86` を探す。
+fn default_wow32_source() -> Option<PathBuf> {
+    let mut candidates =
+        vec![PathBuf::from("target/i686-pc-windows-msvc/release").join(install::DLL_NAME)];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(directory) = exe.parent()
+    {
+        candidates.push(install::wow32_dir(directory).join(install::DLL_NAME));
+    }
     candidates.into_iter().find(|path| path.is_file())
 }
 

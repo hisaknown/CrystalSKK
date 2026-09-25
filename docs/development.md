@@ -64,6 +64,16 @@ TIP (DLL) と辞書サーバをビルドしてから導入する。導入は `ta
 cargo build --workspace --release
 ```
 
+32 ビットのアプリでも使うには、32 ビットの TIP も作っておく。`install` は `target/i686-pc-windows-msvc/release` にあれば、それを `bin\x86` に置いて 32 ビット用のレジストリに登録する ([ADR-0037](adr/0037-the-msi-stages-files-and-setup-does-the-rest.md))。無ければ飛ばす。
+
+```bash
+rustup target add i686-pc-windows-msvc
+```
+
+```bash
+cargo build -p crystalskk-tip --release --target i686-pc-windows-msvc
+```
+
 ```bash
 cargo run -p crystalskk-setup --release -- install
 ```

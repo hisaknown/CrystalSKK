@@ -51,6 +51,8 @@ pub struct Status {
     pub machine: Option<PathBuf>,
     /// 利用者ごとに登録されている DLL。これがあると機械全体の登録より優先される。
     pub per_user: Option<PathBuf>,
+    /// 32 ビットのアプリ向けに登録されている DLL。
+    pub wow32: Option<PathBuf>,
 }
 
 impl Status {
@@ -69,6 +71,14 @@ pub fn install_dir() -> io::Result<PathBuf> {
     let base = std::env::var_os("ProgramFiles")
         .ok_or_else(|| io::Error::other("ProgramFiles が設定されていません"))?;
     Ok(PathBuf::from(base).join("CrystalSKK").join("bin"))
+}
+
+/// 32 ビットの DLL の置き場所。`bin` の下の `x86`。
+///
+/// 名前は 64 ビットのものと同じにする。退ける・片付ける仕組みを
+/// そのまま使える。
+pub fn wow32_dir(directory: &Path) -> PathBuf {
+    directory.join("x86")
 }
 
 /// 登録に使う DLL の名前。
@@ -124,38 +134,7 @@ pub fn install(source: &Path) -> io::Result<Installed> {
     let destination = directory.join(DLL_NAME);
     let replaced = destination.exists();
 
-    // 前に退けたものを片付ける。使用中なら消せないが、それでよい。
-    sweep_retired(&directory);
-
-    // 同じ場所を指しているなら写す必要はない。
-    let same = std::fs::canonicalize(source)
-        .ok()
-        .zip(std::fs::canonicalize(&destination).ok())
-        .is_some_and(|(a, b)| a == b);
-
-    let mut retired = false;
-    if !same {
-        // まず上書きを試す。誰も読み込んでいなければこれで済む。
-        if let Err(busy) = std::fs::copy(source, &destination) {
-            // 読み込まれていて上書きできない。改名なら通るので、退ける。
-            retire(&destination).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{} を入れ替えられません。上書き: {busy} / 退避: {e}",
-                        destination.display()
-                    ),
-                )
-            })?;
-            retired = true;
-            std::fs::copy(source, &destination).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("{} へ写せません: {e}", destination.display()),
-                )
-            })?;
-        }
-    }
+    let retired = place(source, &directory, &destination)?;
 
     // 利用者ごとの登録が残っていると、そちらが優先されて古い DLL が
     // 使われ続ける。入れ直すたびに必ず消す。
@@ -180,6 +159,59 @@ pub fn install(source: &Path) -> io::Result<Installed> {
         retired,
         cleared_per_user,
     })
+}
+
+/// 32 ビットの DLL を置き、32 ビット用の側に登録する。置いた場所を返す。
+///
+/// 入力方式の登録は 64 ビットの DLL と共通なので、ここでは COM のクラス
+/// だけを登録する。使用中なら退けるのは 64 ビットのものと同じ。
+pub fn install_wow32(source: &Path) -> io::Result<PathBuf> {
+    let directory = wow32_dir(&install_dir()?);
+    std::fs::create_dir_all(&directory)?;
+    let destination = directory.join(DLL_NAME);
+    place(source, &directory, &destination)?;
+    let path = destination.to_string_lossy().into_owned();
+    registry::register_class_in(registry::View::Wow32, &path)
+        .map_err(|e| to_io("32 ビットの COM のクラス登録", e))?;
+    Ok(destination)
+}
+
+/// `source` を `destination` へ写す。使用中で上書きできなければ、古いものを
+/// 退けてから写す。退けたら `true`。
+fn place(source: &Path, directory: &Path, destination: &Path) -> io::Result<bool> {
+    // 前に退けたものを片付ける。使用中なら消せないが、それでよい。
+    sweep_retired(directory);
+
+    // 同じ場所を指しているなら写す必要はない。
+    let same = std::fs::canonicalize(source)
+        .ok()
+        .zip(std::fs::canonicalize(destination).ok())
+        .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(false);
+    }
+
+    // まず上書きを試す。誰も読み込んでいなければこれで済む。
+    let Err(busy) = std::fs::copy(source, destination) else {
+        return Ok(false);
+    };
+    // 読み込まれていて上書きできない。改名なら通るので、退ける。
+    retire(destination).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "{} を入れ替えられません。上書き: {busy} / 退避: {e}",
+                destination.display()
+            ),
+        )
+    })?;
+    std::fs::copy(source, destination).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("{} へ写せません: {e}", destination.display()),
+        )
+    })?;
+    Ok(true)
 }
 
 /// 設定画面へ渡す絵を書き出す。書けなければ諦める。
@@ -268,6 +300,7 @@ const RETIRED_SUFFIX: &str = "old-";
 pub fn uninstall(purge: bool) -> io::Result<()> {
     let profile = profile::unregister_profile();
     let class = registry::unregister_class();
+    let wow32 = registry::unregister_wow32_class();
 
     if purge && let Ok(directory) = install_dir() {
         let dll = directory.join(DLL_NAME);
@@ -284,6 +317,12 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
             })?;
         }
         sweep_retired(&directory);
+        // 32 ビットの DLL は 32 ビットのアプリにしか読み込まれない。消せな
+        // ければ残す。64 ビットのものが消えていれば、入力方式としては消えている。
+        let wow32_dir = wow32_dir(&directory);
+        let _ = std::fs::remove_file(wow32_dir.join(DLL_NAME));
+        sweep_retired(&wow32_dir);
+        let _ = std::fs::remove_dir(&wow32_dir);
         let _ = std::fs::remove_file(directory.join(ICON_NAME));
         // 空になったときだけ片付ける。他のものが入っていれば触らない。
         let _ = std::fs::remove_dir(&directory);
@@ -295,7 +334,10 @@ pub fn uninstall(purge: bool) -> io::Result<()> {
         }
     }
 
-    profile.and(class).map_err(|e| to_io("登録の解除", e))
+    profile
+        .and(class)
+        .and(wow32)
+        .map_err(|e| to_io("登録の解除", e))
 }
 
 /// 導入されているか調べる。
@@ -303,6 +345,7 @@ pub fn status() -> Status {
     Status {
         machine: registry::machine_dll_path().map(PathBuf::from),
         per_user: registry::per_user_dll_path().map(PathBuf::from),
+        wow32: registry::wow32_dll_path().map(PathBuf::from),
     }
 }
 
