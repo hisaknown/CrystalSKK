@@ -87,6 +87,17 @@ fn serve() -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    // 次のログオンからも起きるようにする。使った利用者にだけ効く (ADR-0037)。
+    // 書けなくても、TIP が起こすので動きはする。
+    if let Ok(exe) = std::env::current_exe()
+        && let Err(e) = crystalskk_server::autostart::register(&exe)
+    {
+        eprintln!(
+            "crystalskk-server: 自動起動を登録できません: {}",
+            e.message()
+        );
+    }
+
     let mut service = match load() {
         Ok(service) => service,
         Err(e) => {

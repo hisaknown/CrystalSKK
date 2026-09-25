@@ -17,6 +17,7 @@
 //! でも立ち上がり、TIP は繋がらなければ短く待ってもう一度試す。それでも
 //! 駄目なら、黙って違う結果を出さずに**繋がらないと言う**。
 
+pub mod autostart;
 pub mod client;
 pub mod library;
 pub mod names;

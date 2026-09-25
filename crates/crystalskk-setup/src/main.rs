@@ -219,12 +219,6 @@ fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
         }
     }
 
-    // ログオンのたびに起きるようにする。隔離されたアプリからは起こせない
-    // ので、**居ない場面を作らない**ことが効く。
-    if let Err(e) = server::register_autostart(directory) {
-        report.say(&format!("自動起動を登録できません: {e}\n"));
-    }
-
     // 言語モデル一式は、辞書サーバが止まっているうちに入れ替える。
     // 動いているサーバは DLL とモデルを握っている。
     ranker::install(

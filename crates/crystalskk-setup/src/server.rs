@@ -75,24 +75,10 @@ pub fn start(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// ログオンのたびに起きるよう登録する。
-///
-/// 隔離されたアプリからはプロセスを起こせない。**最初に開いたのがストア
-/// アプリだと、誰も起こせないまま変換できない**ことになる。ログオンで
-/// 立てておけば、その場面が起きにくくなる。
-pub fn register_autostart(directory: &Path) -> io::Result<()> {
-    let exe = directory.join(SERVER_NAME);
-    crystalskk_tip::registry::write_run_entry(RUN_NAME, &format!("\"{}\"", exe.display()))
-        .map_err(|e| io::Error::other(format!("自動起動を登録できません: {}", e.message())))
-}
-
 /// 自動起動の登録を消す。
 pub fn unregister_autostart() {
-    let _ = crystalskk_tip::registry::delete_run_entry(RUN_NAME);
+    let _ = crystalskk_server::autostart::unregister();
 }
-
-/// 自動起動に書く名前。
-const RUN_NAME: &str = "CrystalSKK";
 
 /// ビルド成果物の中からサーバを探す。
 ///
