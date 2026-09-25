@@ -10,6 +10,10 @@
 //!   取得する (ADR-0036)。作り直しても同じバイト列になるので、ハッシュを
 //!   ここに書いておき、違うものは置かない。
 //!
+//! どちらも辞書サーバが読み込むので、置くときにはサーバの exe と同じく、
+//! 上書きできなければ古いものを退けてから置き、退けた残骸は次の導入で
+//! 片付ける。
+//!
 //! **揃わなくても導入は止めない。** 並べ替えが効かないだけで、変換は
 //! 辞書の順でできる。
 
@@ -136,6 +140,7 @@ fn install_runtime(directory: &Path) -> Result<bool, String> {
 fn extract(zip: &[u8], directory: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+    crate::install::sweep_retired_where(directory, wanted);
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let Some(name) = entry
@@ -152,7 +157,7 @@ fn extract(zip: &[u8], directory: &Path) -> Result<(), String> {
             .read_to_end(&mut bytes)
             .map_err(|e| format!("{name}: {e}"))?;
         let path = directory.join(&name);
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::install::put(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
 }
@@ -184,9 +189,12 @@ fn install_model(
         return Ok(0);
     }
     std::fs::create_dir_all(ranker_dir).map_err(|e| format!("{}: {e}", ranker_dir.display()))?;
+    crate::install::sweep_retired_where(ranker_dir, |base| {
+        MODEL_FILES.iter().any(|(name, _)| *name == base)
+    });
     for (name, bytes) in &fetched {
         let destination = ranker_dir.join(name);
-        std::fs::write(&destination, bytes)
+        crate::install::put(&destination, bytes)
             .map_err(|e| format!("{}: {e}", destination.display()))?;
     }
     Ok(fetched.len())

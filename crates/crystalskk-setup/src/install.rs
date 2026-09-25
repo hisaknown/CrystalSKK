@@ -212,26 +212,50 @@ pub(crate) fn retire(destination: &Path) -> io::Result<()> {
 /// TIP の DLL も辞書サーバも、入れ替えるときに使用中なら退ける
 /// ([`retire`])。どちらの残骸もここで片付ける。
 fn sweep_retired(directory: &Path) {
+    sweep_retired_where(directory, is_ours);
+}
+
+/// TIP の DLL か辞書サーバの名前か。
+fn is_ours(name: &str) -> bool {
+    name == DLL_NAME || name == crate::server::SERVER_NAME
+}
+
+/// 退けた残骸のうち、元の名前が `ours` に当たるものを消す。使用中なら
+/// 消せないので、黙って見逃す。
+pub(crate) fn sweep_retired_where(directory: &Path, ours: impl Fn(&str) -> bool) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
-        if is_retired(&entry.file_name().to_string_lossy()) {
+        if retired_base(&entry.file_name().to_string_lossy()).is_some_and(&ours) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// 中身を置く。上書きできなければ ([`retire`] の理由で) 古いものを退けて
+/// から置く。
+pub(crate) fn put(destination: &Path, bytes: &[u8]) -> io::Result<()> {
+    if std::fs::write(destination, bytes).is_ok() {
+        return Ok(());
+    }
+    retire(destination)?;
+    std::fs::write(destination, bytes)
 }
 
 /// [`retire`] が退けたものの名前か。`<元の名前>.old-<時刻>` の形をしている。
 ///
 /// 元の名前まで照らす。同じ場所にある、たまたま `old-` を含むだけの
 /// ファイルは消さない。
+#[cfg(test)]
 fn is_retired(name: &str) -> bool {
-    [DLL_NAME, crate::server::SERVER_NAME].iter().any(|base| {
-        name.strip_prefix(base)
-            .and_then(|rest| rest.strip_prefix('.'))
-            .is_some_and(|rest| rest.starts_with(RETIRED_SUFFIX))
-    })
+    retired_base(name).is_some_and(is_ours)
+}
+
+/// 退けたものの名前なら、元の名前を返す。
+fn retired_base(name: &str) -> Option<&str> {
+    let (base, stamp) = name.rsplit_once(&format!(".{RETIRED_SUFFIX}"))?;
+    (!stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit())).then_some(base)
 }
 
 /// 退けたものの名前に挟む印。
@@ -385,6 +409,30 @@ mod tests {
 
         assert_eq!(retired_count(&dir), 0);
         assert!(server.exists(), "使っているものは消さない");
+    }
+
+    #[test]
+    fn sweeping_takes_only_the_names_it_is_told() {
+        // 言語モデルの置き場では、モデル一式の名前だけを片付ける。
+        let dir = scratch("sweep-where");
+        std::fs::write(dir.join("model.gguf.old-1790128010"), "古い").expect("置ける");
+        std::fs::write(dir.join("notes.txt.old-1790128010"), "他人").expect("置ける");
+
+        sweep_retired_where(&dir, |base| base == "model.gguf");
+
+        assert!(!dir.join("model.gguf.old-1790128010").exists());
+        assert!(dir.join("notes.txt.old-1790128010").exists());
+    }
+
+    #[test]
+    fn putting_replaces_what_is_there() {
+        let dir = scratch("put");
+        let path = dir.join("model.gguf");
+        std::fs::write(&path, "古い").expect("置ける");
+
+        put(&path, "新しい".as_bytes()).expect("置ける");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("読める"), "新しい");
     }
 
     #[test]
