@@ -1,0 +1,123 @@
+<!--
+  CrystalSKK の MSI (ADR-0037)。
+
+  MSI はファイルを置き場 (`%ProgramFiles%\CrystalSKK\package`) に置くだけで、
+  ここのファイルはどのプロセスにも読み込ませない。使う場所への配置と登録は
+  crystalskk-setup が行う。Windows Installer が使用中のファイルに出会わない
+  ようにするためである。
+
+  ビルドのときに渡すもの:
+    Version  ワークスペースの版 (major.minor.patch)
+    BinDir   crystalskk_tip.dll・crystalskk-server.exe・crystalskk-setup.exe のあるフォルダ
+    X86Dir   32 ビットの crystalskk_tip.dll のあるフォルダ
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="CrystalSKK"
+    Manufacturer="CrystalSKK contributors"
+    Version="$(Version)"
+    UpgradeCode="8C4E5D99-483E-46BF-B3DB-3BB5E35378AE"
+    Scope="perMachine"
+    Language="1041"
+    Codepage="932">
+
+    <SummaryInformation Description="SKK 方式の日本語入力" />
+
+    <!-- 出した版の中身は替えない。直したいことがあれば版を上げる (ADR-0037)。 -->
+    <MajorUpgrade DowngradeErrorMessage="より新しい版の CrystalSKK が入っています。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/hisaknown/CrystalSKK" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="APPDIR" Name="CrystalSKK">
+        <Directory Id="PACKAGEDIR" Name="package">
+          <Directory Id="X86DIR" Name="x86" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="Package" Directory="PACKAGEDIR">
+      <Component>
+        <File Id="TipDll" Source="$(BinDir)\crystalskk_tip.dll" />
+      </Component>
+      <Component>
+        <File Id="ServerExe" Source="$(BinDir)\crystalskk-server.exe" />
+      </Component>
+      <Component>
+        <File Id="SetupExe" Source="$(BinDir)\crystalskk-setup.exe" />
+      </Component>
+      <Component Directory="X86DIR">
+        <File Id="TipDll32" Source="$(X86Dir)\crystalskk_tip.dll" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Package" />
+    </Feature>
+
+    <!--
+      管理者権限の手順は LocalSystem で動く。置く・登録する・言語モデルと
+      llama.cpp を取得する。導入・修復・更新のどれでも動かす。
+    -->
+    <CustomAction
+      Id="ElevatedInstall"
+      FileRef="SetupExe"
+      ExeCommand="install --elevated-steps --no-elevate"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+
+    <!--
+      利用者の手順は、導入する利用者として動く。辞書サーバは利用者ごとに
+      立つので、LocalSystem からは止めることも起こすこともできない。
+      LocalSystem で導入されたとき (管理ツールからの配布など) は動かさない。
+      その利用者のサーバは、TIP が最初に辞書を引くときに起きる。
+    -->
+    <CustomAction
+      Id="UserInstall"
+      FileRef="SetupExe"
+      ExeCommand="install --user-steps"
+      Execute="immediate"
+      Return="ignore" />
+
+    <!--
+      削除では、先に利用者の辞書サーバに終わってもらい、それから登録を消して
+      使う場所を片付ける。更新で古い版が消されるときは動かさない。新しい版が
+      同じ場所へ入れ替えるので、消してしまうと無駄になる。
+    -->
+    <CustomAction
+      Id="UserUninstall"
+      FileRef="SetupExe"
+      ExeCommand="uninstall --user-steps"
+      Execute="immediate"
+      Return="ignore" />
+    <CustomAction
+      Id="ElevatedUninstall"
+      FileRef="SetupExe"
+      ExeCommand="uninstall --elevated-steps --no-elevate --purge"
+      Execute="deferred"
+      Impersonate="no"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom
+        Action="UserUninstall"
+        After="InstallInitialize"
+        Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND UserSID&lt;&gt;&quot;S-1-5-18&quot;" />
+      <Custom
+        Action="ElevatedUninstall"
+        Before="RemoveFiles"
+        Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="ElevatedInstall"
+        Before="InstallFinalize"
+        Condition="NOT REMOVE=&quot;ALL&quot;" />
+      <Custom
+        Action="UserInstall"
+        After="InstallFinalize"
+        Condition="NOT REMOVE=&quot;ALL&quot; AND UserSID&lt;&gt;&quot;S-1-5-18&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
