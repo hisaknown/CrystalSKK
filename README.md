@@ -1,41 +1,76 @@
-# CrystalSKK
+<div align="center">
+  <img src="assets/icons/face.svg" alt="" width="128">
+  <h1>CrystalSKK</h1>
+</div>
 
-Windows 向けの SKK 日本語入力メソッド。TSF の TIP として実装する。
+> An SKK-style Japanese input method for Windows (TSF), written in Rust.
+> The documentation is in Japanese, as the software targets Japanese speakers.
+> Installs a TSF text input processor (DLL) and a per-user conversion server.
+> Source-built releases are produced by GitHub Actions.
+> At install time it downloads llama.cpp from its official releases; at run time it downloads the SKK dictionaries listed in the settings.
 
-**日々の入力に要る機能がひととおり揃った。** かな入力と変換、候補ウィンドウ (ストアアプリにも出る)、辞書登録、学習、下線による区切りの表示、動的補完、切り替えたときにカーソルのそばへ出る入力モードの表示が動く。辞書は設定に並べたものを自動で取得し、設定はすべて一つのファイルに書かれる。
+Windows 向けの SKK 風 IME です。
 
-まだ無いもの: 配布用のインストーラ (いまはソースからビルドして導入する)、設定 GUI、設定スクリプト、キーバインドの設定。
+| ![変換候補の表示](docs/images/candidates-window.png) | ![モードの表示](docs/images/mode-indicator.png) |
+| --- | --- |
+| ↑モダンな見た目 | ↑現在のモードをカーソル近くに表示 |
+| ![動的補完](docs/images/dynamic-completion.png) | ![辞書登録画面](docs/images/registration-window.png) |
+| ↑動的補完にも対応 | ↑直感的な辞書登録画面 |
 
-## これは何か
+## 特徴
+- モダンな見た目
+    - ライトテーマ/ダークテーマに対応しています。
+    - Windows 11 の Acrylic を使った半透明のウィンドウ表示をします。
+- ちょっぴり賢い変換候補の提示
+    - 小さい言語モデルを同梱し、文脈に応じて変換候補を並べかえて提示します。
+    - 処理の重さが気になる場合は無効化することもできます。
 
-[SKK](https://ja.wikipedia.org/wiki/SKK) 方式の日本語入力を Windows で行うためのソフトウェア。
-先行実装として [SKK日本語入力FEP](http://coexe.web.fc2.com/skkfep.html)、[CorvusSKK](https://github.com/nathancorvussolis/corvusskk)、skkime がある。
-CrystalSKK がそれらと違うところは次の3点。
+## インストール
 
-- **設定を二層に分ける** — 大半の設定は宣言的な TOML で、それを超える調整はスクリプトで書く。どちらか一方に寄せない。
-- **賢さを後から足せる構造** — 候補の生成と並び替えを最初から分離しておき、補完・予測変換・文脈を踏まえた提示を後付けではなく設計に織り込む。
-- **Rust のみ** — C/C++ ツールチェインを要求しない。`cargo build` だけでビルドできる状態を維持する。
-
-詳細は [PRD](docs/PRD.md) を参照。設計判断の経緯は [ADR](docs/adr/) に置く。
+(整備中)
 
 ## 設定
 
-設定ファイルは `%LOCALAPPDATA%\CrystalSKK\config.toml`。導入のときに雛形から作られ、全項目が説明付きで書かれている。
+設定はいずれも `%LOCALAPPDATA%\CrystalSKK` 以下のファイルによって行います。
 
-**このファイルに書かれている値が、効いている設定のすべてである** ([ADR-0020](docs/adr/0020-the-settings-file-is-the-whole-truth.md))。CrystalSKK は既定値を持たない。新しい版で項目が増えたときは、導入のときにそのファイルへ書き足され、何を足したかが表示される。書き換えた値は、入力先を切り替えたときに効く。
+設定ファイルのあるフォルダは、タスクトレイの CrystalSKK アイコンの隣にある、現在の状態を示すアイコン (` A` とか `あ` とかのほう) を右クリックして「設定フォルダを開く」から開くことができます。  
+![設定フォルダを開く](docs/images/open-settings-folder.png)
 
-ローマ字テーブルは隣の `romaji.txt` (Google 日本語入力と同じタブ区切り 3 列)。**利用者の持ち物**として扱い、無いときに作るだけで、版を上げても書き換えない ([ADR-0021](docs/adr/0021-the-romaji-table-belongs-to-the-user.md))。
+### 振舞いの設定
 
-候補の窓とカーソルのそばの窓の色は `[colors]` で決める。明るい組と暗い組を書いておき、アプリの明るさに合わせて選ぶ ([ADR-0026](docs/adr/0026-colours-of-the-popups-are-settings.md))。
+`%LOCALAPPDATA%\CrystalSKK\config.toml` から設定します。  
+すべての設定項目がこのファイルに説明コメントつきで記載されています。
 
-トレイの入力モード表示を右クリックすると、設定フォルダを開く・設定を読み直す・設定ファイルやローマ字テーブルを雛形で上書きする (元の中身は `.bak` に退避) ことができる。
+### ローマ字テーブルの設定
+
+`%LOCALAPPDATA%\CrystalSKK\romaji.txt` から設定します。
+
+## 細かい機能の紹介
+- 賢い変換候補の提示についての補足
+    - ひとつめの候補は常に最近使った候補になります (並べ替えの対象外)。
+    - 並べ替え結果が変換に現れる例:
+        - 「激しい運動で」→「どうき」を変換したとき、「動悸」が出やすくなります。
+        - 「犯行の」→「どうき」を変換したとき、「動機」が出やすくなります。
+        - 「新卒入社の」→「どうき」を変換したとき、「同期」が出やすくなります。
+- 動的補完
+    - SKKFEP ~~をパクった~~ にインスパイアされた機能です。
+    - 入力中の文字列に応じて、変換候補を動的に補完します。デフォルトでは `.` 打鍵で候補を確定します。
+- 自動カタカナ語辞書
+    - SKKFEP ~~をパクった~~ にインスパイアされた機能です。
+    - 指定の辞書から自動的にカタカナ語辞書を生成し、変換候補に追加します。
 
 ## 開発
 
 ソースからのビルドと導入、ログの見方などは [docs/development.md](docs/development.md) を参照。
 
+## See Also
+
+- [CorvusSKK](https://github.com/nathancorvussolis/corvusskk)
+- [SKK日本語入力FEP](http://coexe.web.fc2.com/skkfep.html)
+
 ## ライセンス
 
 MIT License ([LICENSE](LICENSE))
 
-辞書は同梱しない。SKK 辞書はそれぞれのライセンス (SKK-JISYO.L は GPL 系) に従う。
+SKK 辞書は同梱していません。設定されたものを動作時に自動的にダウンロードします。  
+SKK 辞書はそれぞれのライセンス (SKK-JISYO.L は GPL 系) に従います。
