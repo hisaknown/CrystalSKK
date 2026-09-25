@@ -6,7 +6,8 @@
 //!   固定した zip を取得し、ハッシュを確かめてから要るものだけ取り出す。
 //!   こちらから再配布はしない。
 //! - **モデルと語彙** (`model.gguf` ほか)。`tools/ranker-model/build.py` で
-//!   作ったものを写す。作り直しても同じバイト列になるので、ハッシュを
+//!   作ったものを、手元にあれば写し、無ければこのリポジトリの Release から
+//!   取得する (ADR-0036)。作り直しても同じバイト列になるので、ハッシュを
 //!   ここに書いておき、違うものは置かない。
 //!
 //! **揃わなくても導入は止めない。** 並べ替えが効かないだけで、変換は
@@ -55,6 +56,10 @@ const MODEL_FILES: [(&str, &str); 4] = [
     ),
 ];
 
+/// モデル一式を置いた Release のタグ。一式を作り直したら、新しいタグを
+/// 切って `MODEL_FILES` のハッシュと一緒に替える。
+const MODEL_TAG: &str = "ranker-model-1";
+
 /// 版を書いておくファイル。同じ版なら取り直さない。
 const VERSION_FILE: &str = "VERSION";
 
@@ -67,19 +72,41 @@ pub fn install(ranker_dir: &Path, from: Option<&Path>, report: &Report) {
         Err(e) => report.say(&format!("llama.cpp を置けません: {e}\n")),
     }
     match from.map(Path::to_path_buf).or_else(default_model_source) {
-        Some(from) => match install_model(&from, ranker_dir) {
+        Some(from) => {
+            let read = |name: &str| {
+                let path = from.join(name);
+                std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+            };
+            match install_model(read, ranker_dir) {
+                Ok(0) => {}
+                Ok(_) => report.say(&format!(
+                    "言語モデルを置きました (元: {})。
+",
+                    from.display()
+                )),
+                Err(e) => report.say(&format!(
+                    "言語モデルを置けません: {e}
+"
+                )),
+            }
+        }
+        None => match install_model(download_model_file, ranker_dir) {
             Ok(0) => {}
             Ok(_) => report.say(&format!(
-                "言語モデルを置きました (元: {})。\n",
-                from.display()
+                "言語モデルを取得して置きました ({MODEL_TAG})。
+"
             )),
-            Err(e) => report.say(&format!("言語モデルを置けません: {e}\n")),
+            Err(e) => {
+                report.say(&format!(
+                    "言語モデルを取得できません: {e}
+"
+                ));
+                report.say(
+                    "候補の並べ替えは効きません。
+",
+                );
+            }
         },
-        None if model_is_in_place(ranker_dir) => {}
-        None => {
-            report.say("言語モデルが見つかりません。候補の並べ替えは効きません。\n");
-            report.say("tools/ranker-model で uv run build.py を実行してください。\n");
-        }
     }
 }
 
@@ -130,40 +157,52 @@ fn extract(zip: &[u8], directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// モデル一式を写す。ハッシュが合わないものは写さない。写した数を返す。
-fn install_model(from: &Path, ranker_dir: &Path) -> Result<usize, String> {
-    // 先に全部を確かめる。途中で違うものが見つかって、半端な一式が
+/// モデル一式を置く。`fetch` はファイルの名前から中身を得る。すでに
+/// 同じものが置かれているファイルは取りに行かない。ハッシュが合わない
+/// ものが一つでもあれば何も置かない。置いた数を返す。
+fn install_model(
+    fetch: impl Fn(&str) -> Result<Vec<u8>, String>,
+    ranker_dir: &Path,
+) -> Result<usize, String> {
+    // 先に全部を揃えて確かめる。途中で違うものが見つかって、半端な一式が
     // 残るのを避ける。
+    let mut fetched = Vec::new();
     for (name, expected) in MODEL_FILES {
-        let path = from.join(name);
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if file_matches(&ranker_dir.join(name), expected) {
+            continue;
+        }
+        let bytes = fetch(name)?;
         let digest = sha256(&bytes);
         if digest != expected {
             return Err(format!(
-                "{} は、この版の CrystalSKK が知っているものではありません ({digest})",
-                path.display()
+                "{name} は、この版の CrystalSKK が知っているものではありません ({digest})"
             ));
         }
+        fetched.push((name, bytes));
+    }
+    if fetched.is_empty() {
+        return Ok(0);
     }
     std::fs::create_dir_all(ranker_dir).map_err(|e| format!("{}: {e}", ranker_dir.display()))?;
-    let mut copied = 0;
-    for (name, expected) in MODEL_FILES {
+    for (name, bytes) in &fetched {
         let destination = ranker_dir.join(name);
-        if file_matches(&destination, expected) {
-            continue;
-        }
-        std::fs::copy(from.join(name), &destination)
+        std::fs::write(&destination, bytes)
             .map_err(|e| format!("{}: {e}", destination.display()))?;
-        copied += 1;
     }
-    Ok(copied)
+    Ok(fetched.len())
 }
 
-/// モデル一式が、この版のものとして揃っているか。
-fn model_is_in_place(ranker_dir: &Path) -> bool {
-    MODEL_FILES
-        .iter()
-        .all(|(name, expected)| file_matches(&ranker_dir.join(name), expected))
+/// Release からモデル一式のファイルを一つ取得する。
+fn download_model_file(name: &str) -> Result<Vec<u8>, String> {
+    let url = model_url(name);
+    match crystalskk_fetch::get(&url, None).map_err(|e| format!("{url}: {e}"))? {
+        crystalskk_fetch::Fetched::Downloaded(downloaded) => Ok(downloaded.body),
+        crystalskk_fetch::Fetched::NotModified => Err(format!("{url}: 中身が返りません")),
+    }
+}
+
+fn model_url(name: &str) -> String {
+    format!("https://github.com/hisaknown/CrystalSKK/releases/download/{MODEL_TAG}/{name}")
 }
 
 fn file_matches(path: &Path, expected: &str) -> bool {
@@ -227,8 +266,17 @@ mod tests {
             std::fs::write(from.join(name), b"something else").unwrap();
         }
         let to = scratch("to");
-        let error = install_model(&from, &to).unwrap_err();
+        let read = |name: &str| std::fs::read(from.join(name)).map_err(|e| e.to_string());
+        let error = install_model(read, &to).unwrap_err();
         assert!(error.contains("知っているもの"), "{error}");
         assert!(!to.join("model.gguf").exists(), "一つも写さない");
+    }
+
+    #[test]
+    fn the_model_is_taken_from_this_repository() {
+        assert_eq!(
+            model_url("model.gguf"),
+            "https://github.com/hisaknown/CrystalSKK/releases/download/ranker-model-1/model.gguf"
+        );
     }
 }

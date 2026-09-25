@@ -68,7 +68,7 @@ cargo build --workspace --release
 cargo run -p crystalskk-setup --release -- install
 ```
 
-変換の候補を前後の文章から並べる言語モデル ([ADR-0030](adr/0030-rank-candidates-with-a-small-language-model-in-the-server.md)) も、導入のときに一緒に置かれる。モデル一式は `tools/ranker-model` で作る ([uv](https://docs.astral.sh/uv/) が要る)。作り直しても同じものになり、導入はハッシュを確かめてから `target/ranker-model/out` のものを写す。llama.cpp の DLL は導入のときに公式のリリースから取得する ([ADR-0031](adr/0031-ship-the-ranker-model-with-the-program.md))。どちらも揃わなければ、並べ替えが効かないだけで変換はできる。使うかどうかは設定ファイルの `[ranker]` で決める。
+変換の候補を前後の文章から並べる言語モデル ([ADR-0030](adr/0030-rank-candidates-with-a-small-language-model-in-the-server.md)) も、導入のときに一緒に置かれる。モデル一式は、手元に無ければこのリポジトリの Release から取得する ([ADR-0036](adr/0036-publish-the-ranker-model-as-a-release-asset.md))。一式を作り直すときは `tools/ranker-model` で作る ([uv](https://docs.astral.sh/uv/) が要る)。作り直しても同じものになり、`target/ranker-model/out` にあれば導入はそちらを写す。どちらの場合もハッシュを確かめ、知らないものは置かない。llama.cpp の DLL は導入のときに公式のリリースから取得する ([ADR-0031](adr/0031-ship-the-ranker-model-with-the-program.md))。どちらも揃わなければ、並べ替えが効かないだけで変換はできる。使うかどうかは設定ファイルの `[ranker]` で決める。
 
 ```bash
 cd tools/ranker-model && uv run build.py
