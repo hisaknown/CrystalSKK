@@ -27,6 +27,7 @@ use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DET
 use windows::core::{BOOL, GUID, HRESULT, Interface};
 
 pub mod candwin;
+pub mod clipboard;
 pub mod com;
 pub mod compartment;
 pub mod dialog;

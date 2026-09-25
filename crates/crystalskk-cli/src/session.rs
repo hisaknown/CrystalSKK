@@ -199,7 +199,7 @@ impl Session {
             Key::Backspace => {
                 self.document.pop();
             }
-            Key::Escape | Key::Up | Key::Down | Key::Ctrl(_) => {}
+            Key::Escape | Key::Up | Key::Down | Key::Ctrl(_) | Key::Paste => {}
         }
     }
 

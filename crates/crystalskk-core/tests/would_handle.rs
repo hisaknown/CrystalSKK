@@ -55,6 +55,7 @@ fn every_key() -> Vec<Key> {
         Key::Ctrl('g'),
         Key::Ctrl('q'),
         Key::Ctrl('a'),
+        Key::Paste,
     ];
     for c in ['a', 'k', 'n', 'q', 'x', 'l', 'L', 'K', 'A', '/', '1', '-'] {
         keys.push(Key::Char(c));

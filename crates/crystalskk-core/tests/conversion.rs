@@ -698,3 +698,34 @@ fn enter_without_pending_input_is_left_to_the_application() {
     assert!(s.press(Key::Enter));
     assert_eq!(s.committed, "ほん");
 }
+
+#[test]
+fn paste_goes_into_the_registration_as_is() {
+    let mut s = Session::new();
+    s.type_keys("Mikoto ");
+    s.type_keys("n");
+    // かな変換は通さず、制御文字は落とす。打ちかけの n は ん として立つ。
+    let response = s.engine.paste("尊\r\nmikoto\t");
+    assert!(response.handled);
+    assert_eq!(s.engine.registration().unwrap().buffer, "ん尊mikoto");
+    assert_eq!(s.committed, "");
+}
+
+#[test]
+fn paste_is_left_to_the_app_outside_registration() {
+    let mut s = Session::new();
+    assert!(!s.engine.would_handle(Key::Paste));
+    assert!(!s.engine.paste("尊").handled);
+    assert_eq!(s.committed, "");
+}
+
+#[test]
+fn paste_while_converting_inside_registration_is_swallowed() {
+    let mut s = Session::new();
+    s.type_keys("Mikoto ");
+    s.type_keys("Kanji");
+    // 文書へ貼られないよう食べるが、見出し語には入れない。
+    assert!(s.engine.paste("尊").handled);
+    assert_eq!(s.preedit(), "▽かんじ");
+    assert_eq!(s.engine.registration().unwrap().buffer, "");
+}

@@ -33,7 +33,7 @@ use windows::core::{
 };
 
 use crystalskk_core::engine::{Event, Marker};
-use crystalskk_core::{Engine, InputMode};
+use crystalskk_core::{Engine, InputMode, Key};
 
 use crate::candwin::{CandidateWindow, Completion, Content, Page, Registration};
 use crate::dict::{Learning, SharedSource};
@@ -957,7 +957,14 @@ impl TextService_Impl {
         };
 
         self.this.read_surroundings(context, client_id);
-        let response = self.this.engine.borrow_mut().press(key);
+        let response = if key == Key::Paste {
+            // 貼る中身は打鍵に含まれない。ここで読んでエンジンへ渡す。
+            // エンジンの借用より先に読む。
+            let text = crate::clipboard::text().unwrap_or_default();
+            self.this.engine.borrow_mut().paste(&text)
+        } else {
+            self.this.engine.borrow_mut().press(key)
+        };
         // 組み立てる前に段階を見る。記録しないと決まっているなら、
         // 打鍵のたびに文字列を作る手間も要らない。
         if log::tracing() {

@@ -550,6 +550,11 @@ impl Engine {
         if !self.is_configured() {
             return false;
         }
+        // 貼り付けは登録中だけ受け取る。**登録の外で食べると、アプリの
+        // 貼り付けが効かなくなる。**
+        if key == Key::Paste {
+            return !self.registrations.is_empty();
+        }
         match &self.state {
             State::Direct => self.would_handle_direct(key),
             State::Composing(comp) => self.would_handle_composing(comp, key),
@@ -576,7 +581,7 @@ impl Engine {
             Key::Char(_) | Key::Space | Key::Ctrl('g') | Key::Ctrl('q') => true,
             // 登録を取りやめるときだけ受け取る。
             Key::Escape => registering,
-            Key::Ctrl(_) | Key::Tab | Key::Up | Key::Down => false,
+            Key::Ctrl(_) | Key::Paste | Key::Tab | Key::Up | Key::Down => false,
             // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
             Key::Enter => !self.registrations.is_empty() || self.romaji.pending_kana().is_some(),
             // 消すものがあるときだけ受け取る。登録中はいつでも受け取る。
@@ -585,8 +590,40 @@ impl Engine {
         }
     }
 
+    /// 辞書登録の欄へ文字列を貼る。
+    ///
+    /// 貼った文字列はかな変換を通さず、そのまま登録語に足す。改行や
+    /// タブなどの制御文字は語に入れようがないので落とす。
+    ///
+    /// 登録中でなければ食べない。見出し語や候補を選んでいる途中なら、
+    /// 食べたうえで何もしない。**アプリへ渡すと文書に貼られてしまう。**
+    pub fn paste(&mut self, text: &str) -> Response {
+        let handled = self.is_configured() && !self.registrations.is_empty();
+        if handled && matches!(self.state, State::Direct) {
+            let mut out = Out::default();
+            // 打ちかけのローマ字は、立つものだけ立てて捨てる。
+            if let Some(kana) = self.romaji.pending_kana() {
+                self.emit(&kana, &mut out);
+            }
+            self.romaji.clear();
+            let text: String = text.chars().filter(|c| !c.is_control()).collect();
+            self.emit(&text, &mut out);
+        }
+        Response {
+            handled,
+            commit: String::new(),
+            preedit: self.preedit(),
+            candidates: self.candidates(),
+            events: Vec::new(),
+        }
+    }
+
     /// 一打鍵を処理する。
     pub fn press(&mut self, key: Key) -> Response {
+        // 貼る中身が無い貼り付け。受け取るかどうかだけは揃える。
+        if key == Key::Paste {
+            return self.paste("");
+        }
         if !self.is_configured() {
             return Response {
                 handled: false,
@@ -1040,7 +1077,7 @@ impl Engine {
                     None => out.handled = false,
                 }
             }
-            Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) => out.handled = false,
+            Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) | Key::Paste => out.handled = false,
         }
     }
 
@@ -1167,6 +1204,11 @@ impl Engine {
                 let text = kana::to_halfwidth_katakana(&self.midashi_with_okuri(&comp));
                 self.emit(&text, out);
                 self.state = State::Direct;
+            }
+            // 貼り付けは [`Self::paste`] が引き受ける。ここへは来ない。
+            Key::Paste => {
+                out.handled = false;
+                self.state = State::Composing(comp);
             }
             // Tab は補完候補を順に選ぶ。土台はこちらで、動的補完はこの上に
             // 乗っている。
@@ -1523,7 +1565,7 @@ impl Engine {
                 self.commit_selection(sel, out);
                 self.on_direct(key, out);
             }
-            Key::Tab | Key::Ctrl(_) => {
+            Key::Tab | Key::Ctrl(_) | Key::Paste => {
                 out.handled = false;
                 self.state = State::Selecting(sel);
             }

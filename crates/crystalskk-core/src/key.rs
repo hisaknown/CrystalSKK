@@ -23,6 +23,9 @@ pub enum Key {
     Down,
     /// Ctrl 修飾付きの英字。英字は小文字で表す。
     Ctrl(char),
+    /// 貼り付け (Ctrl+V・Shift+Insert)。貼る中身は打鍵に含まれないので、
+    /// 受け取った側がクリップボードを読んで [`crate::Engine::paste`] へ渡す。
+    Paste,
 }
 
 impl Key {

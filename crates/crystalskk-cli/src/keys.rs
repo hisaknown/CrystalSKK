@@ -64,6 +64,7 @@ pub fn display(key: Key) -> String {
         Key::Up => "↑".to_owned(),
         Key::Down => "↓".to_owned(),
         Key::Ctrl(c) => format!("^{}", c.to_ascii_uppercase()),
+        Key::Paste => "paste".to_owned(),
     }
 }
 

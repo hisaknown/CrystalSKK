@@ -19,8 +19,8 @@ use crystalskk_core::Key;
 use windows::Win32::Foundation::WPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY, VK_BACK,
-    VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU,
-    VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+    VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 use crate::log;
@@ -54,9 +54,20 @@ pub fn translate(wparam: WPARAM) -> Option<Key> {
 
     let state = keyboard_state()?;
 
+    let control = state[VK_CONTROL.0 as usize] & KEY_PRESSED != 0;
+    let shift = state[VK_SHIFT.0 as usize] & KEY_PRESSED != 0;
+
+    // Windows の貼り付けは二通りある。どちらも同じ「貼り付け」に揃える。
+    if virtual_key == VK_INSERT {
+        return (shift && !control).then_some(Key::Paste);
+    }
+
     // Ctrl 付きの英字は、文字に直すと制御文字になってしまうので先に拾う。
-    if state[VK_CONTROL.0 as usize] & KEY_PRESSED != 0 {
+    if control {
         let letter = ascii_letter(virtual_key)?;
+        if letter == 'v' {
+            return Some(Key::Paste);
+        }
         return Some(Key::Ctrl(letter));
     }
 
