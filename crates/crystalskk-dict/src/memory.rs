@@ -329,6 +329,9 @@ fn section_marker(line: &str) -> Option<bool> {
 ///
 /// 接頭辞の見出し (`さい>`) は出さない。**`>` を打てばその場で変換される**
 /// ので、補完で選ぶ場面が無い。出せば「さい」から続く本当の語を押しのける。
+///
+/// **ddskk とはわざと違えてある。** ddskk (`skk-comp.el`) は除かず、
+/// `▽さい` の Tab で `さい>` も出す。
 fn completes(key: &str) -> bool {
     !key.ends_with('>')
 }
