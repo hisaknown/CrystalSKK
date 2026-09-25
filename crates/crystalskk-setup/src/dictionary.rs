@@ -7,8 +7,13 @@
 //! 導入とは別の命令にしてある。辞書は利用者ごとの場所へ置くので管理者
 //! 権限が要らず、入れ替えも導入とは別の頻度で起きるため。
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use crystalskk_fetch::{InstallReport, Progress};
 
 use crystalskk_server::paths;
 use crystalskk_settings::Source;
@@ -75,7 +80,7 @@ pub fn fetch() -> ExitCode {
                 };
                 println!("取得元: {url}");
                 println!("置き場: {}", path.display());
-                match crystalskk_fetch::refresh(url, &path) {
+                match refresh_showing_progress(url, &path) {
                     Ok(Some(report)) => {
                         println!("見出し:     {} 件", report.entries);
                         println!("取得元符号: {}", report.source_encoding);
@@ -162,4 +167,47 @@ pub fn revoke_access() {
     if let Err(e) = access::revoke_app_containers(&directory, &files) {
         eprintln!("crystalskk-setup: {e}");
     }
+}
+
+/// 取り直しながら、受け取った量を一秒ごとに書き出す。
+///
+/// 大きな辞書を遅い回線で取ると、黙ったままでは止まったのか分からない。
+fn refresh_showing_progress(
+    url: &str,
+    path: &Path,
+) -> Result<Option<InstallReport>, crystalskk_fetch::Error> {
+    let progress = Progress::new();
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        let (done, finished) = mpsc::channel::<()>();
+        let shared = &progress;
+        let worker = scope.spawn(move || {
+            let result = crystalskk_fetch::refresh_with_progress(url, path, shared);
+            let _ = done.send(());
+            result
+        });
+        let mut shown = false;
+        while let Err(mpsc::RecvTimeoutError::Timeout) =
+            finished.recv_timeout(Duration::from_secs(1))
+        {
+            print!("\r取得中:     {}", describe(&progress, started.elapsed()));
+            let _ = std::io::stdout().flush();
+            shown = true;
+        }
+        if shown {
+            println!();
+        }
+        worker.join().expect("取得のスレッドは倒れない")
+    })
+}
+
+/// 進み具合を一行で。
+fn describe(progress: &Progress, elapsed: Duration) -> String {
+    let megabytes = |bytes: u64| format!("{:.1}", bytes as f64 / 1_000_000.0);
+    let received = megabytes(progress.received());
+    let size = match progress.total() {
+        Some(total) => format!("{received} / {} MB", megabytes(total)),
+        None => format!("{received} MB"),
+    };
+    format!("{size} ({} 秒)   ", elapsed.as_secs())
 }

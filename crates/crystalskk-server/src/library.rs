@@ -31,17 +31,19 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_dict::{MemoryDict, derive, encoding};
+use crystalskk_fetch::Progress;
 use crystalskk_settings::Source;
 
-/// URL から取ってきて、手元の場所に置く。変わっていれば真。
+/// URL から取ってきて、手元の場所に置く。変わっていれば真。受け取った量は
+/// `progress` に書く。
 ///
 /// 試験では差し替える。**試験がネットワークに出てはいけない。**
-pub type Fetch = fn(url: &str, path: &Path) -> Result<bool, String>;
+pub type Fetch = fn(url: &str, path: &Path, progress: &Progress) -> Result<bool, String>;
 
 /// 欠けた辞書を取り直すまでの間。
 #[cfg(not(test))]
@@ -50,8 +52,8 @@ const RETRY: Duration = Duration::from_secs(5 * 60);
 const RETRY: Duration = Duration::ZERO;
 
 /// 本物の取得。
-pub fn fetch_over_http(url: &str, path: &Path) -> Result<bool, String> {
-    crystalskk_fetch::refresh(url, path)
+pub fn fetch_over_http(url: &str, path: &Path, progress: &Progress) -> Result<bool, String> {
+    crystalskk_fetch::refresh_with_progress(url, path, progress)
         .map(|installed| installed.is_some())
         .map_err(|e| e.to_string())
 }
@@ -117,6 +119,10 @@ struct Job {
     generation: u64,
     places: Vec<Entry>,
     receiver: mpsc::Receiver<Outcome>,
+    /// 始めた時刻。待たせている間の知らせに使う。
+    started: Instant,
+    /// いま取っている辞書の進み具合。
+    progress: Arc<Progress>,
 }
 
 #[derive(Debug)]
@@ -235,7 +241,11 @@ impl Library {
             .iter()
             .any(|e| e.url.is_some() && !e.path.exists());
         Some(if fetching {
-            "辞書を取得しています。しばらくお待ちください".to_owned()
+            fetching_notice(
+                job.progress.received(),
+                job.progress.total(),
+                job.started.elapsed(),
+            )
         } else {
             "辞書を読んでいます".to_owned()
         })
@@ -322,8 +332,10 @@ impl Library {
         let (sender, receiver) = mpsc::channel();
         let fetch = self.fetch;
         let places = entries.clone();
+        let progress = Arc::new(Progress::new());
+        let shared = Arc::clone(&progress);
         std::thread::spawn(move || {
-            let mut outcome = load_all(entries, fetch, check_updates);
+            let mut outcome = load_all(entries, fetch, check_updates, &shared);
             outcome.generation = generation;
             // 在りかが解けなかった辞書も、欠けている。
             outcome.missing.splice(0..0, problems.iter().cloned());
@@ -335,6 +347,8 @@ impl Library {
             generation,
             places,
             receiver,
+            started: Instant::now(),
+            progress,
         });
     }
 
@@ -353,7 +367,12 @@ impl Library {
 }
 
 /// 裏のスレッドで、並べた辞書を順に用意して読む。
-fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outcome {
+fn load_all(
+    mut entries: Vec<Entry>,
+    fetch: Fetch,
+    check_updates: bool,
+    progress: &Progress,
+) -> Outcome {
     let mut shelves = Vec::new();
     let mut problems = Vec::new();
     let mut missing = Vec::new();
@@ -369,7 +388,8 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
             && (check_updates || !entry.path.exists())
         {
             fetched.push(entry.path.clone());
-            match fetch(url, &entry.path) {
+            progress.reset();
+            match fetch(url, &entry.path, progress) {
                 Ok(true) => eprintln!("crystalskk-server: 辞書を取得しました: {url}"),
                 Ok(false) => {}
                 // 手元に前のものがあれば、それで続ける。通信できないのは
@@ -419,6 +439,29 @@ fn load_all(mut entries: Vec<Entry>, fetch: Fetch, check_updates: bool) -> Outco
     }
 }
 
+/// 取得を待たせている間の知らせ。経過した時間と、受け取った量を添える。
+fn fetching_notice(received: u64, total: Option<u64>, elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let detail = match (received, total) {
+        (0, _) => format!("{seconds} 秒"),
+        (received, Some(total)) => {
+            format!(
+                "{} / {} MB、{seconds} 秒",
+                megabytes(received),
+                megabytes(total)
+            )
+        }
+        (received, None) => format!("{} MB、{seconds} 秒", megabytes(received)),
+    };
+    format!("辞書を取得しています ({detail})。しばらくお待ちください")
+}
+
+/// バイト数を MB で、小数一桁まで。
+fn megabytes(bytes: u64) -> String {
+    let tenths = (bytes * 10 + 500_000) / 1_000_000;
+    format!("{}.{}", tenths / 10, tenths % 10)
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -437,12 +480,12 @@ mod tests {
         directory
     }
 
-    fn refuse(_url: &str, _path: &Path) -> Result<bool, String> {
+    fn refuse(_url: &str, _path: &Path, _progress: &Progress) -> Result<bool, String> {
         Err("通信しない".to_owned())
     }
 
     /// 取得したことにして、小さな辞書を置く。
-    fn pretend(_url: &str, path: &Path) -> Result<bool, String> {
+    fn pretend(_url: &str, path: &Path, _progress: &Progress) -> Result<bool, String> {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "とりよせ /取寄/\n").unwrap();
         Ok(true)
@@ -656,9 +699,9 @@ mod tests {
     fn a_dictionary_and_its_katakana_words_are_fetched_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
-        fn counting(url: &str, path: &Path) -> Result<bool, String> {
+        fn counting(url: &str, path: &Path, _progress: &Progress) -> Result<bool, String> {
             CALLS.fetch_add(1, Ordering::SeqCst);
-            pretend(url, path)
+            pretend(url, path, _progress)
         }
 
         let directory = scratch("fetched-once");
@@ -675,9 +718,9 @@ mod tests {
         // 入力先を切り替えるたびに通信はしない。
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
-        fn counting(url: &str, path: &Path) -> Result<bool, String> {
+        fn counting(url: &str, path: &Path, _progress: &Progress) -> Result<bool, String> {
             CALLS.fetch_add(1, Ordering::SeqCst);
-            pretend(url, path)
+            pretend(url, path, _progress)
         }
 
         let directory = scratch("updates");
@@ -694,6 +737,52 @@ mod tests {
             1,
             "手元にあれば二度目は取らない"
         );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_notice_says_how_far_the_fetch_has_come() {
+        let second = Duration::from_secs(1);
+        assert_eq!(
+            fetching_notice(0, None, second * 3),
+            "辞書を取得しています (3 秒)。しばらくお待ちください"
+        );
+        assert_eq!(
+            fetching_notice(12_345_678, Some(45_000_000), second * 40),
+            "辞書を取得しています (12.3 / 45.0 MB、40 秒)。しばらくお待ちください"
+        );
+        assert_eq!(
+            fetching_notice(1_950_000, None, second * 7),
+            "辞書を取得しています (2.0 MB、7 秒)。しばらくお待ちください"
+        );
+    }
+
+    #[test]
+    fn waiting_reports_what_has_arrived() {
+        /// 半分受け取ったところで、しばらく止まる。
+        fn halfway(_url: &str, _path: &Path, progress: &Progress) -> Result<bool, String> {
+            progress.begin(Some(4_000_000));
+            progress.advance(2_000_000);
+            std::thread::sleep(Duration::from_millis(300));
+            Err("届かない".to_owned())
+        }
+        let directory = scratch("progress");
+        let mut library = Library::new(directory.join("cache"), halfway);
+        library.configure(
+            &[Source::Url("https://example.com/a".to_owned())],
+            &directory,
+        );
+        let mut notice = None;
+        for _ in 0..100 {
+            notice = library.waiting();
+            if notice.as_deref().is_some_and(|n| n.contains("MB")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let notice = notice.expect("まだ読み終えていない");
+        assert!(notice.contains("2.0 / 4.0 MB"), "{notice}");
+        library.settle();
         let _ = fs::remove_dir_all(&directory);
     }
 }

@@ -12,7 +12,7 @@ use windows::Win32::Networking::WinHttp::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::url::Url;
-use crate::{Downloaded, Error, Fetched};
+use crate::{Downloaded, Error, Fetched, Progress};
 
 /// 一度に読み出す大きさ。
 const READ_CHUNK: usize = 64 * 1024;
@@ -47,7 +47,7 @@ impl Drop for Handle {
     }
 }
 
-pub fn get(url: &str, etag: Option<&str>) -> Result<Fetched, Error> {
+pub fn get(url: &str, etag: Option<&str>, progress: &Progress) -> Result<Fetched, Error> {
     let url = Url::parse(url)?;
 
     // SAFETY: 以下の呼び出しはいずれも WinHTTP の定める手順どおりに並んでおり、
@@ -105,7 +105,10 @@ pub fn get(url: &str, etag: Option<&str>) -> Result<Fetched, Error> {
         }
 
         let etag = query_header(&request, WINHTTP_QUERY_ETAG);
-        let body = read_body(&request)?;
+        let total = query_header(&request, WINHTTP_QUERY_CONTENT_LENGTH)
+            .and_then(|length| length.trim().parse().ok());
+        progress.begin(total);
+        let body = read_body(&request, progress)?;
         Ok(Fetched::Downloaded(Downloaded { body, etag }))
     }
 }
@@ -168,7 +171,7 @@ unsafe fn query_header(request: &Handle, info_level: u32) -> Option<String> {
 }
 
 /// 本文を最後まで読む。
-unsafe fn read_body(request: &Handle) -> Result<Vec<u8>, Error> {
+unsafe fn read_body(request: &Handle, progress: &Progress) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     let mut chunk = vec![0u8; READ_CHUNK];
     loop {
@@ -185,5 +188,6 @@ unsafe fn read_body(request: &Handle) -> Result<Vec<u8>, Error> {
             return Ok(body);
         }
         body.extend_from_slice(&chunk[..read as usize]);
+        progress.advance(u64::from(read));
     }
 }

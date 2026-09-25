@@ -10,6 +10,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crystalskk_dict::{MemoryDict, encoding};
 
@@ -101,10 +102,63 @@ pub enum Fetched {
     Downloaded(Downloaded),
 }
 
+/// 取得の進み具合。取得する側が書き、別のスレッドから読める。
+#[derive(Debug, Default)]
+pub struct Progress {
+    received: AtomicU64,
+    /// `Content-Length`。分からなければ 0。
+    total: AtomicU64,
+}
+
+impl Progress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// ここまでに受け取ったバイト数。
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    /// 全体のバイト数。分からなければ `None`。
+    pub fn total(&self) -> Option<u64> {
+        match self.total.load(Ordering::Relaxed) {
+            0 => None,
+            n => Some(n),
+        }
+    }
+
+    /// 取り直す前に戻す。
+    pub fn reset(&self) {
+        self.received.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+    }
+
+    /// 受け取り始める。全体の大きさが分かれば添える。
+    pub fn begin(&self, total: Option<u64>) {
+        self.received.store(0, Ordering::Relaxed);
+        self.total.store(total.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// 受け取った分を足す。
+    pub fn advance(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
 /// URL から取得する。`etag` を渡すと、変化がなければ [`Fetched::NotModified`]。
-#[cfg(windows)]
 pub fn get(url: &str, etag: Option<&str>) -> Result<Fetched, Error> {
-    winhttp::get(url, etag)
+    get_with_progress(url, etag, &Progress::new())
+}
+
+/// [`get`] に同じ。受け取った量を `progress` に書きながら取る。
+#[cfg(windows)]
+pub fn get_with_progress(
+    url: &str,
+    etag: Option<&str>,
+    progress: &Progress,
+) -> Result<Fetched, Error> {
+    winhttp::get(url, etag, progress)
 }
 
 /// Windows 以外では取得を行えない。
@@ -112,7 +166,11 @@ pub fn get(url: &str, etag: Option<&str>) -> Result<Fetched, Error> {
 /// 辞書の設置は Windows 上でしか起きないが、変換と保存の部分は他の環境でも
 /// 試験できるようにしておきたいので、クレート自体はビルドできるようにする。
 #[cfg(not(windows))]
-pub fn get(_url: &str, _etag: Option<&str>) -> Result<Fetched, Error> {
+pub fn get_with_progress(
+    _url: &str,
+    _etag: Option<&str>,
+    _progress: &Progress,
+) -> Result<Fetched, Error> {
     Err(Error::Unsupported)
 }
 
@@ -215,13 +273,22 @@ fn sanitize(segment: &str) -> String {
 /// 前回の `ETag` は辞書の隣 (`<名前>.etag`) に覚えておく。手元に辞書が
 /// 無ければ `ETag` は使わない (消されたなら取り直す)。変化がなければ `None`。
 pub fn refresh(url: &str, path: &Path) -> Result<Option<InstallReport>, Error> {
+    refresh_with_progress(url, path, &Progress::new())
+}
+
+/// [`refresh`] に同じ。受け取った量を `progress` に書きながら取る。
+pub fn refresh_with_progress(
+    url: &str,
+    path: &Path,
+    progress: &Progress,
+) -> Result<Option<InstallReport>, Error> {
     let etag_path = sidecar(path, "etag");
     let etag = if path.exists() {
         fs::read_to_string(&etag_path).ok()
     } else {
         None
     };
-    let installed = install(url, path, etag.as_deref().map(str::trim))?;
+    let installed = install_with_progress(url, path, etag.as_deref().map(str::trim), progress)?;
     if let Some(report) = &installed {
         match &report.etag {
             Some(etag) => fs::write(&etag_path, etag)?,
@@ -243,7 +310,16 @@ fn sidecar(path: &Path, extension: &str) -> PathBuf {
 
 /// 辞書を取得して設置する。前回から変化がなければ `None`。
 pub fn install(url: &str, path: &Path, etag: Option<&str>) -> Result<Option<InstallReport>, Error> {
-    match get(url, etag)? {
+    install_with_progress(url, path, etag, &Progress::new())
+}
+
+fn install_with_progress(
+    url: &str,
+    path: &Path,
+    etag: Option<&str>,
+    progress: &Progress,
+) -> Result<Option<InstallReport>, Error> {
+    match get_with_progress(url, etag, progress)? {
         Fetched::NotModified => Ok(None),
         Fetched::Downloaded(downloaded) => {
             let mut report = install_bytes(&downloaded.body, path)?;

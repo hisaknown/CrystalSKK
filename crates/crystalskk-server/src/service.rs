@@ -437,7 +437,11 @@ mod tests {
         )
     }
 
-    fn refuse(_url: &str, _path: &std::path::Path) -> Result<bool, String> {
+    fn refuse(
+        _url: &str,
+        _path: &std::path::Path,
+        _progress: &crystalskk_fetch::Progress,
+    ) -> Result<bool, String> {
         Err("試験では通信しない".to_owned())
     }
 
@@ -764,7 +768,11 @@ mod tests {
     #[test]
     fn nothing_is_called_missing_while_the_dictionaries_are_on_their_way() {
         // 取得しているあいだに「無い」と答えると、辞書登録が始まってしまう。
-        fn slow(_url: &str, _path: &std::path::Path) -> Result<bool, String> {
+        fn slow(
+            _url: &str,
+            _path: &std::path::Path,
+            _progress: &crystalskk_fetch::Progress,
+        ) -> Result<bool, String> {
             std::thread::sleep(std::time::Duration::from_millis(300));
             Err("届かない".to_owned())
         }
