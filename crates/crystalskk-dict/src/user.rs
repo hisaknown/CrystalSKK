@@ -80,6 +80,13 @@ impl UserDict {
         self.dirty = true;
     }
 
+    /// 候補を一つ消す。消すものがなければ `false`。
+    pub fn purge(&mut self, query: &Query, word: &str) -> bool {
+        let purged = self.dict.purge(query, word);
+        self.dirty |= purged;
+        purged
+    }
+
     /// 見出しを削除する。消すものがなければ `false`。
     pub fn remove(&mut self, key: &str, okuri_ari: bool) -> bool {
         let removed = self.dict.remove(key, okuri_ari);

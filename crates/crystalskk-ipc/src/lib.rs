@@ -93,6 +93,8 @@ pub enum Request {
     Learn { query: Query, word: String },
     /// 新しい語を登録する。
     Register { query: Query, word: String },
+    /// 候補をユーザー辞書から消す。
+    Purge { query: Query, word: String },
     /// 設定を尋ねる。
     ///
     /// **設定ファイルを読むのもサーバである。** 足りない項目を書き足す
@@ -151,6 +153,9 @@ impl Request {
             Self::Register { query, word } => {
                 format!("register{FIELD}{}{FIELD}{word}", encode_query(query))
             }
+            Self::Purge { query, word } => {
+                format!("purge{FIELD}{}{FIELD}{word}", encode_query(query))
+            }
             Self::Settings => "settings".to_owned(),
             Self::Reset(Reset::Settings) => format!("reset{FIELD}settings"),
             Self::Reset(Reset::Romaji) => format!("reset{FIELD}romaji"),
@@ -190,6 +195,13 @@ impl Request {
             "register" => {
                 let query = decode_query(&mut fields)?;
                 Some(Self::Register {
+                    query,
+                    word: fields.next()?.to_owned(),
+                })
+            }
+            "purge" => {
+                let query = decode_query(&mut fields)?;
+                Some(Self::Purge {
                     query,
                     word: fields.next()?.to_owned(),
                 })
@@ -333,6 +345,10 @@ mod tests {
             word: "送".to_owned(),
         });
         roundtrip(&Request::Register {
+            query: okuri_nashi.clone(),
+            word: "漢字".to_owned(),
+        });
+        roundtrip(&Request::Purge {
             query: okuri_nashi,
             word: "漢字".to_owned(),
         });

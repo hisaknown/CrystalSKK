@@ -243,6 +243,9 @@ pub enum Event {
     Learn { query: Query, word: String },
     /// 新しい語を辞書に登録した。
     Register { query: Query, word: String },
+    /// 候補を辞書から消す (`X`)。消すのは個人辞書からだけで、配布辞書に
+    /// ある語はまた出てくる。ddskk (`skk-purge-from-jisyo`) と同じ。
+    Purge { query: Query, word: String },
 }
 
 /// 一打鍵に対する応答。
@@ -342,6 +345,8 @@ struct Selecting {
     /// **埋めた `１２月` を覚えても、次に `3がつ` と打ったときに役に立たない。**
     templates: Vec<String>,
     index: usize,
+    /// いまの候補を消してよいか尋ねている (`X` を押した)。
+    purging: bool,
     /// 候補選択を取りやめたときに戻る先。
     origin: Composing,
     /// 区切り方。変換を始めたときの設定で決まる。
@@ -813,6 +818,17 @@ impl Engine {
         completion.chosen = Some(index);
         comp.midashi = completion.entries[index].clone();
         true
+    }
+
+    /// 消してよいか尋ねている候補。送り仮名を付けた、見えているままの形。
+    /// 尋ねていなければ `None`。
+    pub fn purging(&self) -> Option<String> {
+        match &self.state {
+            State::Selecting(sel) if sel.purging => {
+                Some(sel.candidates[sel.index].to_text(sel.query.okuri.as_deref()))
+            }
+            _ => None,
+        }
     }
 
     /// 現在の未確定表示。
@@ -1493,6 +1509,7 @@ impl Engine {
                 candidates,
                 templates,
                 index: 0,
+                purging: false,
                 origin: comp,
                 layout,
             });
@@ -1539,6 +1556,10 @@ impl Engine {
     // --- 候補選択 ------------------------------------------------------
 
     fn on_selecting(&mut self, mut sel: Selecting, key: Key, out: &mut Out) {
+        if sel.purging {
+            self.on_confirming_purge(sel, key, out);
+            return;
+        }
         match key {
             Key::Space | Key::Down => {
                 // 一覧を出しているなら、送るのは一件ずつではなく一ページ
@@ -1595,6 +1616,12 @@ impl Engine {
             Key::Ctrl('g') | Key::Escape => {
                 self.back_to_composing(sel.origin);
             }
+            // 候補を辞書から消す。消す前に y/n で確かめる。一覧が出ている
+            // あいだは、どれを消すのかが決まらないので何もしない。
+            Key::Char('X') => {
+                sel.purging = !sel.listing();
+                self.state = State::Selecting(sel);
+            }
             Key::Char(c) if sel.listing() && sel.layout.labels().contains(&c) => {
                 self.choose_from_page(sel, c, out);
             }
@@ -1616,6 +1643,28 @@ impl Engine {
                 out.handled = false;
                 self.state = State::Selecting(sel);
             }
+        }
+    }
+
+    /// 候補を消してよいか尋ねているあいだの打鍵。
+    ///
+    /// `y` で消し、`n` `C-g` Esc でやめて候補に戻る。**ほかのキーは食べる。**
+    /// `X` は `x` の隣なので押し間違えやすい。そこから続けて打ったキーで
+    /// 確定や削除が起きては困る。
+    fn on_confirming_purge(&mut self, mut sel: Selecting, key: Key, out: &mut Out) {
+        match key {
+            Key::Char('y') => {
+                out.events.push(Event::Purge {
+                    query: sel.query,
+                    word: sel.templates[sel.index].clone(),
+                });
+                self.state = State::Direct;
+            }
+            Key::Char('n') | Key::Ctrl('g') | Key::Escape => {
+                sel.purging = false;
+                self.state = State::Selecting(sel);
+            }
+            _ => self.state = State::Selecting(sel),
         }
     }
 

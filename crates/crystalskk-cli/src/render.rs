@@ -113,6 +113,9 @@ pub fn document(session: &Session) -> String {
 /// 未確定の表示。辞書登録中ならその見出しも添える。
 pub fn preedit(session: &Session) -> String {
     let preedit = session.preedit();
+    if let Some(word) = session.purging() {
+        return format!("{preedit} [削除しますか？ {word} (y/n)]");
+    }
     match session.registering() {
         Some(key) => {
             let depth = session.registration_depth();

@@ -219,6 +219,11 @@ impl Learning {
         self.send(Request::Register { query, word });
     }
 
+    /// 候補をユーザー辞書から消させる。
+    pub fn purge(&self, query: Query, word: String) {
+        self.send(Request::Purge { query, word });
+    }
+
     /// 書き出させる。
     pub fn save(&self) {
         self.send(Request::Save);

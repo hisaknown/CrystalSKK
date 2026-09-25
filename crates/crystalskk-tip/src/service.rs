@@ -265,6 +265,9 @@ impl TextService {
                 Event::Register { query, word } => {
                     self.learning.register(query.clone(), word.clone());
                 }
+                Event::Purge { query, word } => {
+                    self.learning.purge(query.clone(), word.clone());
+                }
             }
         }
     }
@@ -678,6 +681,12 @@ impl TextService {
             && (!engine.is_configured() || !engine.preedit().is_empty())
         {
             return Some(Content::Notice(problem.clone()));
+        }
+
+        // 候補を消してよいか尋ねている。**尋ねていることが見えなければ、
+        // 打鍵が食べられているようにしか見えない。**
+        if let Some(word) = engine.purging() {
+            return Some(Content::Notice(format!("削除しますか？ {word} (y/n)")));
         }
 
         if let Some(registration) = engine.registration() {

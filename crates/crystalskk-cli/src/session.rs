@@ -175,6 +175,9 @@ impl Session {
                 Event::Learn { query, word } | Event::Register { query, word } => {
                     self.user.borrow_mut().learn(&query, &word);
                 }
+                Event::Purge { query, word } => {
+                    self.user.borrow_mut().purge(&query, &word);
+                }
             }
         }
 
@@ -242,6 +245,11 @@ impl Session {
                 _ => segment.text.clone(),
             })
             .collect()
+    }
+
+    /// 消してよいか尋ねている候補。
+    pub fn purging(&self) -> Option<String> {
+        self.engine.purging()
     }
 
     /// 辞書登録中なら、登録しようとしている見出し。

@@ -108,6 +108,12 @@ impl Service {
                 // 利用者の手間がそのまま失われる。**
                 (self.save(), Next::Listen)
             }
+            Request::Purge { query, word } => {
+                // 消したこともその場で書き出す。登録と同じく、利用者が
+                // 意図して行った操作である。
+                self.user.purge(&query, &word);
+                (self.save(), Next::Listen)
+            }
             Request::Settings => (self.settings(), Next::Listen),
             Request::Reset(what) => (self.reset(what), Next::Listen),
             Request::OpenFolder => (self.open_folder(), Next::Listen),
@@ -669,6 +675,36 @@ mod tests {
 
         let (response, _) = service.handle(Request::Search(query));
         assert_eq!(words(&response), vec!["新しい"]);
+    }
+
+    /// 消すのはユーザー辞書からだけ。配布辞書にある語はまた出てくる
+    /// (ddskk と同じ)。
+    #[test]
+    fn purging_removes_only_from_the_user_dictionary() {
+        let mut service = service();
+        let registered = Query::okuri_nashi("あたらしい");
+        service.handle(Request::Register {
+            query: registered.clone(),
+            word: "新しい".to_owned(),
+        });
+        service.handle(Request::Purge {
+            query: registered.clone(),
+            word: "新しい".to_owned(),
+        });
+        let (response, _) = service.handle(Request::Search(registered));
+        assert!(words(&response).is_empty());
+
+        let shipped = Query::okuri_nashi("かんじ");
+        service.handle(Request::Learn {
+            query: shipped.clone(),
+            word: "感じ".to_owned(),
+        });
+        service.handle(Request::Purge {
+            query: shipped.clone(),
+            word: "感じ".to_owned(),
+        });
+        let (response, _) = service.handle(Request::Search(shipped));
+        assert_eq!(words(&response), vec!["漢字", "感じ"], "学習だけが消える");
     }
 
     #[test]

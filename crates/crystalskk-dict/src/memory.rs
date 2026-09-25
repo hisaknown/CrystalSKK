@@ -160,6 +160,24 @@ impl MemoryDict {
         }
     }
 
+    /// 見出しから候補を一つ消す。候補が無くなれば見出しごと消す。
+    /// 消すものがなければ `false`。
+    pub fn purge(&mut self, query: &Query, word: &str) -> bool {
+        let okuri_ari = query.is_okuri_ari();
+        let Some(entry) = self.table_mut(okuri_ari).get_mut(&query.key) else {
+            return false;
+        };
+        let before = entry.len();
+        entry.retain(|c| c.word != word);
+        if entry.len() == before {
+            return false;
+        }
+        if entry.is_empty() {
+            self.remove(&query.key, okuri_ari);
+        }
+        true
+    }
+
     /// 見出しを一件削除する。消すものがなければ `false`。
     pub fn remove(&mut self, key: &str, okuri_ari: bool) -> bool {
         self.order
@@ -396,6 +414,29 @@ skk /SKK/
         dict.learn(&query, "幹事");
         let words: Vec<String> = dict.lookup(&query).iter().map(|c| c.word.clone()).collect();
         assert_eq!(words, ["幹事", "漢字", "感じ"]);
+    }
+
+    #[test]
+    fn purging_drops_one_candidate() {
+        let mut dict = sample();
+        let query = Query::okuri_nashi("かんじ");
+        assert!(dict.purge(&query, "感じ"));
+        let words: Vec<String> = dict.lookup(&query).iter().map(|c| c.word.clone()).collect();
+        assert_eq!(words, ["漢字", "幹事"]);
+        assert!(!dict.purge(&query, "感じ"), "二度目は消すものが無い");
+    }
+
+    #[test]
+    fn purging_the_last_candidate_drops_the_heading() {
+        let mut dict = MemoryDict::new();
+        let query = Query::okuri_nashi("みこと");
+        dict.learn(&query, "美琴");
+        assert!(dict.purge(&query, "美琴"));
+        assert!(dict.lookup(&query).is_empty());
+        assert!(
+            dict.complete_recent("み", 8).is_empty(),
+            "使った順からも消える"
+        );
     }
 
     #[test]

@@ -868,3 +868,70 @@ fn registering_a_number_stores_the_template() {
         }]
     );
 }
+
+/// `X` は選んでいる候補を辞書から消す。消す前に y/n で確かめる。
+/// ddskk (`skk-purge-from-jisyo`) と同じく、消すのは個人辞書からだけ。
+#[test]
+fn capital_x_asks_before_purging_a_candidate() {
+    let mut s = Session::new();
+    s.type_keys("Kanji  X");
+    assert_eq!(s.engine.purging().as_deref(), Some("感じ"));
+    assert_eq!(s.preedit(), "▼感じ", "確かめている間も候補は見せておく");
+
+    s.type_keys("y");
+    assert_eq!(s.engine.purging(), None);
+    assert_eq!(s.preedit(), "");
+    assert_eq!(s.committed, "", "消した語は確定しない");
+    assert_eq!(
+        s.events,
+        [Event::Purge {
+            query: Query::okuri_nashi("かんじ"),
+            word: "感じ".into()
+        }]
+    );
+}
+
+#[test]
+fn declining_a_purge_returns_to_the_candidate() {
+    for no in ["n", "\u{1b}"] {
+        let mut s = Session::new();
+        s.type_keys("Kanji X");
+        match no {
+            "n" => s.type_keys("n"),
+            _ => {
+                s.press(Key::Escape);
+                &mut s
+            }
+        };
+        assert_eq!(s.engine.purging(), None);
+        assert_eq!(s.preedit(), "▼漢字");
+        assert!(s.events.is_empty());
+    }
+}
+
+/// 確かめている間のほかのキーは食べる。**押し間違いで確定も削除も
+/// 起きないように。**
+#[test]
+fn other_keys_while_confirming_a_purge_do_nothing() {
+    let mut s = Session::new();
+    s.type_keys("Kanji Xa \n");
+    assert_eq!(s.engine.purging().as_deref(), Some("漢字"));
+    assert_eq!(s.committed, "");
+    assert!(s.events.is_empty());
+}
+
+/// 送りありの候補は送り仮名を付けて見せ、辞書にある形で消す。
+#[test]
+fn purging_an_okuri_ari_candidate_shows_the_okuri() {
+    let mut s = Session::new();
+    s.type_keys("OkuRiX");
+    assert_eq!(s.engine.purging().as_deref(), Some("送り"));
+    s.type_keys("y");
+    assert_eq!(
+        s.events,
+        [Event::Purge {
+            query: Query::okuri_ari("おく", 'r', "り"),
+            word: "送".into()
+        }]
+    );
+}
