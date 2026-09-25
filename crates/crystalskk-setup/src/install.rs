@@ -230,7 +230,7 @@ fn write_icon(directory: &Path) -> Option<PathBuf> {
 ///
 /// 読み込まれていても改名はできる。掴んでいるプロセスは実体を見ており、
 /// 名前を見ているわけではない。
-pub(crate) fn retire(destination: &Path) -> io::Result<()> {
+pub(crate) fn retire(destination: &Path) -> io::Result<PathBuf> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -238,7 +238,9 @@ pub(crate) fn retire(destination: &Path) -> io::Result<()> {
 
     let mut retired = destination.as_os_str().to_owned();
     retired.push(format!(".{RETIRED_SUFFIX}{stamp}"));
-    std::fs::rename(destination, PathBuf::from(retired))
+    let retired = PathBuf::from(retired);
+    std::fs::rename(destination, &retired)?;
+    Ok(retired)
 }
 
 /// 退けた残骸を消す。使用中なら消せないので、黙って見逃す。
@@ -348,6 +350,11 @@ fn purge_tree(directory: &Path) -> bool {
 
 /// 消す。使用中で消せなければ、再起動したときに消える予約をする。予約
 /// したら `true`。
+///
+/// ファイルは、**退けてから退けた名前のほうを予約する**。予約はパスに
+/// 付くので、元の名前のまま予約すると、再起動する前に入れ直したものが
+/// 再起動のときに消されてしまう。フォルダは中身が残っていれば消えない
+/// ので、そのまま予約してよい。
 fn remove_or_schedule(path: &Path, directory: bool) -> bool {
     let removed = if directory {
         std::fs::remove_dir(path)
@@ -357,7 +364,15 @@ fn remove_or_schedule(path: &Path, directory: bool) -> bool {
     if removed.is_ok() || !path.exists() {
         return false;
     }
-    let path = HSTRING::from(path.as_os_str());
+    let target = if directory {
+        path.to_path_buf()
+    } else {
+        match retire(path) {
+            Ok(retired) => retired,
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    let path = HSTRING::from(target.as_os_str());
     // SAFETY: 名前は有効な文字列。行き先を渡さないのは「消す」の意。
     unsafe { MoveFileExW(&path, None, MOVEFILE_DELAY_UNTIL_REBOOT) }.is_ok()
 }
