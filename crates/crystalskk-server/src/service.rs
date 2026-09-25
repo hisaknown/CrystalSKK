@@ -583,8 +583,10 @@ mod tests {
     #[test]
     fn conversions_do_not_wait_for_the_ranker_to_be_built() {
         // 作るのに時間がかかっても、そのあいだは辞書の順で答える。
-        let mut service = service_with("かんじ /漢字/感じ/幹事/
-");
+        let mut service = service_with(
+            "かんじ /漢字/感じ/幹事/
+",
+        );
         service.start_ranker(|| {
             std::thread::sleep(Duration::from_millis(300));
             Ok(Some(Box::new(Echo)))
@@ -606,8 +608,10 @@ mod tests {
 
     #[test]
     fn a_ranker_built_for_old_settings_is_thrown_away() {
-        let mut service = service_with("かんじ /漢字/感じ/幹事/
-");
+        let mut service = service_with(
+            "かんじ /漢字/感じ/幹事/
+",
+        );
         service.start_ranker(|| {
             std::thread::sleep(Duration::from_millis(100));
             Ok(Some(Box::new(Echo)))
