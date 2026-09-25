@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SetDIBitsToDevice,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
+    CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
     GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, KillTimer, LWA_ALPHA, RegisterClassExW,
     SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetLayeredWindowAttributes, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY,
@@ -31,15 +31,15 @@ use windows::core::{PCWSTR, w};
 use crate::dpi;
 use crate::guard::guard;
 use crate::theme::Palette;
-use crate::{icon, log};
+use crate::{icon, log, popup};
 
 /// 絵の大きさ。100% のときの画素数。拡大率に合わせて伸ばす。
 ///
 /// トレイと同じ 16 画素にする。**打っている文字より目立っては困る。**
 const GLYPH: i32 = 16;
 
-/// 絵のまわりの余白。
-const PADDING: i32 = 2;
+/// 絵のまわりの余白。角の丸みに絵が食われないだけ空ける。
+const PADDING: i32 = 5;
 
 /// カーソルとのあいだ。
 const GAP: i32 = 2;
@@ -57,6 +57,8 @@ pub struct ModeWindow {
     palette: Cell<Option<Palette>>,
     /// 描く拡大率。出すときに、出すモニターで決める。
     dpi: Cell<u32>,
+    /// 角を DWM が丸めているか。丸めているなら枠も DWM が描く。
+    rounded: Cell<bool>,
 }
 
 impl ModeWindow {
@@ -79,6 +81,9 @@ impl ModeWindow {
         };
         self.shown.set(Some(mode));
         self.palette.set(Some(palette));
+        if self.rounded.get() {
+            popup::set_border(hwnd, palette.border);
+        }
         // SAFETY: 窓は自分で作ったもの。描く中身は `self` にあり、窓より長く
         // 生きる (窓は `close` か `Drop` で壊す)。
         unsafe {
@@ -201,6 +206,7 @@ impl ModeWindow {
                     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
                 }
                 *self.hwnd.borrow_mut() = hwnd;
+                self.rounded.set(popup::round_corners(hwnd));
                 Some(hwnd)
             }
             Err(e) => {
@@ -263,8 +269,14 @@ fn work_area(caret: RECT) -> RECT {
     }
 }
 
-/// 描く。地、縁、絵の色は `palette` に従う。
-fn pixels(mode: Option<InputMode>, side: i32, palette: Palette, dpi: u32) -> Vec<u32> {
+/// 描く。地、縁、絵の色は `palette` に従う。`framed` なら縁を描く。
+fn pixels(
+    mode: Option<InputMode>,
+    side: i32,
+    palette: Palette,
+    dpi: u32,
+    framed: bool,
+) -> Vec<u32> {
     let Palette {
         background,
         text: ink,
@@ -274,7 +286,7 @@ fn pixels(mode: Option<InputMode>, side: i32, palette: Palette, dpi: u32) -> Vec
 
     let side_u = side.max(0) as usize;
     let mut out = vec![background; side_u * side_u];
-    for i in 0..side_u {
+    for i in (0..side_u).filter(|_| framed) {
         out[i] = border;
         out[(side_u - 1) * side_u + i] = border;
         out[i * side_u] = border;
@@ -321,6 +333,8 @@ fn register_class() -> Option<()> {
             lpfnWndProc: Some(window_proc),
             lpszClassName: CLASS_NAME,
             hInstance: crate::module().into(),
+            // 影を付ける。候補の窓と揃える。
+            style: CS_DROPSHADOW,
             ..Default::default()
         };
         // SAFETY: 名前も手続きもこのモジュールのもの。
@@ -363,12 +377,17 @@ unsafe extern "system" fn window_proc(
                     let hdc = BeginPaint(hwnd, &mut ps);
                     let owner =
                         (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const ModeWindow).as_ref();
-                    if let Some((mode, palette, o_dpi)) =
-                        owner.and_then(|o| Some((o.shown.get()?, o.palette.get()?, o.dpi.get())))
-                    {
+                    if let Some((mode, palette, o_dpi, rounded)) = owner.and_then(|o| {
+                        Some((
+                            o.shown.get()?,
+                            o.palette.get()?,
+                            o.dpi.get(),
+                            o.rounded.get(),
+                        ))
+                    }) {
                         let dpi = o_dpi;
                         let side = side(dpi);
-                        let drawn = pixels(mode, side, palette, dpi);
+                        let drawn = pixels(mode, side, palette, dpi, !rounded);
                         let info = BITMAPINFO {
                             bmiHeader: BITMAPINFOHEADER {
                                 biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
@@ -468,11 +487,17 @@ mod tests {
             border: 0x00_78_D4,
             selected_background: 0x00_78_D4,
             selected_text: 0xFF_FF_FF,
+            key: 0x00_78_D4,
         };
         let side = 20;
-        let drawn = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE);
+        let drawn = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE, true);
         assert_eq!(drawn.len(), (side * side) as usize);
         assert_eq!(drawn[0], palette.border, "縁");
+        let rounded = pixels(Some(InputMode::Hiragana), side, palette, dpi::BASE, false);
+        assert_eq!(
+            rounded[0], palette.background,
+            "角を丸めたら縁は DWM に任せる"
+        );
         assert_eq!(drawn[(side + 2) as usize], palette.background, "地");
         assert!(drawn.contains(&palette.text), "絵は文字の色で描かれる");
     }

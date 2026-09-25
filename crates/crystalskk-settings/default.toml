@@ -126,9 +126,12 @@ theme = "auto"
 background = "system"
 text = "system"
 border = "system"
-# 選んでいる行 (反転の帯) の地と文字。
+# 選んでいる行 (帯) の地と文字。"system" なら、地は地と文字の色を少し
+# 混ぜた色、文字は本文と同じ色になります。
 selected_background = "system"
 selected_text = "system"
+# 押すキーを囲む枠と、選んでいる行の左端の印。
+key = "accent"
 
 # 暗い組。Windows の標準の色はダークモードでも白いままなので、地と文字は
 # 色で書いてあります。
@@ -138,6 +141,7 @@ text = "#FFFFFF"
 border = "system"
 selected_background = "system"
 selected_text = "system"
+key = "accent"
 
 [dictionaries]
 # 引く辞書。ユーザー辞書のあとに、上から順に引きます。候補もこの順に並び、

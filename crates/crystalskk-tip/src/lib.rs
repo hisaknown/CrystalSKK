@@ -44,6 +44,7 @@ pub mod langbar;
 pub mod launch;
 pub mod log;
 pub mod menu;
+pub mod popup;
 pub mod preserved;
 pub mod profile;
 pub mod registry;

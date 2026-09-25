@@ -22,33 +22,35 @@
 //!
 //! # 描き方
 //!
-//! 文字と枠を素朴に描く。色は設定に従い、明るい組と暗い組をアプリの明るさで
+//! 角を丸めた窓に、押すキーを枠で囲んで並べる。色は設定に従い、明るい組と暗い組をアプリの明るさで
 //! 選ぶ (ADR-0026)。大きさは窓を出すモニターの拡大率に従う ([`crate::dpi`])。
 //! 候補の注釈は本文の右に薄く添える (ADR-0027)。描き方は `paint` の一箇所に
 //! 閉じてある。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, FillRect,
-    FrameRect, GetDC, GetTextExtentPoint32W, HDC, InvalidateRect, PAINTSTRUCT, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreatePen, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint,
+    FillRect, FrameRect, GetDC, GetStockObject, GetTextExtentPoint32W, HDC, InvalidateRect,
+    NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT,
-    GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
-    RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GWLP_HWNDPARENT, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST,
+    IsWindowVisible, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::dpi;
 use crate::guard::guard;
 use crate::log;
+use crate::popup;
 use crate::theme::Palette;
 
 /// 窓に出すもの。
@@ -90,9 +92,19 @@ impl Content {
         matches!(self, Self::Annotation(_))
     }
 
-    /// 反転して見せる行。無ければ `None`。
+    /// 本文の左に置くもの。
+    fn lead(&self) -> Lead {
+        match self {
+            Self::Page(_) => Lead::Key,
+            Self::Completion(completion) if completion.taken => Lead::Mark,
+            Self::Completion(_) => Lead::Key,
+            _ => Lead::None,
+        }
+    }
+
+    /// 帯を敷いて見せる行。無ければ `None`。
     ///
-    /// **記号で示すより、地と文字の色を入れ替えるほうがよい。** 記号は
+    /// **記号で示すより、地の色を変えるほうがよい。** 記号は
     /// フォントによって幅も形も変わるし、語そのものと紛れる。
     fn highlight(&self) -> Option<usize> {
         match self {
@@ -106,9 +118,11 @@ impl Content {
     }
 }
 
-/// 窓の一行。本文と、その右に薄く添える注釈。
+/// 窓の一行。押すキーと本文と、その右に薄く添える注釈。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
+    /// この行を選ぶキー。本文の左に、枠で囲んで出す。
+    pub key: Option<char>,
     pub text: String,
     pub note: Option<String>,
 }
@@ -116,16 +130,36 @@ pub struct Line {
 impl Line {
     fn plain(text: impl Into<String>) -> Self {
         Self {
+            key: None,
             text: text.into(),
             note: None,
+        }
+    }
+
+    fn keyed(key: char, text: impl Into<String>) -> Self {
+        Self {
+            key: Some(key),
+            ..Self::plain(text)
         }
     }
 }
 
 impl PartialEq<&str> for Line {
     fn eq(&self, other: &&str) -> bool {
-        self.note.is_none() && self.text == *other
+        self.key.is_none() && self.note.is_none() && self.text == *other
     }
+}
+
+/// 本文の左に何を置くか。**一つの窓の中では、どの行も同じ幅を空ける。**
+/// 行によって本文の書き出しがずれると、目が候補を追えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lead {
+    /// 何も置かない。
+    None,
+    /// 押すキーを枠で囲んで置く。
+    Key,
+    /// 選んでいる行にだけ細い印を置く。選んでいない行も同じ幅を空ける。
+    Mark,
 }
 
 /// いま選んでいる補完候補。
@@ -154,18 +188,18 @@ pub struct Completion {
 impl Completion {
     fn lines(&self) -> Vec<Line> {
         if !self.taken {
-            // 一覧と同じ「キー: 語」の形にする。押すキーがそのまま左に出る。
+            // 一覧と同じく、押すキーを左に出す。
             return self
                 .entries
                 .first()
-                .map(|word| Line::plain(format!("{}: {word}", self.take_key)))
+                .map(|word| Line::keyed(self.take_key, word.clone()))
                 .into_iter()
                 .collect();
         }
 
         // 受け取った後は打鍵の案内を出さない。**同じキーが同じことを
         // しないのに、出したままにはできない。** 選んでいる候補は
-        // [`Content::highlight`] が反転させる。
+        // [`Content::highlight`] が帯を敷く。
         let mut lines: Vec<Line> = self.entries.iter().map(Line::plain).collect();
         if self.count > 1 {
             lines.push(Line::plain(format!("{} / {}", self.number, self.count)));
@@ -220,7 +254,8 @@ impl Page {
             .iter()
             .enumerate()
             .map(|(at, (label, text))| Line {
-                text: format!("{label}: {text}"),
+                key: Some(*label),
+                text: text.clone(),
                 note: self.notes.get(at).cloned().flatten(),
             })
             .collect();
@@ -238,6 +273,8 @@ impl Page {
 #[derive(Debug)]
 pub struct CandidateWindow {
     hwnd: RefCell<HWND>,
+    /// 角を DWM が丸めているか。Windows 10 では丸められない。
+    rounded: Cell<bool>,
 }
 
 impl Default for CandidateWindow {
@@ -250,6 +287,7 @@ impl CandidateWindow {
     pub fn new() -> Self {
         Self {
             hwnd: RefCell::new(HWND::default()),
+            rounded: Cell::new(false),
         }
     }
 
@@ -273,10 +311,15 @@ impl CandidateWindow {
             x: anchor.left,
             y: anchor.bottom,
         });
+        let rounded = self.rounded.get();
+        if rounded {
+            popup::set_border(hwnd, palette.border);
+        }
         let stored = Box::into_raw(Box::new(Painted {
             content: content.clone(),
             palette,
             dpi,
+            rounded,
         }));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
@@ -403,6 +446,7 @@ impl CandidateWindow {
         match hwnd {
             Ok(hwnd) => {
                 *self.hwnd.borrow_mut() = hwnd;
+                self.rounded.set(popup::round_corners(hwnd));
                 log::write("候補の窓を作った");
                 Some(hwnd)
             }
@@ -439,7 +483,9 @@ fn register_class() -> Option<()> {
             // 古い絵がそのまま残る**。Windows は新たに現れた部分しか
             // 描き直さないため、七件の一覧から五件の一覧へ移ると、
             // 前のページの五件が居座って見える。
-            style: CS_HREDRAW | CS_VREDRAW,
+            //
+            // 影も付ける。アプリの上に浮いていることが一目で分かる。
+            style: CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW,
             lpfnWndProc: Some(window_proc),
             lpszClassName: CLASS_NAME,
             hInstance: crate::module().into(),
@@ -485,7 +531,13 @@ unsafe extern "system" fn window_proc(
                     let hdc = BeginPaint(hwnd, &mut ps);
                     let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Painted;
                     if let Some(painted) = stored.as_ref() {
-                        paint(hdc, &painted.content, painted.palette, painted.dpi);
+                        paint(
+                            hdc,
+                            &painted.content,
+                            painted.palette,
+                            painted.dpi,
+                            painted.rounded,
+                        );
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -510,14 +562,15 @@ unsafe extern "system" fn window_proc(
 
 /// 一覧を描く。**絵柄はここだけに閉じてある。**
 ///
+/// `rounded` は、角を DWM が丸めているか。丸めているなら枠も DWM が描く。
+///
 /// # Safety
 ///
 /// `hdc` が描画中のものであること。
-unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32) {
+unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32, rounded: bool) {
     // SAFETY: 呼び出し側の約束による。作ったものはこの関数の中で片付ける。
     unsafe {
         let font = dpi::message_font(dpi);
-        let pad = dpi::scale(PADDING, dpi);
         let previous = font.map(|f| SelectObject(hdc, f.into()));
 
         let (width, height) = measure(content, dpi);
@@ -532,16 +585,23 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32) {
         FillRect(hdc, &area, background);
         let _ = DeleteObject(background.into());
 
-        // 枠。地と同じ色では、背景に溶けて境目が分からない。
-        let border = CreateSolidBrush(colorref(palette.border));
-        FrameRect(hdc, &area, border);
-        let _ = DeleteObject(border.into());
+        // 枠。地と同じ色では、背景に溶けて境目が分からない。角を丸めて
+        // いるなら DWM が丸みに沿って描くので、四角い枠は重ねない。
+        if !rounded {
+            let border = CreateSolidBrush(colorref(palette.border));
+            FrameRect(hdc, &area, border);
+            let _ = DeleteObject(border.into());
+        }
 
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, colorref(palette.text));
 
+        let inset = dpi::scale(WINDOW_PAD, dpi);
+        let row_pad = dpi::scale(ROW_PAD, dpi);
+
         // 注釈だけの窓は、窓の幅で折り返して全文を出す。
         if content.wraps() {
+            let pad = inset + row_pad;
             let text = content
                 .lines()
                 .into_iter()
@@ -562,39 +622,63 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32) {
                 DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
             );
         } else {
-            let line_height = line_height(hdc, dpi);
+            let metrics = Metrics::of(hdc, dpi);
+            let lead = content.lead();
             let highlight = content.highlight();
             for (index, line) in content.lines().iter().enumerate() {
-                let top = pad + line_height * i32::try_from(index).unwrap_or(0);
-                let rect = RECT {
-                    left: pad,
+                let top = inset + metrics.line * i32::try_from(index).unwrap_or(0);
+                let row = RECT {
+                    left: inset,
                     top,
-                    right: width - pad,
-                    bottom: top + line_height,
+                    right: width - inset,
+                    bottom: top + metrics.line,
                 };
 
-                // 選んでいる行は地と文字の色を入れ替える。**記号で示すより
-                // 確かで、フォントによって見た目が変わらない。**
+                // 選んでいる行には帯を敷き、左端に印を立てる。
                 //
-                // 帯は余白いっぱいまで広げる。文字の幅だけ塗ると、行によって
+                // 帯は窓の幅いっぱいに敷く。文字の幅だけ塗ると、行によって
                 // 帯の長さが変わってちらついて見える。
                 let selected = highlight == Some(index);
                 if selected {
-                    let band = RECT {
-                        left: 1,
-                        right: width - 1,
-                        ..rect
+                    round_fill(
+                        hdc,
+                        row,
+                        palette.selected_background,
+                        dpi::scale(BAND_ROUND, dpi),
+                    );
+                    let mark_height = metrics.line / 2;
+                    let mark_top = row.top + (metrics.line - mark_height) / 2;
+                    let mark_left = row.left + dpi::scale(MARK_OFFSET, dpi);
+                    let mark_width = dpi::scale(MARK_WIDTH, dpi);
+                    let mark = RECT {
+                        left: mark_left,
+                        top: mark_top,
+                        right: mark_left + mark_width,
+                        bottom: mark_top + mark_height,
                     };
-                    let brush = CreateSolidBrush(colorref(palette.selected_background));
-                    FillRect(hdc, &band, brush);
-                    let _ = DeleteObject(brush.into());
+                    round_fill(hdc, mark, palette.key, mark_width);
                 }
                 let (ink, ground) = if selected {
                     (palette.selected_text, palette.selected_background)
                 } else {
                     (palette.text, palette.background)
                 };
-                draw_line(hdc, line, rect, ink, ground, dpi);
+
+                let left = row.left + row_pad;
+                if let (Lead::Key, Some(key)) = (lead, line.key) {
+                    let key_box = KeyBox {
+                        left,
+                        row,
+                        side: metrics.key,
+                    };
+                    draw_key(hdc, key, key_box, palette.key, mix(ink, ground));
+                }
+                let text = RECT {
+                    left: left + metrics.lead(lead, dpi),
+                    right: row.right - row_pad,
+                    ..row
+                };
+                draw_line(hdc, line, text, ink, ground, dpi);
             }
         }
 
@@ -602,6 +686,93 @@ unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32) {
             SelectObject(hdc, previous);
             let _ = DeleteObject(font.into());
         }
+    }
+}
+
+/// 角の丸い四角を塗る。`round` は角の丸みの直径。
+///
+/// # Safety
+///
+/// `hdc` が描画中のものであること。
+unsafe fn round_fill(hdc: HDC, rect: RECT, color: u32, round: i32) {
+    // SAFETY: 呼び出し側の約束による。選んだものは戻し、作ったものは消す。
+    unsafe {
+        let brush = CreateSolidBrush(colorref(color));
+        let previous_brush = SelectObject(hdc, brush.into());
+        let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        // 線を引かないと、右と下が一画素ずつ欠ける。その分を足す。
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right + 1,
+            rect.bottom + 1,
+            round,
+            round,
+        );
+        SelectObject(hdc, previous_pen);
+        SelectObject(hdc, previous_brush);
+        let _ = DeleteObject(brush.into());
+    }
+}
+
+/// キーを囲む枠の置き場所。`left` から始まる一辺 `side` の正方形を、
+/// `row` の縦の真ん中に置く。
+#[derive(Debug, Clone, Copy)]
+struct KeyBox {
+    left: i32,
+    row: RECT,
+    side: i32,
+}
+
+/// 押すキーを、角の丸い枠で囲んで描く。
+///
+/// **枠の大きさはキーによらず同じにする。** キーごとに幅が変わると、本文の
+/// 書き出しがずれる。
+///
+/// # Safety
+///
+/// `hdc` に書体が選ばれていること。
+unsafe fn draw_key(hdc: HDC, key: char, place: KeyBox, frame: u32, ink: u32) {
+    // SAFETY: 呼び出し側の約束による。選んだものは戻し、作ったものは消す。
+    unsafe {
+        let top = place.row.top + (place.row.bottom - place.row.top - place.side) / 2;
+        let mut rect = RECT {
+            left: place.left,
+            top,
+            right: place.left + place.side,
+            bottom: top + place.side,
+        };
+        let pen = CreatePen(PS_SOLID, 1, colorref(frame));
+        let previous_pen = SelectObject(hdc, pen.into());
+        let previous_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        let round = place.side / 3;
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            round,
+            round,
+        );
+        SelectObject(hdc, previous_brush);
+        SelectObject(hdc, previous_pen);
+        let _ = DeleteObject(pen.into());
+
+        // キーボードの刻印に合わせて大文字で出す。
+        SetTextColor(hdc, colorref(ink));
+        let mut text: Vec<u16> = key
+            .to_ascii_uppercase()
+            .to_string()
+            .encode_utf16()
+            .collect();
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut rect,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        );
     }
 }
 
@@ -683,6 +854,8 @@ struct Painted {
     palette: Palette,
     /// 描く拡大率。出すときに、出すモニターで決める。
     dpi: u32,
+    /// 角を DWM が丸めているか。
+    rounded: bool,
 }
 
 /// `0xRRGGBB` を `COLORREF` (`0x00BBGGRR`) にする。
@@ -697,6 +870,7 @@ fn measure(content: &Content, dpi: u32) -> (i32, i32) {
         let hdc = GetDC(None);
         let font = dpi::message_font(dpi);
         let previous = font.map(|f| SelectObject(hdc, f.into()));
+        let row_pad = dpi::scale(ROW_PAD, dpi);
 
         let measured = if content.wraps() {
             // 折り返したときの大きさを、描く前に尋ねる。
@@ -719,9 +893,13 @@ fn measure(content: &Content, dpi: u32) -> (i32, i32) {
                 &mut rect,
                 DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
             );
-            (rect.right - rect.left, rect.bottom - rect.top)
+            (
+                rect.right - rect.left + row_pad * 2,
+                rect.bottom - rect.top + row_pad * 2,
+            )
         } else {
-            let line_height = line_height(hdc, dpi);
+            let metrics = Metrics::of(hdc, dpi);
+            let lead = metrics.lead(content.lead(), dpi);
             let lines = content.lines();
             let widest = lines
                 .iter()
@@ -730,12 +908,12 @@ fn measure(content: &Content, dpi: u32) -> (i32, i32) {
                         dpi::scale(NOTE_GAP, dpi)
                             + text_width(hdc, note).min(dpi::scale(NOTE_WIDTH, dpi))
                     });
-                    text_width(hdc, &line.text) + note
+                    lead + text_width(hdc, &line.text) + note
                 })
                 .max()
                 .unwrap_or(0);
             let rows = i32::try_from(lines.len()).unwrap_or(1);
-            (widest, line_height * rows)
+            (widest + row_pad * 2, metrics.line * rows)
         };
 
         if let (Some(previous), Some(font)) = (previous, font) {
@@ -744,27 +922,46 @@ fn measure(content: &Content, dpi: u32) -> (i32, i32) {
         }
         ReleaseDC(None, hdc);
 
-        (
-            measured.0 + dpi::scale(PADDING, dpi) * 2,
-            measured.1 + dpi::scale(PADDING, dpi) * 2,
-        )
+        // 行は窓の縁から少し離して並べる。帯の丸みが縁に食われないように。
+        let inset = dpi::scale(WINDOW_PAD, dpi);
+        (measured.0 + inset * 2, measured.1 + inset * 2)
     }
 }
 
-/// 一行の高さ。
-///
-/// # Safety
-///
-/// `hdc` に測りたい書体が選ばれていること。
-unsafe fn line_height(hdc: HDC, dpi: u32) -> i32 {
-    // SAFETY: 呼び出し側の約束による。
-    unsafe {
+/// 行の寸法。どれも書体の高さから決める。
+#[derive(Debug, Clone, Copy)]
+struct Metrics {
+    /// 一行の高さ。
+    line: i32,
+    /// キーを囲む枠の一辺。
+    key: i32,
+}
+
+impl Metrics {
+    /// # Safety
+    ///
+    /// `hdc` に測りたい書体が選ばれていること。
+    unsafe fn of(hdc: HDC, dpi: u32) -> Self {
         let sample: Vec<u16> = "あA".encode_utf16().collect();
         let mut size = SIZE::default();
-        if GetTextExtentPoint32W(hdc, &sample, &mut size).as_bool() {
-            size.cy + dpi::scale(LINE_GAP, dpi)
+        // SAFETY: 呼び出し側の約束による。
+        let height = if unsafe { GetTextExtentPoint32W(hdc, &sample, &mut size) }.as_bool() {
+            size.cy
         } else {
-            dpi::scale(FALLBACK_LINE_HEIGHT, dpi)
+            dpi::scale(FALLBACK_TEXT_HEIGHT, dpi)
+        };
+        Self {
+            line: height + dpi::scale(LINE_GAP, dpi),
+            key: height + dpi::scale(KEY_GROW, dpi),
+        }
+    }
+
+    /// 本文の左に空ける幅。
+    fn lead(self, lead: Lead, dpi: u32) -> i32 {
+        match lead {
+            Lead::None => 0,
+            Lead::Key => self.key + dpi::scale(KEY_GAP, dpi),
+            Lead::Mark => dpi::scale(MARK_SPACE, dpi),
         }
     }
 }
@@ -803,14 +1000,35 @@ fn place(anchor: RECT, width: i32, height: i32) -> (i32, i32) {
     (x, y)
 }
 
-/// 文字と枠の間。
-const PADDING: i32 = 6;
+/// 窓の縁と帯の間。
+const WINDOW_PAD: i32 = 4;
 
-/// 行と行の間。
-const LINE_GAP: i32 = 4;
+/// 帯の縁と文字の間。
+const ROW_PAD: i32 = 8;
 
-/// 書体を測れなかったときの一行の高さ。
-const FALLBACK_LINE_HEIGHT: i32 = 20;
+/// 一行の高さのうち、文字の上下に空ける分。
+const LINE_GAP: i32 = 12;
+
+/// 帯の角の丸みの直径。
+const BAND_ROUND: i32 = 8;
+
+/// キーを囲む枠が、文字の高さより大きい分。
+const KEY_GROW: i32 = 4;
+
+/// キーを囲む枠と本文の間。
+const KEY_GAP: i32 = 10;
+
+/// 選んでいる行の印の太さ。
+const MARK_WIDTH: i32 = 3;
+
+/// 帯の縁から印までの距離。
+const MARK_OFFSET: i32 = 3;
+
+/// 印のために本文の左に空ける幅。選んでいない行も同じだけ空ける。
+const MARK_SPACE: i32 = 6;
+
+/// 書体を測れなかったときの文字の高さ。
+const FALLBACK_TEXT_HEIGHT: i32 = 16;
 
 #[cfg(test)]
 mod tests {
@@ -833,9 +1051,9 @@ mod tests {
         let mut page = page(&[('a', "橋"), ('s', "箸")], 1, 1);
         page.notes = vec![Some("bridge".to_owned()), None];
         let lines = page.lines();
-        assert_eq!(lines[0].text, "a: 橋");
+        assert_eq!(lines[0].text, "橋");
         assert_eq!(lines[0].note.as_deref(), Some("bridge"));
-        assert_eq!(lines[1], "s: 箸", "注釈の無い候補はそのまま");
+        assert_eq!(lines[1], Line::keyed('s', "箸"), "注釈の無い候補はそのまま");
     }
 
     #[test]
@@ -861,7 +1079,7 @@ mod tests {
             ..Completion::default()
         })
         .lines();
-        assert_eq!(line, [".: 漢字"], "出すのは変換先");
+        assert_eq!(line, [Line::keyed('.', "漢字")], "出すのは変換先");
     }
 
     #[test]
@@ -876,8 +1094,9 @@ mod tests {
             count: 1,
         });
         assert_eq!(content.lines(), ["漢字", "患者"]);
-        // 印を足さず、行そのものを反転させる。
+        // 選んでいる行に帯を敷く。キーは出さず、印の幅だけ空ける。
         assert_eq!(content.highlight(), Some(1));
+        assert_eq!(content.lead(), Lead::Mark);
     }
 
     #[test]
@@ -892,13 +1111,16 @@ mod tests {
             count: 1,
         })
         .lines();
-        assert!(lines.iter().all(|line| !line.text.contains(':')));
+        assert!(lines.iter().all(|line| line.key.is_none()));
     }
 
     #[test]
     fn each_entry_becomes_a_line() {
         let page = page(&[('a', "漢字"), ('s', "感じ")], 1, 1);
-        assert_eq!(page.lines(), vec!["a: 漢字", "s: 感じ"]);
+        assert_eq!(
+            page.lines(),
+            vec![Line::keyed('a', "漢字"), Line::keyed('s', "感じ")]
+        );
     }
 
     #[test]

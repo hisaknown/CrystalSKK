@@ -229,6 +229,8 @@ pub struct ColorSet {
     pub selected_background: Color,
     /// 選んでいる行の文字。
     pub selected_text: Color,
+    /// 押すキーを囲む枠 (キーキャップ) と、選んでいる行の印。
+    pub key: Color,
 }
 
 /// 一つの色。
@@ -809,6 +811,7 @@ fn color_set(colors: &Table, name: &str) -> Result<ColorSet, Error> {
         border: color(table, &path, "border")?,
         selected_background: color(table, &path, "selected_background")?,
         selected_text: color(table, &path, "selected_text")?,
+        key: color(table, &path, "key")?,
     })
 }
 

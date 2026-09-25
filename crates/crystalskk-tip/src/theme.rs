@@ -97,6 +97,8 @@ pub struct Palette {
     pub selected_background: u32,
     /// 選んでいる行の文字。
     pub selected_text: u32,
+    /// 押すキーを囲む枠と、選んでいる行の印。
+    pub key: u32,
 }
 
 impl Palette {
@@ -118,12 +120,26 @@ impl Palette {
             ThemeChoice::Dark => true,
         };
         let set = if dark { &colors.dark } else { &colors.light };
+        let background = pick(set.background, COLOR_WINDOW);
+        let text = pick(set.text, COLOR_WINDOWTEXT);
+        // 選んでいる行の "system" は、`COLOR_HIGHLIGHT` ではなく地と文字から
+        // 作る。**強調の色で塗ると帯が重く、同じ色の印も埋もれる。** 地に
+        // 文字の色を少し混ぜれば、明るい窓でも暗い窓でも控えめな帯になる。
+        let selected_background = match set.selected_background {
+            crystalskk_settings::Color::System => blend(text, background, BAND_TINT),
+            color => pick(color, COLOR_HIGHLIGHT),
+        };
+        let selected_text = match set.selected_text {
+            crystalskk_settings::Color::System => text,
+            color => pick(color, COLOR_HIGHLIGHTTEXT),
+        };
         Self {
-            background: pick(set.background, COLOR_WINDOW),
-            text: pick(set.text, COLOR_WINDOWTEXT),
+            background,
+            text,
             border: pick(set.border, COLOR_HIGHLIGHT),
-            selected_background: pick(set.selected_background, COLOR_HIGHLIGHT),
-            selected_text: pick(set.selected_text, COLOR_HIGHLIGHTTEXT),
+            selected_background,
+            selected_text,
+            key: pick(set.key, COLOR_HIGHLIGHT),
         }
     }
 
@@ -138,8 +154,21 @@ impl Palette {
             border: system(COLOR_HIGHLIGHT),
             selected_background: system(COLOR_HIGHLIGHT),
             selected_text: system(COLOR_HIGHLIGHTTEXT),
+            key: system(COLOR_HIGHLIGHT),
         }
     }
+}
+
+/// 選んでいる行の帯に混ぜる文字の色の割合。256 分の。
+const BAND_TINT: u32 = 26;
+
+/// `a` を `weight` / 256 だけ `b` に混ぜる。
+fn blend(a: u32, b: u32, weight: u32) -> u32 {
+    let channel = |shift: u32| {
+        let (a, b) = ((a >> shift) & 0xFF, (b >> shift) & 0xFF);
+        ((a * weight + b * (256 - weight)) / 256) << shift
+    };
+    channel(16) | channel(8) | channel(0)
 }
 
 /// 設定の色を解く。`"system"` なら `role` の標準の色。
@@ -186,7 +215,7 @@ fn accent() -> Option<u32> {
 }
 
 /// ハイコントラストの配色が選ばれているか。
-fn high_contrast() -> bool {
+pub(crate) fn high_contrast() -> bool {
     let mut info = HIGHCONTRASTW {
         cbSize: u32::try_from(size_of::<HIGHCONTRASTW>()).unwrap_or(0),
         ..Default::default()
@@ -387,6 +416,20 @@ mod tests {
         let _ = Theme::apps();
         let _ = Palette::system();
         let _ = accent();
+    }
+
+    #[test]
+    fn the_band_is_the_ground_tinted_by_the_text() {
+        let light = blend(0x00_00_00, 0xFF_FF_FF, BAND_TINT);
+        let dark = blend(0xFF_FF_FF, 0x2B_2B_2B, BAND_TINT);
+        assert!(
+            light < 0xFF_FF_FF && light > 0xD0_D0_D0,
+            "明るい窓では薄いグレー: {light:06X}"
+        );
+        assert!(
+            dark > 0x2B_2B_2B && dark < 0x50_50_50,
+            "暗い窓では少し明るいグレー: {dark:06X}"
+        );
     }
 
     #[test]
