@@ -10,6 +10,7 @@
     Version  ワークスペースの版 (major.minor.patch)
     BinDir   crystalskk_tip.dll・crystalskk-server.exe・crystalskk-setup.exe のあるフォルダ
     X86Dir   32 ビットの crystalskk_tip.dll のあるフォルダ
+    Icon     アプリの一覧に出す .ico (assets/icons/face.svg から描いたもの)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
@@ -27,6 +28,8 @@
     <MajorUpgrade DowngradeErrorMessage="より新しい版の CrystalSKK が入っています。" />
     <MediaTemplate EmbedCab="yes" />
 
+    <Icon Id="CrystalSKK.ico" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="CrystalSKK.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/hisaknown/CrystalSKK" />
     <Property Id="ARPNOMODIFY" Value="1" />
 

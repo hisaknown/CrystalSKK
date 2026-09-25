@@ -19,9 +19,6 @@ use std::path::{Path, PathBuf};
 /// よく使われる倍率の分はそれぞれ描いておく。
 const MODE_SIZES: [u32; 9] = [16, 20, 24, 28, 32, 36, 40, 48, 64];
 
-/// 顔の絵を描いておく大きさ。一覧の小さな絵から、大きく出す場面までを覆う。
-const FACE_SIZES: [u32; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
-
 /// 入力モードの絵。`(Rust での名前, ファイル名)`。
 const MODES: [(&str, &str); 6] = [
     ("HIRAGANA", "mode-hiragana"),
@@ -54,7 +51,7 @@ fn main() {
     }
 
     let svg = read(&assets, "face");
-    let images: Vec<_> = FACE_SIZES
+    let images: Vec<_> = crystalskk_art::ICO_SIZES
         .iter()
         .map(|size| {
             crystalskk_art::rasterize(&svg, *size)

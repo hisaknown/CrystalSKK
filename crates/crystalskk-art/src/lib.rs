@@ -73,6 +73,10 @@ pub fn rasterize(svg: &str, size: u32) -> Result<Image, Error> {
     Ok(Image { size, rgba })
 }
 
+/// 色付きの絵を `.ico` にするときの大きさ。一覧の小さな絵から、大きく出す
+/// 場面までを覆う。
+pub const ICO_SIZES: [u32; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
+
 /// `.ico` にする。大きさの違う絵を何枚でも入れられる。
 ///
 /// 256 画素の絵は PNG で、それより小さい絵は 32 ビットの BMP で入れる。

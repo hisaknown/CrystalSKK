@@ -29,11 +29,14 @@ cargo build --release --target i686-pc-windows-msvc -p crystalskk-tip
 
 out=target/installer
 mkdir -p "$out"
+# アプリの一覧に出す絵。TIP と同じく SVG から描く (ADR-0024)。
+cargo run --release -p crystalskk-art --example ico -- "$out/face.ico" assets/icons/face.svg
 dotnet tool restore
 dotnet wix build installer/crystalskk.wxs \
   -arch "$arch" \
   -d Version="$version" \
   -d BinDir="target/$target/release" \
   -d X86Dir="target/i686-pc-windows-msvc/release" \
+  -d Icon="$out/face.ico" \
   -o "$out/CrystalSKK-$version-$arch.msi"
 echo "$out/CrystalSKK-$version-$arch.msi"
