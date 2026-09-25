@@ -73,6 +73,24 @@ Windows 向けの SKK 風 IME です。
 - [CorvusSKK](https://github.com/nathancorvussolis/corvusskk)
 - [SKK日本語入力FEP](http://coexe.web.fc2.com/skkfep.html)
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)
+
+- Committers and reviewers: [hisaknown](https://github.com/hisaknown)
+- Approvers: [hisaknown](https://github.com/hisaknown)
+
+署名するのは、このリポジトリのソースから GitHub Actions でビルドしたものだけです。
+
+### Privacy policy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+
+CrystalSKK がネットワークにつなぐのは、次のものを取得するときだけです。利用者の入力や辞書の中身を送ることはありません。
+
+- インストールのとき: [llama.cpp](https://github.com/ggml-org/llama.cpp) の公式リリースと、このリポジトリのリリースに置いた言語モデル (いずれも GitHub から)
+- 動作中: 設定ファイルに並べた辞書 (既定では [skk-dev/dict](https://github.com/skk-dev/dict) の SKK-JISYO.L)
+
 ## ライセンス
 
 MIT License ([LICENSE](LICENSE))

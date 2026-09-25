@@ -62,3 +62,9 @@ jobs:
         with:
           draft: true
           files: "*.msi"
+          # SignPath Foundation の条件で、リリースのページにも署名の方針を示す。
+          body: |
+            ## Code signing policy
+
+            Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+            See the [code signing policy](https://github.com/hisaknown/CrystalSKK#code-signing-policy).
