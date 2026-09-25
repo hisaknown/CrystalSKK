@@ -13,6 +13,7 @@ pub mod engine;
 pub mod kana;
 pub mod key;
 pub mod mode;
+pub mod numeric;
 pub mod options;
 pub mod romaji;
 

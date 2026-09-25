@@ -56,6 +56,9 @@ impl Session {
             ("ぱそこん", &["パソコン", "パソ魂"][..]),
             ("さい>", &["再", "最"][..]),
             (">てき", &["的"][..]),
+            ("#がつ", &["#1月", "#0月", "#3月"][..]),
+            ("#じ#ふん", &["#0時#0分"][..]),
+            ("#えん", &["#8円", "#5円", "#2円", "#9円", "#4円"][..]),
         ]);
         Self {
             engine: common::engine(Box::new(dict)),
@@ -780,4 +783,88 @@ fn greater_than_in_an_empty_midashi_waits_for_the_rest() {
     let mut s = Session::new();
     s.type_keys("K\u{8}>");
     assert_eq!(s.preedit(), "▽>");
+}
+
+/// `Q` は何も打たずに `▽` を始める。数字は大文字にならないので、
+/// 数字から始まる見出し語はこうして打つ。
+#[test]
+fn capital_q_starts_an_empty_midashi() {
+    let mut s = Session::new();
+    s.type_keys("Q");
+    assert_eq!(s.preedit(), "▽");
+    s.type_keys("1gatu");
+    assert_eq!(s.preedit(), "▽1がつ");
+}
+
+/// 見出し語の途中の `Q` は、そこまでをそのまま確定して `▽` を始め直す。
+#[test]
+fn capital_q_in_a_midashi_commits_it_and_starts_again() {
+    let mut s = Session::new();
+    s.type_keys("KanjiQ");
+    assert_eq!(s.committed, "かんじ");
+    assert_eq!(s.preedit(), "▽");
+}
+
+/// 数値変換。数字は `#` として引き、候補の `#1` などを数字で埋める。
+/// 覚えるのは埋める前の形である。
+#[test]
+fn numbers_are_looked_up_as_hash_and_filled_in() {
+    let mut s = Session::new();
+    s.type_keys("Q12gatu ");
+    assert_eq!(s.preedit(), "▼１２月");
+    s.type_keys(" ");
+    assert_eq!(s.preedit(), "▼12月");
+    s.type_keys(" ");
+    assert_eq!(s.preedit(), "▼十二月");
+    s.type_keys("\n");
+    assert_eq!(s.committed, "十二月");
+    assert_eq!(
+        s.events,
+        [Event::Learn {
+            query: Query::okuri_nashi("#がつ"),
+            word: "#3月".into()
+        }]
+    );
+}
+
+#[test]
+fn every_number_in_the_midashi_is_filled_in_order() {
+    let mut s = Session::new();
+    s.type_keys("Q3ji05hun ");
+    assert_eq!(s.preedit(), "▼3時05分");
+}
+
+/// 桁区切り、大字、漢数字の棒読み。扱えない型 (`#4` `#9`) の候補は出さない。
+#[test]
+fn number_types_that_cannot_be_filled_are_left_out() {
+    let mut s = Session::new();
+    s.type_keys("Q1024en");
+    let words: Vec<String> = s
+        .engine
+        .press(Key::Space)
+        .candidates
+        .expect("候補選択中")
+        .candidates
+        .iter()
+        .map(|c| c.word.clone())
+        .collect();
+    assert_eq!(words, ["1,024円", "壱千弐拾四円", "一〇二四円"]);
+}
+
+/// 数字の見出しを登録するときは、語の数字も `#0` に戻す。次に別の数字で
+/// 引いたときに埋められるように。
+#[test]
+fn registering_a_number_stores_the_template() {
+    let mut s = Session::new();
+    s.type_keys("Q5ko ");
+    assert_eq!(s.engine.preedit().registering.as_deref(), Some("#こ"));
+    s.type_keys("5ko\n");
+    assert_eq!(s.committed, "5こ");
+    assert_eq!(
+        s.events,
+        [Event::Register {
+            query: Query::okuri_nashi("#こ"),
+            word: "#0こ".into()
+        }]
+    );
 }

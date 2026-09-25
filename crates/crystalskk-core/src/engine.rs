@@ -11,6 +11,7 @@ use crate::dict::{Candidate, CandidateSource, Context, EmptyDict, NoopRanker, Qu
 use crate::kana;
 use crate::key::Key;
 use crate::mode::InputMode;
+use crate::numeric;
 use crate::options::{Layout, Options};
 use crate::romaji::{RomajiConverter, RomajiTable};
 
@@ -335,6 +336,11 @@ impl Completion {
 struct Selecting {
     query: Query,
     candidates: Vec<Candidate>,
+    /// 候補ごとに、辞書にあったままの形。覚えるのはこちらである。
+    ///
+    /// ふつうは候補と同じ。数値変換では `#1月` のような埋める前の形で、
+    /// **埋めた `１２月` を覚えても、次に `3がつ` と打ったときに役に立たない。**
+    templates: Vec<String>,
     index: usize,
     /// 候補選択を取りやめたときに戻る先。
     origin: Composing,
@@ -1037,6 +1043,13 @@ impl Engine {
                     ..Composing::default()
                 });
             }
+            // 何も打たずに `▽` を始める。数字は大文字にならないので、
+            // `▽1がつ` のような見出し語はこうして打つ。ddskk
+            // (`skk-set-henkan-point-subr`) と同じ。
+            Key::Char('Q') => {
+                self.flush_romaji(out);
+                self.state = State::Composing(Composing::default());
+            }
             Key::Char(c) if c.is_ascii_uppercase() => {
                 self.settle_before_shift(out);
                 let mut comp = Composing::default();
@@ -1285,6 +1298,14 @@ impl Engine {
                 comp.midashi.push(c);
                 self.state = State::Composing(comp);
             }
+            // 見出し語の途中の `Q` は、そこまでをかなのまま確定して `▽` を
+            // 始め直す。ddskk もこうする。
+            Key::Char('Q') => {
+                self.absorb_pending(&mut comp);
+                let text = self.commit_text_of(&comp);
+                self.emit(&text, out);
+                self.state = State::Composing(Composing::default());
+            }
             // シフト付きの打鍵は送り仮名の開始を示す。ただし送り仮名が始まれるのは、
             // 見出し語にかなが一文字でもあり、まだ送り仮名が始まっていないときだけ。
             // それ以外の位置でのシフトは、新しい区切りを作れないので意味を持たない
@@ -1450,6 +1471,8 @@ impl Engine {
 
         let mut candidates = self.dict.lookup_for_conversion(&query, &self.context);
         self.ranker.rank(&self.context, &query, &mut candidates);
+        // 並べるのは埋める前の形で。覚えているのがその形だからである。
+        let (candidates, templates) = fill_numbers(candidates, &comp);
 
         if candidates.is_empty() {
             if !self.dict.available() {
@@ -1468,6 +1491,7 @@ impl Engine {
             self.state = State::Selecting(Selecting {
                 query,
                 candidates,
+                templates,
                 index: 0,
                 origin: comp,
                 layout,
@@ -1635,7 +1659,7 @@ impl Engine {
         self.emit(&text, out);
         out.events.push(Event::Learn {
             query: sel.query,
-            word: candidate.word,
+            word: sel.templates[sel.index].clone(),
         });
         self.state = State::Direct;
     }
@@ -1667,20 +1691,62 @@ impl Engine {
             None => reg.buffer.clone(),
         };
         self.emit(&text, out);
+        // 数字の見出しは `#` で引くので、登録する語も `#0` の形にする。
+        let word = if numbers_of(&reg.origin).is_empty() {
+            reg.buffer
+        } else {
+            numeric::to_template(&reg.buffer)
+        };
         out.events.push(Event::Register {
             query: reg.query,
-            word: reg.buffer,
+            word,
         });
         self.state = State::Direct;
     }
 }
 
 /// 引くための問い合わせを組み立てる。
+///
+/// 見出し語の数字は `#` にする (数値変換)。abbrev では数字もただの文字。
 fn query_of(comp: &Composing) -> Query {
+    let midashi = if comp.abbrev {
+        comp.midashi.clone()
+    } else {
+        numeric::key_of(&comp.midashi)
+    };
     match &comp.okuri {
-        Some(okuri) => Query::okuri_ari(&comp.midashi, okuri.head, okuri.kana.clone()),
-        None => Query::okuri_nashi(comp.midashi.clone()),
+        Some(okuri) => Query::okuri_ari(&midashi, okuri.head, okuri.kana.clone()),
+        None => Query::okuri_nashi(midashi),
     }
+}
+
+/// 数値変換で埋める数字。abbrev や数字の無い見出し語では空。
+fn numbers_of(comp: &Composing) -> Vec<String> {
+    if comp.abbrev {
+        Vec::new()
+    } else {
+        numeric::numbers(&comp.midashi)
+    }
+}
+
+/// 候補の `#1` などを見出し語の数字で埋める。埋められない候補は落とす。
+///
+/// 返すのは埋めた候補と、それぞれの埋める前の形。数字の無い見出し語では
+/// 両者は同じである。
+fn fill_numbers(candidates: Vec<Candidate>, comp: &Composing) -> (Vec<Candidate>, Vec<String>) {
+    let numbers = numbers_of(comp);
+    if numbers.is_empty() {
+        let templates = candidates.iter().map(|c| c.word.clone()).collect();
+        return (candidates, templates);
+    }
+    candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let word = numeric::fill(&candidate.word, &numbers)?;
+            let template = candidate.word;
+            Some((Candidate { word, ..candidate }, template))
+        })
+        .unzip()
 }
 
 /// 補完候補を出している最中か (まだ選んでいない)。
