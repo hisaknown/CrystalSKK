@@ -7,3 +7,7 @@
 - Bash で書くときも CRLF を持ち込まない。混ざったら `sed -i 's/\r$//' <file>` で直す。
 - 確認は `git ls-files --eol | grep crlf` (何も出なければよい)。
 - Windows 側のツール (`reg`、`regsvr32`、`wevtutil`、`cmd` の組み込みコマンドなど) の出力は **cp932** で、そのまま読むと文字化けする。化けていたら `| iconv -f cp932 -t utf-8` を通して読む。化けた出力をそのままファイルやコードに貼らない。
+
+## 開発の手順
+
+ビルド・導入・ログの見方は [docs/development.md](docs/development.md)、用語は [CONTEXT.md](CONTEXT.md)、設計判断は [docs/adr/](docs/adr/) にある。
