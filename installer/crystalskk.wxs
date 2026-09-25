@@ -11,8 +11,10 @@
     BinDir   crystalskk_tip.dll・crystalskk-server.exe・crystalskk-setup.exe のあるフォルダ
     X86Dir   32 ビットの crystalskk_tip.dll のあるフォルダ
     Icon     アプリの一覧に出す .ico (assets/icons/face.svg から描いたもの)
+    License  使用許諾の画面に出す .rtf (LICENSE から作ったもの)
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
     Name="CrystalSKK"
     Manufacturer="CrystalSKK contributors"
@@ -28,10 +30,16 @@
     <MajorUpgrade DowngradeErrorMessage="より新しい版の CrystalSKK が入っています。" />
     <MediaTemplate EmbedCab="yes" />
 
+    <!--
+      ようこそと使用許諾、進み具合、完了を見せる。画面が無いと、進み具合の
+      バーだけが出て黙って閉じるので、終わったのかが分からない。
+    -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(License)" />
+
     <Icon Id="CrystalSKK.ico" SourceFile="$(Icon)" />
     <Property Id="ARPPRODUCTICON" Value="CrystalSKK.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/hisaknown/CrystalSKK" />
-    <Property Id="ARPNOMODIFY" Value="1" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="APPDIR" Name="CrystalSKK">

@@ -1,4 +1,6 @@
 /target
+# WiX の拡張の置き場。installer/build.sh が取得する。
+/.wix
 **/*.rs.bk
 *.pdb
 

@@ -31,12 +31,23 @@ out=target/installer
 mkdir -p "$out"
 # アプリの一覧に出す絵。TIP と同じく SVG から描く (ADR-0024)。
 cargo run --release -p crystalskk-art --example ico -- "$out/face.ico" assets/icons/face.svg
+# 使用許諾の画面に出す本文。LICENSE を正本として、行ごとに RTF の段落にする。
+{
+  printf '%s\n' '{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}}\f0\fs18'
+  sed -e 's/\\/\\\\/g' -e 's/{/\\{/g' -e 's/}/\\}/g' -e 's/$/\\par/' LICENSE
+  printf '%s\n' '}'
+} > "$out/license.rtf"
 dotnet tool restore
+# 画面は WiX の拡張にある。版は WiX に揃える。
+dotnet wix extension add WixToolset.UI.wixext/7.0.0
 dotnet wix build installer/crystalskk.wxs \
   -arch "$arch" \
   -d Version="$version" \
   -d BinDir="target/$target/release" \
   -d X86Dir="target/i686-pc-windows-msvc/release" \
   -d Icon="$out/face.ico" \
+  -d License="$out/license.rtf" \
+  -ext WixToolset.UI.wixext \
+  -culture ja-JP \
   -o "$out/CrystalSKK-$version-$arch.msi"
 echo "$out/CrystalSKK-$version-$arch.msi"
