@@ -105,9 +105,11 @@ MSI は `%ProgramFiles%\CrystalSKK\package\` に次を置く。ここから直�
   消える予約をする。他の利用者の `Run` に残った登録は消せないが、ログオンの
   ときに起動に失敗するだけで害はない。
 
-このために `crystalskk-setup` に、昇格せずに機械全体の部分だけを行う入口と、
-利用者の部分だけを行う入口を足す。元のファイルの場所は、`target/release` を
-探すのではなく引数で渡す。
+このために `crystalskk-setup` の `install` と `uninstall` に、管理者権限で
+行う手順だけを行う `--elevated-steps` と、利用者として行う手順だけを行う
+`--user-steps` を足す。「機械全体か利用者ごとか」という導入先の違いに
+見えないよう、手順の名前にする。元のファイルは、`crystalskk-setup.exe` の
+隣 (置き場) から探す。
 
 ### CPU の種類
 

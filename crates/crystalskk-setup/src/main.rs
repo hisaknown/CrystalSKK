@@ -1,8 +1,8 @@
 //! CrystalSKK をこの環境に導入する。
 //!
 //! ```text
-//! crystalskk-setup install [DLL]
-//! crystalskk-setup uninstall [--purge]
+//! crystalskk-setup install [DLL] [--elevated-steps | --user-steps]
+//! crystalskk-setup uninstall [--purge] [--elevated-steps | --user-steps]
 //! crystalskk-setup status
 //! crystalskk-setup log off|error|info|trace
 //! ```
@@ -11,8 +11,16 @@
 //! 権限がないときは自分を昇格して呼び直すので、利用者は UAC の確認に
 //! 応じるだけでよい。
 //!
-//! これは配布用のインストーラではない。本物のインストーラを作るときは、
-//! この処理をそのまま中身として使う。
+//! # 管理者権限の手順と利用者の手順
+//!
+//! 導入には、管理者権限で行う手順 (置く・登録する) と、導入する利用者として
+//! 行う手順 (辞書サーバを止めて起こす・設定ファイルを用意する) がある。
+//! 辞書サーバは利用者ごとに立つので、昇格した側や LocalSystem からは
+//! 扱えない。
+//!
+//! 何も付けなければ両方を行う。昇格して呼び直す側には管理者権限の手順だけを
+//! 頼み、利用者の手順は呼び出した本人のまま行う。MSI は `--elevated-steps` を
+//! LocalSystem で、`--user-steps` を利用者として呼ぶ (ADR-0037)。
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -54,36 +62,103 @@ fn run(arguments: Vec<String>) -> ExitCode {
         _ => {}
     }
 
+    let part = parsed.part;
+    let report = Report::new(parsed.report.as_deref());
+    match parsed.command {
+        Command::Install | Command::Uninstall if part == Part::User => {
+            if parsed.command == Command::Install {
+                clear_per_user_registration();
+                settings::prepare();
+            }
+            return do_user_steps(parsed.command, &report);
+        }
+        _ => {}
+    }
+
     // 利用者ごとの登録は、**昇格する前に**消す。昇格した側の
     // `HKEY_CURRENT_USER` は、この利用者のものとは限らない。別の管理者の
     // 資格情報で昇格すれば、そちらの利用者の登録を消して終わってしまう。
     //
     // ここは必ずログオンしている本人として動く。消すならここである。
-    if matches!(parsed.command, Command::Install | Command::Uninstall) {
+    if part == Part::Both && matches!(parsed.command, Command::Install | Command::Uninstall) {
         clear_per_user_registration();
     }
     // 設定ファイルも利用者ごとの場所にある。同じ理由で、昇格する前に。
-    // 昇格して呼び直された側 (報告の置き場所を渡されている) ではやらない。
-    if parsed.command == Command::Install && parsed.report.is_none() {
+    if part == Part::Both && parsed.command == Command::Install {
         settings::prepare();
     }
 
-    // 権限が要る操作。足りなければ昇格して同じことをやり直す。
+    // 権限が要る操作。足りなければ昇格して、管理者権限の手順だけをやり直す。
     if !parsed.no_elevate && !elevate::is_elevated() {
-        return elevated_pass(&arguments);
+        let both = part == Part::Both;
+        // 消すときは、先に辞書サーバに終わってもらう。握られたままでは消せない。
+        if both && parsed.command == Command::Uninstall {
+            do_user_steps(Command::Uninstall, &report);
+        }
+        let mut forwarded = arguments.clone();
+        if both && matches!(parsed.command, Command::Install | Command::Uninstall) {
+            forwarded.push("--elevated-steps".to_owned());
+        }
+        let code = elevated_pass(&forwarded);
+        if both && parsed.command == Command::Install && code == ExitCode::SUCCESS {
+            do_user_steps(Command::Install, &report);
+        }
+        return code;
     }
 
-    let report = Report::new(parsed.report.as_deref());
     match parsed.command {
-        Command::Install => do_install(
-            parsed.dll.as_deref(),
-            parsed.ranker_from.as_deref(),
-            &report,
-        ),
-        Command::Uninstall => do_uninstall(parsed.purge, &report),
+        Command::Install => {
+            let code = do_install(
+                parsed.dll.as_deref(),
+                parsed.ranker_from.as_deref(),
+                &report,
+            );
+            if part == Part::Both && code == ExitCode::SUCCESS {
+                do_user_steps(Command::Install, &report);
+            }
+            code
+        }
+        Command::Uninstall => {
+            if part == Part::Both {
+                do_user_steps(Command::Uninstall, &report);
+            }
+            do_uninstall(parsed.purge, &report)
+        }
         Command::Log(level) => do_log(level, &report),
         Command::Status | Command::Dict => unreachable!("上で処理済み"),
     }
+}
+
+/// 導入する利用者として行う手順。
+///
+/// 導入では、動いている辞書サーバに終わってもらい、置いたばかりのものを
+/// 起こす。サーバは起きたときに自分の自動起動を登録する (ADR-0037)。
+/// 削除では、サーバに終わってもらい、自動起動の登録を消す。
+fn do_user_steps(command: Command, report: &Report) -> ExitCode {
+    match command {
+        Command::Install => {
+            let directory = match install::install_dir() {
+                Ok(directory) => directory,
+                Err(e) => return fail(&e.to_string(), Some(report)),
+            };
+            report.say("\n");
+            if server::stop() {
+                report.say("動いていた辞書サーバに終わってもらいました。\n");
+            }
+            match server::start(&directory) {
+                Ok(()) => report.say("辞書サーバを起こしました。\n"),
+                Err(e) => report.say(&format!("辞書サーバを起こせません: {e}\n")),
+            }
+        }
+        Command::Uninstall => {
+            if server::stop() {
+                report.say("辞書サーバに終わってもらいました。\n");
+            }
+            server::unregister_autostart();
+        }
+        _ => unreachable!("利用者の手順があるのは install と uninstall だけ"),
+    }
+    ExitCode::SUCCESS
 }
 
 /// 利用者ごとの COM 登録を消す。
@@ -227,10 +302,10 @@ fn install_wow32(report: &Report) {
     }
 }
 
-/// 辞書サーバを入れ替え、起こし直す。
+/// 辞書サーバと言語モデル一式を入れ替える。
 ///
-/// **辞書を持っているのはサーバだけ** (ADR-0016) なので、これが居ないと
-/// 変換が一件も引けない。入れ替えたらその場で起こす。
+/// 起こすのは利用者の手順 ([`do_user_steps`]) の役目である。サーバは
+/// 利用者ごとに立つので、昇格した側から起こすと別人のサーバになりうる。
 fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
     let Some(directory) = dll.parent() else {
         return;
@@ -262,11 +337,6 @@ fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
         ranker_from,
         report,
     );
-
-    match server::start(directory) {
-        Ok(()) => report.say("辞書サーバを起こしました。\n"),
-        Err(e) => report.say(&format!("辞書サーバを起こせません: {e}\n")),
-    }
 }
 
 /// 結局どの DLL が使われるのかを、本人の目線で確かめて出す。
@@ -298,18 +368,15 @@ fn confirm_effective_registration() {
 }
 
 fn do_uninstall(purge: bool, report: &Report) -> ExitCode {
-    // 先に辞書サーバに終わってもらう。握られたままではファイルを消せず、
-    // 残しておく意味もない。
-    if server::stop() {
-        report.say("辞書サーバに終わってもらいました。\n");
-    }
-    server::unregister_autostart();
-
+    // 辞書サーバには、利用者の手順で先に終わってもらっている。
     match install::uninstall(purge) {
-        Ok(()) => {
+        Ok(scheduled) => {
             report.say("CrystalSKK の登録を解除しました。\n");
             if purge {
-                report.say("写した DLL も削除しました。\n");
+                report.say("写したものも削除しました。\n");
+            }
+            if scheduled {
+                report.say("使用中で消せなかったものは、次に再起動したときに消えます。\n");
             }
             ExitCode::SUCCESS
         }
@@ -463,6 +530,20 @@ struct Parsed {
     report: Option<PathBuf>,
     /// 言語モデル一式 (`build.py` の出力) のあるフォルダ。
     ranker_from: Option<PathBuf>,
+    /// 導入と削除のどの手順を行うか。
+    part: Part,
+}
+
+/// 導入と削除のどの手順を行うか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Part {
+    /// 両方。
+    #[default]
+    Both,
+    /// 管理者権限で行う手順だけ。置く・登録する・消す。
+    Elevated,
+    /// 導入する利用者として行う手順だけ。権限は要らない。
+    User,
 }
 
 /// 起動時の指定を読む係。
@@ -492,6 +573,8 @@ impl Options {
                 }
                 "--purge" => parsed.purge = true,
                 "--no-elevate" => parsed.no_elevate = true,
+                "--elevated-steps" => set_part(&mut parsed.part, Part::Elevated)?,
+                "--user-steps" => set_part(&mut parsed.part, Part::User)?,
                 "--ranker-from" => {
                     let path = rest
                         .next()
@@ -525,6 +608,12 @@ impl Options {
         if parsed.ranker_from.is_some() && command != Command::Install {
             return Err("--ranker-from は install にだけ使えます".to_owned());
         }
+        if parsed.part != Part::Both && !matches!(command, Command::Install | Command::Uninstall) {
+            return Err(
+                "--elevated-steps と --user-steps は install と uninstall にだけ使えます"
+                    .to_owned(),
+            );
+        }
         if parsed.dll.is_some() && command != Command::Install {
             return Err("DLL を渡せるのは install だけです".to_owned());
         }
@@ -532,6 +621,14 @@ impl Options {
         parsed.command = command;
         Ok(Some(parsed))
     }
+}
+
+fn set_part(slot: &mut Part, part: Part) -> Result<(), String> {
+    if *slot != Part::Both {
+        return Err("--elevated-steps と --user-steps は一つだけ書いてください".to_owned());
+    }
+    *slot = part;
+    Ok(())
 }
 
 fn set(slot: &mut Option<Command>, command: Command) -> Result<(), String> {
@@ -551,6 +648,10 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
                                       (省略時は target/ranker-model/out を探す)
   crystalskk-setup uninstall          登録を解除する
   crystalskk-setup uninstall --purge  写した DLL も削除する
+      --elevated-steps                管理者権限で行う手順だけを行う (インストーラ向け。
+                                      置く・登録する・消す)
+      --user-steps                    利用者として行う手順だけを行う (インストーラ向け。
+                                      辞書サーバを止めて起こす・設定ファイルを用意する)
   crystalskk-setup status             今の状態を表示する
   crystalskk-setup dict               設定に並べた辞書をいま取り直す (権限は要らない)
   crystalskk-setup log <段階>         診断の記録の細かさを決める
@@ -559,7 +660,7 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
 log の段階: off (既定) / error (失敗だけ) / info (節目の出来事) /
 trace (打鍵ごと。入力が重くなる)
 
-install と uninstall と log には管理者権限が要る。権限がなければ UAC の確認を出して
+install と uninstall (--user-steps を除く) と log には管理者権限が要る。権限がなければ UAC の確認を出して
 自分を呼び直すので、確認に応じてほしい。
 ";
 
@@ -621,6 +722,22 @@ mod tests {
     fn no_command_asks_for_the_usage() {
         assert!(parse(&[]).expect("読める").is_none());
         assert!(parse(&["--help"]).expect("読める").is_none());
+    }
+
+    #[test]
+    fn reads_which_part_to_do() {
+        let parsed = parse(&["install"]).expect("読める").expect("命令がある");
+        assert_eq!(parsed.part, Part::Both);
+        let parsed = parse(&["install", "--elevated-steps"])
+            .expect("読める")
+            .expect("命令がある");
+        assert_eq!(parsed.part, Part::Elevated);
+        let parsed = parse(&["uninstall", "--user-steps"])
+            .expect("読める")
+            .expect("命令がある");
+        assert_eq!(parsed.part, Part::User);
+        assert!(parse(&["install", "--elevated-steps", "--user-steps"]).is_err());
+        assert!(parse(&["log", "info", "--elevated-steps"]).is_err());
     }
 
     #[test]

@@ -26,6 +26,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crystalskk_tip::{icon, profile, registry};
+use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+use windows::core::HSTRING;
 
 /// 導入した結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,51 +295,71 @@ fn retired_base(name: &str) -> Option<&str> {
 /// 退けたものの名前に挟む印。
 const RETIRED_SUFFIX: &str = "old-";
 
-/// 削除する。`purge` が真なら写した DLL も消す。
+/// 削除する。`purge` が真なら写したものも消す。
+///
+/// 使用中で消せないものは、再起動したときに消える予約をする。予約したら
+/// `true` を返す。
 ///
 /// 登録されていなくても失敗にしない。中途半端な状態からでも、呼べば
 /// きれいになることを優先する。
-pub fn uninstall(purge: bool) -> io::Result<()> {
+pub fn uninstall(purge: bool) -> io::Result<bool> {
     let profile = profile::unregister_profile();
     let class = registry::unregister_class();
     let wow32 = registry::unregister_wow32_class();
 
+    let mut scheduled = false;
     if purge && let Ok(directory) = install_dir() {
-        let dll = directory.join(DLL_NAME);
-        if dll.exists() {
-            std::fs::remove_file(&dll).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!(
-                        "{} を消せません: {e}。\
-                         読み込んでいるアプリを閉じるか、サインインし直してから試してください。",
-                        dll.display()
-                    ),
-                )
-            })?;
-        }
-        sweep_retired(&directory);
-        // 32 ビットの DLL は 32 ビットのアプリにしか読み込まれない。消せな
-        // ければ残す。64 ビットのものが消えていれば、入力方式としては消えている。
-        let wow32_dir = wow32_dir(&directory);
-        let _ = std::fs::remove_file(wow32_dir.join(DLL_NAME));
-        sweep_retired(&wow32_dir);
-        let _ = std::fs::remove_dir(&wow32_dir);
-        let _ = std::fs::remove_file(directory.join(ICON_NAME));
-        // 空になったときだけ片付ける。他のものが入っていれば触らない。
-        let _ = std::fs::remove_dir(&directory);
-        // 言語モデル一式は、こちらが置いたものしか入っていない (ADR-0031)。
-        // 辞書サーバは先に止めてあるので、握られてもいない。
-        let _ = std::fs::remove_dir_all(crystalskk_server::paths::ranker_dir(&directory));
+        // `bin` と言語モデルの置き場には、こちらが置いたものしか入って
+        // いない (ADR-0031)。中身ごと消す。
+        scheduled |= purge_tree(&directory);
+        scheduled |= purge_tree(&crystalskk_server::paths::ranker_dir(&directory));
+        // 親はインストーラの置き場も入っているかもしれない。空のときだけ
+        // 消えるので、予約しても害はない。
         if let Some(parent) = directory.parent() {
-            let _ = std::fs::remove_dir(parent);
+            scheduled |= remove_or_schedule(parent, true);
         }
     }
 
     profile
         .and(class)
         .and(wow32)
-        .map_err(|e| to_io("登録の解除", e))
+        .map_err(|e| to_io("登録の解除", e))?;
+    Ok(scheduled)
+}
+
+/// フォルダを中身ごと消す。消せないものは再起動のときに消える予約をする。
+/// 予約したら `true`。
+fn purge_tree(directory: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    let mut scheduled = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        scheduled |= if path.is_dir() {
+            purge_tree(&path)
+        } else {
+            remove_or_schedule(&path, false)
+        };
+    }
+    // 中身の予約が先に並ぶので、再起動のときには空になっている。
+    scheduled | remove_or_schedule(directory, true)
+}
+
+/// 消す。使用中で消せなければ、再起動したときに消える予約をする。予約
+/// したら `true`。
+fn remove_or_schedule(path: &Path, directory: bool) -> bool {
+    let removed = if directory {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if removed.is_ok() || !path.exists() {
+        return false;
+    }
+    let path = HSTRING::from(path.as_os_str());
+    // SAFETY: 名前は有効な文字列。行き先を渡さないのは「消す」の意。
+    unsafe { MoveFileExW(&path, None, MOVEFILE_DELAY_UNTIL_REBOOT) }.is_ok()
 }
 
 /// 導入されているか調べる。
