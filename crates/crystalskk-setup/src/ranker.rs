@@ -27,16 +27,29 @@ use crate::report::Report;
 /// llama.cpp の版。crystalskk-lm が構造体を合わせた版と同じでなければならない。
 const LLAMA_CPP: &str = crystalskk_lm::LLAMA_VERSION;
 
-/// 取得する zip と、そのハッシュ。
+/// 取得する zip と、そのハッシュ。辞書サーバと同じ種類の CPU のもの
+/// (ADR-0037)。
+#[cfg(not(target_arch = "aarch64"))]
 const LLAMA_CPP_ZIP: &str = "llama-b11124-bin-win-cpu-x64.zip";
+#[cfg(not(target_arch = "aarch64"))]
 const LLAMA_CPP_SHA256: &str = "7eb4e7475f1730e0845e079e41f2e79b0c6de71d86731f755197129620a5bd28";
+#[cfg(target_arch = "aarch64")]
+const LLAMA_CPP_ZIP: &str = "llama-b11124-bin-win-cpu-arm64.zip";
+#[cfg(target_arch = "aarch64")]
+const LLAMA_CPP_SHA256: &str = "120f055384dd090094699ed5f4a6636755dbfc04bb1199ea7a0d9bc8f2a5ad6f";
 
-/// zip から取り出すもの。CPU の実装は CPU ごとに分かれていて、動かす
-/// 機械に合うものを llama.cpp が選ぶので、全部取り出す。
+/// zip から取り出すもの。x64 では CPU の実装が CPU ごとに分かれていて、
+/// 動かす機械に合うものを llama.cpp が選ぶので、全部取り出す。ARM64 では
+/// 一つ (`ggml-cpu.dll`) にまとまっている。
 fn wanted(name: &str) -> bool {
     matches!(
         name,
-        "llama.dll" | "ggml.dll" | "ggml-base.dll" | "libomp.dll" | "LICENSE-LLVM-OpenMP"
+        "llama.dll"
+            | "ggml.dll"
+            | "ggml-base.dll"
+            | "ggml-cpu.dll"
+            | "libomp.dll"
+            | "LICENSE-LLVM-OpenMP"
     ) || (name.starts_with("ggml-cpu-") && name.ends_with(".dll"))
 }
 
@@ -245,6 +258,7 @@ mod tests {
     fn only_what_llama_needs_is_taken_from_the_zip() {
         assert!(wanted("llama.dll"));
         assert!(wanted("ggml-cpu-zen4.dll"));
+        assert!(wanted("ggml-cpu.dll"));
         assert!(wanted("LICENSE-LLVM-OpenMP"));
         assert!(!wanted("llama-cli.exe"));
         assert!(!wanted("ggml-rpc.dll"));
