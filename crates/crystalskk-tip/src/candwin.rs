@@ -342,7 +342,7 @@ impl CandidateWindow {
         }));
         // SAFETY: 直前に作った箱を預け、前に預けていた分はここで落とす。
         unsafe {
-            let previous = SetWindowLongPtrW(hwnd, GWLP_USERDATA, stored as isize);
+            let previous = SetWindowLongPtrW(hwnd, GWLP_USERDATA, stored as _);
             if previous != 0 {
                 drop(Box::from_raw(previous as *mut Painted));
             }
@@ -433,8 +433,8 @@ impl CandidateWindow {
         // SAFETY: どちらも有効な窓。親の付け替えは Windows が認めている。
         unsafe {
             let current = GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT);
-            if current != owner.0 as isize {
-                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            if current as usize != owner.0 as usize {
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as _);
             }
         }
     }

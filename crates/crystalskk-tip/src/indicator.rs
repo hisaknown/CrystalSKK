@@ -101,11 +101,11 @@ impl ModeWindow {
         // SAFETY: 窓は自分で作ったもの。描く中身は `self` にあり、窓より長く
         // 生きる (窓は `close` か `Drop` で壊す)。
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, std::ptr::from_ref(self) as isize);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, std::ptr::from_ref(self) as _);
             // 持ち主を入力先の窓にする。**持ち主の無い窓は、アプリの描画面の
             // 下に潜ることがある。** 候補の窓で一度はまった。
             if let Some(owner) = owner {
-                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as _);
             }
         }
 

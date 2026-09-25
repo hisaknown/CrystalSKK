@@ -300,7 +300,7 @@ impl Watcher {
         let handler: Box<Handler> = Box::new(Box::new(changed));
         // SAFETY: 預けた箱は窓が壊れるときに引き取る。
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(handler) as isize);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(handler) as _);
         }
         Some(Self {
             hwnd: RefCell::new(hwnd),
