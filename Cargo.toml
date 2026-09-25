@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.93"
-repository = "https://github.com/rutto/crystalskk"
+repository = "https://github.com/hisaknown/CrystalSKK"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
