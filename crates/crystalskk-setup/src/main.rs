@@ -100,8 +100,14 @@ fn run(arguments: Vec<String>) -> ExitCode {
             forwarded.push("--elevated-steps".to_owned());
         }
         let code = elevated_pass(&forwarded);
-        if both && parsed.command == Command::Install && code == ExitCode::SUCCESS {
-            do_user_steps(Command::Install, &report);
+        if parsed.command == Command::Install {
+            if both && code == ExitCode::SUCCESS {
+                do_user_steps(Command::Install, &report);
+            }
+            // 昇格した側の報告を鵜呑みにしない。**本人として見た結果**を
+            // 確かめる。昇格した側の `HKEY_CURRENT_USER` は別人のものかも
+            // しれず、向こうから見えている景色は当てにならない。
+            confirm_effective_registration();
         }
         return code;
     }
@@ -194,10 +200,6 @@ fn elevated_pass(arguments: &[String]) -> ExitCode {
             if let Some(message) = report::take(&report_path) {
                 print!("{message}");
             }
-            // 昇格した側の報告を鵜呑みにしない。**本人として見た結果**を
-            // 確かめる。昇格した側の `HKEY_CURRENT_USER` は別人のものかも
-            // しれず、向こうから見えている景色は当てにならない。
-            confirm_effective_registration();
             if code == 0 {
                 ExitCode::SUCCESS
             } else {
