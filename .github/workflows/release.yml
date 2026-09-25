@@ -1,0 +1,64 @@
+name: Release
+
+# `v0.1.0` のようなタグを push すると、x64 と ARM64 の MSI を作り、下書きの
+# Release に上げる (ADR-0037)。中身を確かめてから、手で公開する。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  msi:
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 版は rust-toolchain.toml で固定している。
+      - run: rustup toolchain install
+      - run: rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc i686-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+      - name: The tag matches the workspace version
+        shell: bash
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | sed -n 's/.*"name":"crystalskk-setup","version":"\([^"]*\)".*/\1/p')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+      - run: dotnet tool restore
+      # WiX の使用許諾 (OSMF) には、この CI を動かすリポジトリの持ち主が同意している。
+      - run: dotnet wix eula accept wix7
+      - name: Build the MSI
+        shell: bash
+        run: installer/build.sh ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-${{ matrix.arch }}
+          path: target/installer/*.msi
+          if-no-files-found: error
+
+  # 下書きは一つにまとめて作る。二つのジョブがそれぞれ作ると、下書きが
+  # 二つできることがある。
+  release:
+    needs: msi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: msi-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: "*.msi"
