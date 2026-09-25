@@ -110,6 +110,10 @@ pub struct Ranker {
     pub before: usize,
     /// カーソルより後の文章を何文字見せるか。0 なら見せない。
     pub after: usize,
+    /// 辞書の順で上から何個までを並べ替えるか。
+    pub top: usize,
+    /// 前後の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
+    pub min_context: usize,
     /// 採点に使うスレッドの数。
     pub threads: usize,
 }
@@ -566,6 +570,8 @@ fn ranker(table: &Table) -> Result<Ranker, Error> {
             .map_err(|_| Error::new("ranker.deadline_ms が大きすぎます"))?,
         before: count(table, "ranker", "before")?,
         after: amount(table, "ranker", "after")?,
+        top: count(table, "ranker", "top")?,
+        min_context: amount(table, "ranker", "min_context")?,
         threads: count(table, "ranker", "threads")?,
     })
 }
@@ -1147,6 +1153,8 @@ mod tests {
             ("weight = 1.0", "weight = -1.0", "ranker.weight"),
             ("after = 5", "after = -1", "0 以上の整数"),
             ("threads = 4", "threads = \"four\"", "ranker.threads"),
+            ("top = 7", "top = 0", "ranker.top"),
+            ("min_context = 2", "min_context = -1", "ranker.min_context"),
         ];
         for (from, to, expected) in cases {
             let user = TEMPLATE.replace(from, to);

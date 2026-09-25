@@ -28,6 +28,8 @@ fn ranker() -> Option<LmRanker<LlamaScorer>> {
             deadline: Duration::from_secs(5),
             before: 100,
             after: 5,
+            top: 7,
+            min_context: 0,
         },
     ))
 }

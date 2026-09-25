@@ -14,6 +14,13 @@
 //! 編集で整えられた頻度の順でもあるので、採点に `−weight·ln(順位)` を足して
 //! 並べる。
 //!
+//! # 当てにならないときは並べない
+//!
+//! 並べ替えるのは辞書の上位だけである。`ln(順位)` は後ろのほうでほとんど
+//! 差がつかず、候補が多いほど、たまたま良い点を取る外れも出やすい。
+//! 前後の文章がほとんど無いときも並べない。採点が「文脈抜きで、ありふれた
+//! 短い文字列か」になり、辞書の順より当たらない。
+//!
 //! # 締め切りを守る
 //!
 //! 間に合わなければ並びを変えない。言語モデルが無い、読めない、壊れて
@@ -137,6 +144,10 @@ pub struct Policy {
     pub before: usize,
     /// 後ろの文章を何文字見せるか。
     pub after: usize,
+    /// 辞書の順で上から何個までを並べ替えるか。
+    pub top: usize,
+    /// 前後の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
+    pub min_context: usize,
 }
 
 /// 言語モデルで候補を並べるランカー。
@@ -157,15 +168,34 @@ impl<S: Scorer> LmRanker<S> {
 
 impl<S: Scorer> Ranker for LmRanker<S> {
     fn rank(&self, context: &Context, query: &Query, candidates: &mut Vec<Candidate>) {
-        if candidates.len() < 2 {
+        let top = self.policy.top.min(candidates.len());
+        if top < 2 {
             return;
         }
         let before = context.text_before(self.policy.before);
         let after = context.text_after(self.policy.after);
-        // 手がかりが何も無ければ、辞書の順より良くなる見込みは薄い。
-        if before.is_empty() && after.is_empty() {
+        // 手がかりがほとんど無ければ、辞書の順より良くなる見込みは薄い。
+        if before.is_empty() && after.is_empty() || clues(&before, &after) < self.policy.min_context
+        {
             return;
         }
+        let mut rest = candidates.split_off(top);
+        self.rank_head(&before, &after, query, candidates);
+        candidates.append(&mut rest);
+    }
+}
+
+/// 手がかりになる文字の数。句読点・記号・空白は数えない。
+fn clues(before: &str, after: &str) -> usize {
+    before
+        .chars()
+        .chain(after.chars())
+        .filter(|c| c.is_alphanumeric())
+        .count()
+}
+
+impl<S: Scorer> LmRanker<S> {
+    fn rank_head(&self, before: &str, after: &str, query: &Query, candidates: &mut Vec<Candidate>) {
         let texts: Vec<String> = candidates
             .iter()
             .map(|c| c.to_text(query.okuri.as_deref()))
@@ -174,7 +204,7 @@ impl<S: Scorer> Ranker for LmRanker<S> {
         let Some(scores) = self
             .scorer
             .borrow_mut()
-            .score(&before, &texts, &after, deadline)
+            .score(before, &texts, after, deadline)
         else {
             return;
         };
@@ -234,6 +264,8 @@ mod tests {
                 deadline: Duration::from_secs(1),
                 before: 3,
                 after: 2,
+                top: 3,
+                min_context: 1,
             },
         )
     }
@@ -307,6 +339,41 @@ mod tests {
         );
         assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
         assert!(r.scorer.borrow().seen.is_empty(), "採点もしない");
+    }
+
+    #[test]
+    fn nothing_moves_with_only_punctuation_around() {
+        let r = ranker(&[-9.0, -8.0, -1.0], 0.0);
+        let mut candidates = kanji();
+        r.rank(
+            &context(
+                "。
+「", "",
+            ),
+            &Query::okuri_nashi("かんじ"),
+            &mut candidates,
+        );
+        assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
+        assert!(r.scorer.borrow().seen.is_empty(), "採点もしない");
+    }
+
+    #[test]
+    fn only_the_top_of_the_dictionary_is_reordered() {
+        let r = ranker(&[-9.0, -8.0, -1.0], 0.0);
+        let mut candidates = ["漢字", "感じ", "幹事", "監事", "寛治"]
+            .map(Candidate::new)
+            .to_vec();
+        r.rank(
+            &context("会議の", ""),
+            &Query::okuri_nashi("かんじ"),
+            &mut candidates,
+        );
+        assert_eq!(words(&candidates), ["幹事", "感じ", "漢字", "監事", "寛治"]);
+        assert_eq!(
+            r.scorer.borrow().seen[0].1,
+            ["漢字", "感じ", "幹事"],
+            "上位だけ採点する"
+        );
     }
 
     #[test]

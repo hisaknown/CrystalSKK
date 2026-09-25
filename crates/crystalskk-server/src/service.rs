@@ -398,6 +398,8 @@ fn language_model(settings: &crystalskk_settings::Ranker, ranker_dir: &Path) -> 
         deadline: Duration::from_millis(u64::from(settings.deadline_ms)),
         before: settings.before,
         after: settings.after,
+        top: settings.top,
+        min_context: settings.min_context,
     };
     Ok(Some(Box::new(crystalskk_lm::LmRanker::new(scorer, policy))))
 }
@@ -554,6 +556,8 @@ mod tests {
             deadline_ms: 100,
             before: 100,
             after: 5,
+            top: 7,
+            min_context: 2,
             threads: 4,
         }
     }
