@@ -579,14 +579,9 @@ impl Engine {
             Key::Ctrl(_) | Key::Tab | Key::Up | Key::Down => false,
             // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
             Key::Enter => !self.registrations.is_empty() || self.romaji.pending_kana().is_some(),
-            // 消すものがあるときだけ受け取る。
-            Key::Backspace => {
-                !self.romaji.is_empty()
-                    || self
-                        .registrations
-                        .last()
-                        .is_some_and(|r| !r.buffer.is_empty())
-            }
+            // 消すものがあるときだけ受け取る。登録中はいつでも受け取る。
+            // **登録語が空でもアプリへ渡すと、置いてある未確定が消える。**
+            Key::Backspace => registering || !self.romaji.is_empty(),
         }
     }
 
@@ -780,10 +775,31 @@ impl Engine {
     /// 現在の未確定表示。
     pub fn preedit(&self) -> Preedit {
         let registering = self.registrations.last().map(|r| r.query.key.clone());
-        match &self.state {
+        Self::preedit_of(&self.state, self.romaji.pending(), registering)
+    }
+
+    /// 辞書登録のあいだ、文書に置いたままにしておく未確定の表示。
+    /// 登録中でなければ `None`。
+    ///
+    /// 登録語として打つ文字は文書には入らない (ADR-0002) が、**登録に
+    /// 入る前に見えていたものまで消すと、どこを登録しているのか分からなく
+    /// なる。** 置いておくのは、一番外側の登録を取りやめたときに戻る姿で
+    /// ある。抜けたときに文書が跳ねない。
+    pub fn held_preedit(&self) -> Option<Preedit> {
+        let frame = self.registrations.first()?;
+        let state = match &frame.resume {
+            Some(selecting) => State::Selecting(selecting.clone()),
+            None => State::Composing(frame.origin.clone()),
+        };
+        Some(Self::preedit_of(&state, "", None))
+    }
+
+    /// `state` を、打ちかけのローマ字 `pending` と合わせて見せる姿。
+    fn preedit_of(state: &State, pending: &str, registering: Option<String>) -> Preedit {
+        match state {
             State::Direct => Preedit {
                 marker: Marker::None,
-                segments: vec![Segment::new(Role::Midashi, self.romaji.pending())],
+                segments: vec![Segment::new(Role::Midashi, pending)],
                 registering,
             },
             State::Composing(c) => {
@@ -802,15 +818,15 @@ impl Engine {
                         segments.push(Segment::new(Role::Separator, OKURI_MARK));
                         segments.push(Segment::new(
                             Role::Okuri,
-                            format!("{}{}", okuri.kana, self.romaji.pending()),
+                            format!("{}{pending}", okuri.kana),
                         ));
                     }
                     None => {
                         if let Some(last) = segments.last_mut() {
-                            last.text.push_str(self.romaji.pending());
+                            last.text.push_str(pending);
                         }
                         // まだ打っていない文字を、打った文字の後ろに見せる。
-                        if self.romaji.is_empty()
+                        if pending.is_empty()
                             && let Some(ghost) = c.completion.as_ref().and_then(Completion::ghost)
                         {
                             segments.push(Segment::new(Role::Completion, ghost));
@@ -1016,11 +1032,10 @@ impl Engine {
                 if self.romaji.backspace() {
                     return;
                 }
+                // 登録中は、消すものが無くても食べる。欄が空なら何もしない。
                 match self.registrations.last_mut() {
                     Some(reg) => {
-                        if reg.buffer.pop().is_none() {
-                            out.handled = false;
-                        }
+                        reg.buffer.pop();
                     }
                     None => out.handled = false,
                 }
@@ -1071,10 +1086,9 @@ impl Engine {
                 self.finish_registration(out);
             }
             (_, Key::Backspace) if !self.registrations.is_empty() => {
-                if let Some(frame) = self.registrations.last_mut()
-                    && frame.buffer.pop().is_none()
-                {
-                    out.handled = false;
+                // 欄が空でも食べる。アプリへ渡すと未確定が消える。
+                if let Some(frame) = self.registrations.last_mut() {
+                    frame.buffer.pop();
                 }
             }
             (_, Key::Escape | Key::Ctrl('g')) if !self.registrations.is_empty() => {

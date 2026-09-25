@@ -114,9 +114,8 @@ pub struct TextService {
     owner: RefCell<Option<windows::Win32::Foundation::HWND>>,
     /// 最後に分かった、未確定の文字列の画面上の位置。
     ///
-    /// 辞書登録中は文書に何も書かないので、位置を尋ねる相手がいない。
-    /// **直前まで書いていた場所のそばに出すのが、いちばん近い見当**
-    /// になる。
+    /// 位置を尋ねられないとき (未確定が無いときなど) は、**直前まで
+    /// 書いていた場所のそばに出すのが、いちばん近い見当**になる。
     anchor: RefCell<Option<windows::Win32::Foundation::RECT>>,
     /// 見え方に振られた番号。有効化のときに一度取る。
     ///
@@ -686,12 +685,12 @@ impl TextService {
                 Some(okuri) => format!("{}{okuri}", registration.key),
                 None => registration.key.clone(),
             };
-            // 溜まった語と、いま打ちかけの文字列を繋いで見せる。
+            // 溜まった語と、いま打ちかけの文字列を並べて見せる。
             // 打ちかけの分を落とすと、打った字が消えたように見える。
-            let text = format!("{}{}", registration.buffer, engine.preedit().display());
             return Some(Content::Registration(Registration {
                 key,
-                text,
+                typed: registration.buffer,
+                composing: engine.preedit().display(),
                 depth: registration.depth,
             }));
         }
@@ -978,19 +977,20 @@ impl TextService_Impl {
         // もう進んでいる。ここで慌てても直せないので、食べたことだけは
         // 正しく伝える。
         //
-        // **辞書登録中は文書に何も書かない。** 登録語として打っている文字は
-        // 登録の枠に溜まるものであって、文書に入るものではない。途中の
-        // ローマ字だけが文書に現れては、どこへ打っているのか分からなくなる。
+        // **辞書登録中は、登録に入る前の未確定を置いたままにする。**
+        // 登録語として打っている文字は登録の枠に溜まるもので、文書には
+        // 入らない (窓の入力欄に出す)。かといって文書から消すと、どこを
+        // 登録しているのか分からなくなり、抜けたときに急に戻って跳ねる。
         //
         // 区切りごとに見え方の番号を添える。**どう見せるかは
         // [`crate::display`] が決め、貼るのは [`crate::edit`] がやる。**
-        let preedit: Vec<(u32, String)> = if response.preedit.registering.is_some() {
-            Vec::new()
-        } else {
+        let held = self.this.engine.borrow().held_preedit();
+        let shown = held.as_ref().unwrap_or(&response.preedit);
+        let preedit: Vec<(u32, String)> = {
             let atoms = *self.this.atoms.borrow();
             let settings = self.this.settings.borrow();
             let markers = settings.as_ref().map(|settings| &settings.markers);
-            crate::display::document_segments(&response.preedit.segments, atoms, markers)
+            crate::display::document_segments(&shown.segments, atoms, markers)
         };
         let sink: ITfCompositionSink = self.to_interface();
         // 借用を編集セッションより長く持たない。呼んだ先から戻って
@@ -1312,12 +1312,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         })
     }
 
-    fn OnTestKeyDown(
-        &self,
-        pic: Ref<ITfContext>,
-        wparam: WPARAM,
-        _lparam: LPARAM,
-    ) -> Result<BOOL> {
+    fn OnTestKeyDown(&self, pic: Ref<ITfContext>, wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
         guard("OnTestKeyDown", || Ok(self.would_handle_key(pic, wparam)))
     }
 

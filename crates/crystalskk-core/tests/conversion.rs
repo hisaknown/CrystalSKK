@@ -599,6 +599,59 @@ fn exhausting_candidates_enters_registration() {
 }
 
 #[test]
+fn registration_holds_what_was_shown_before_it() {
+    let mut s = Session::new();
+    assert!(s.engine.held_preedit().is_none(), "登録中でなければ無い");
+
+    s.type_keys("Kanji    ");
+    let held = s.engine.held_preedit().expect("登録中");
+    // 取りやめれば候補選択の最後へ戻る。文書にはその姿を置いておく。
+    let shown_before = held.display();
+    assert!(shown_before.starts_with('▼'), "{shown_before}");
+
+    // 登録語を打っても、置いてあるものは変わらない。
+    s.type_keys("kan");
+    assert_eq!(s.engine.held_preedit().unwrap().display(), shown_before);
+
+    // 取りやめたら、置いていたものがそのまま戻る。
+    while s.engine.registration_depth() > 0 {
+        s.press(Key::Ctrl('g'));
+    }
+    assert_eq!(s.engine.preedit().display(), shown_before);
+}
+
+#[test]
+fn backspace_on_an_empty_registration_stays_in_the_registration() {
+    let mut s = Session::new();
+    s.type_keys("Kanji    ");
+    let held = s.engine.held_preedit().unwrap().display();
+    for mode_switch in ["", "l"] {
+        s.type_keys(mode_switch);
+        for _ in 0..3 {
+            assert!(
+                s.engine.would_handle(Key::Backspace),
+                "空の欄でもアプリへ渡さない"
+            );
+            assert!(s.engine.press(Key::Backspace).handled);
+        }
+        assert_eq!(s.engine.registration_depth(), 1, "登録は続く");
+        assert_eq!(s.engine.held_preedit().unwrap().display(), held);
+    }
+}
+
+#[test]
+fn a_heading_nobody_knows_is_held_as_a_heading() {
+    let mut s = Session::new();
+    s.type_keys("HashiRu");
+    let held = s.engine.held_preedit().expect("登録中");
+    assert!(held.display().starts_with('▽'), "{}", held.display());
+    assert!(
+        held.registering.is_none(),
+        "置いておく分は登録の表示ではない"
+    );
+}
+
+#[test]
 fn okuri_registration_keeps_the_okuri_out_of_the_registered_word() {
     let mut s = Session::new();
     s.type_keys("HashiRu");

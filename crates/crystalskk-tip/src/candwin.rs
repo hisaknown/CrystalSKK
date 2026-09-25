@@ -113,6 +113,14 @@ impl Content {
         }
     }
 
+    /// 入力欄を描く中身なら、その様子。
+    fn field(&self) -> Option<&Registration> {
+        match self {
+            Self::Registration(registration) => Some(registration),
+            _ => None,
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.lines().is_empty()
     }
@@ -209,27 +217,35 @@ impl Completion {
 }
 
 /// 辞書登録の様子。
+///
+/// 見出しの行の下に、**本物の入力欄に似せた欄**を描く。欄の中では、
+/// 登録語として溜まった分は普通の字で、打ちかけの分は文書の未確定と
+/// 同じく下線を引いて見せ、末尾に縦棒のカーソルを立てる。
 #[derive(Debug, Default, Clone)]
 pub struct Registration {
     /// 登録しようとしている見出し語。送り仮名があれば含める。
     pub key: String,
-    /// これまでに溜まった語と、いま入力中の文字列を繋げたもの。
-    pub text: String,
+    /// 登録語としてもう溜まった分。
+    pub typed: String,
+    /// いま打ちかけの分。印も含めて、文書に出すのと同じ姿。
+    pub composing: String,
     /// 積まれている枠の数。入れ子の深さを括弧の数で示す。
     pub depth: usize,
 }
 
 impl Registration {
+    /// 見出しの行。入力欄は [`paint`] が別に描く。
     fn lines(&self) -> Vec<Line> {
         // 入れ子の深さを括弧の数で示す。CorvusSKK と同じ見せ方で、
         // **登録の中で登録が始まったことが一目で分かる。**
         let open = "[".repeat(self.depth.max(1));
         let close = "]".repeat(self.depth.max(1));
-        // 文字の入る場所を示す印。窓には本物のカーソルが無い。
-        vec![Line::plain(format!(
-            "{open}登録{close} {}: {}│",
-            self.key, self.text
-        ))]
+        vec![Line::plain(format!("{open}登録{close} {}", self.key))]
+    }
+
+    /// 欄に入る文字列の全体。
+    fn text(&self) -> String {
+        format!("{}{}", self.typed, self.composing)
     }
 }
 
@@ -650,6 +666,85 @@ fn paint(hwnd: HWND, painted: &Painted) {
             return;
         }
 
+        // 辞書登録は、見出しの行と入力欄の二段に描く。
+        if let Some(registration) = content.field() {
+            let label = content
+                .lines()
+                .into_iter()
+                .next()
+                .map(|line| line.text)
+                .unwrap_or_default();
+            let label_row = draw::rect(
+                pad,
+                WINDOW_PAD,
+                layout.width - pad,
+                WINDOW_PAD + layout.line,
+            );
+            text(
+                &label,
+                &line_format,
+                label_row,
+                mix(palette.text, palette.background),
+            );
+
+            // 欄。地を塗って縁を引き、下辺だけを強い色で太くする。
+            // **Windows の入力欄が焦点を持ったときの見え方に倣う。**
+            let half = hair / 2.0;
+            let top = WINDOW_PAD + layout.line;
+            let field = draw::rect(
+                WINDOW_PAD + half,
+                top + half,
+                layout.width - WINDOW_PAD - half,
+                top + layout.line - half,
+            );
+            fill(field, FIELD_RADIUS, palette.background);
+            if let Some(pen) = brush(palette.border) {
+                let edge = D2D1_ROUNDED_RECT {
+                    rect: field,
+                    radiusX: FIELD_RADIUS,
+                    radiusY: FIELD_RADIUS,
+                };
+                // SAFETY: 描いている最中の描く先に、線を引かせるだけ。
+                unsafe { target.DrawRoundedRectangle(&edge, &pen, hair, None) };
+            }
+            let accent = draw::rect(
+                field.left + FIELD_RADIUS / 2.0,
+                field.bottom - FIELD_ACCENT,
+                field.right - FIELD_RADIUS / 2.0,
+                field.bottom,
+            );
+            fill(accent, FIELD_ACCENT / 2.0, palette.key);
+
+            // 中身。溜まった分、打ちかけの分、カーソルの順に並べる。
+            let start = field.left + ROW_PAD;
+            let end = field.right - ROW_PAD;
+            let row = draw::rect(start, field.top, end, field.bottom);
+            text(&registration.text(), &line_format, row, palette.text);
+            let (typed, _) = draw::measure(&registration.typed, &line_format, f32::MAX);
+            let (composing, _) = draw::measure(&registration.composing, &line_format, f32::MAX);
+            let middle = (field.top + field.bottom) / 2.0;
+            let glyph_top = middle - layout.glyph / 2.0;
+            let glyph_bottom = middle + layout.glyph / 2.0;
+            // 打ちかけの分には、文書の未確定と同じく下線を引く。
+            if composing > 0.0 {
+                let left = start + typed;
+                let under = draw::rect(
+                    left,
+                    glyph_bottom,
+                    (left + composing).min(end),
+                    glyph_bottom + hair,
+                );
+                fill(under, 0.0, palette.text);
+            }
+            let caret = (start + typed + composing).min(end);
+            fill(
+                draw::rect(caret, glyph_top, caret + CARET_WIDTH * hair, glyph_bottom),
+                0.0,
+                palette.text,
+            );
+            return;
+        }
+
         let lead = content.lead();
         let highlight = content.highlight();
         for (index, line) in content.lines().iter().enumerate() {
@@ -780,6 +875,8 @@ struct Layout {
     key: f32,
     /// 本文の左に空ける幅。
     lead: f32,
+    /// 文字そのものの高さ。入力欄のカーソルの長さにする。
+    glyph: f32,
 }
 
 impl Layout {
@@ -798,7 +895,19 @@ impl Layout {
         };
         let edge = (WINDOW_PAD + ROW_PAD) * 2.0;
 
-        let (width, height) = if content.wraps() {
+        let (width, height) = if let Some(registration) = content.field() {
+            // 見出しの行と入力欄の二段。欄は打った字が少なくても狭く
+            // しすぎない。**一字ぶんの幅しか無いと、欄に見えない。**
+            let label = content.lines().first().map_or(0.0, |line| {
+                draw::measure(&line.text, line_format, f32::MAX).0
+            });
+            let (text, _) = draw::measure(&registration.text(), line_format, f32::MAX);
+            let field = (text + FIELD_CARET_ROOM + ROW_PAD * 2.0).max(FIELD_MIN_WIDTH);
+            (
+                (label + ROW_PAD * 2.0).max(field) + WINDOW_PAD * 2.0,
+                line * 2.0 + WINDOW_PAD * 2.0,
+            )
+        } else if content.wraps() {
             // 折り返したときの大きさを、描く前に尋ねる。
             let body = content
                 .lines()
@@ -832,6 +941,7 @@ impl Layout {
             line,
             key,
             lead,
+            glyph: text_height,
         }
     }
 }
@@ -911,6 +1021,21 @@ const NOTE_WIDTH: f32 = 240.0;
 
 /// 注釈だけの窓を折り返す幅。
 const WRAP_WIDTH: f32 = 360.0;
+
+/// 辞書登録の入力欄の、いちばん狭いときの幅。
+const FIELD_MIN_WIDTH: f32 = 200.0;
+
+/// 入力欄の角の丸み。
+const FIELD_RADIUS: f32 = 4.0;
+
+/// 入力欄の下辺の、強い色の線の太さ。
+const FIELD_ACCENT: f32 = 2.0;
+
+/// 入力欄で、打った字の後ろにカーソルのために空ける幅。
+const FIELD_CARET_ROOM: f32 = 4.0;
+
+/// 入力欄のカーソルの太さ。画素で数える。
+const CARET_WIDTH: f32 = 1.0;
 
 #[cfg(test)]
 mod tests {
@@ -1036,22 +1161,24 @@ mod tests {
     }
 
     #[test]
-    fn registration_shows_the_key_and_what_has_been_typed() {
-        let line = Content::Registration(Registration {
+    fn registration_shows_the_key_above_the_field() {
+        let content = Content::Registration(Registration {
             key: "かんじ".to_owned(),
-            text: "漢字".to_owned(),
+            typed: "漢".to_owned(),
+            composing: "▽じ".to_owned(),
             depth: 1,
-        })
-        .lines();
-        assert_eq!(line, vec!["[登録] かんじ: 漢字│"]);
+        });
+        assert_eq!(content.lines(), vec!["[登録] かんじ"]);
+        let field = content.field().expect("入力欄を描く");
+        assert_eq!(field.text(), "漢▽じ", "溜まった分に打ちかけの分が続く");
     }
 
     #[test]
     fn nesting_is_shown_by_the_brackets() {
         let line = Content::Registration(Registration {
             key: "かんじ".to_owned(),
-            text: String::new(),
             depth: 2,
+            ..Registration::default()
         })
         .lines();
         assert!(
