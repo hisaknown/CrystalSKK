@@ -36,7 +36,12 @@ pub struct Image {
 impl Image {
     /// 濃さ (透過度) だけ。一画素 1 バイト。
     pub fn coverage(&self) -> Vec<u8> {
-        self.rgba.chunks_exact(4).map(|pixel| pixel[3]).collect()
+        self.rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect()
     }
 }
 
@@ -118,7 +123,7 @@ pub fn png(image: &Image) -> Result<Vec<u8>, Error> {
     for (target, pixel) in pixmap
         .pixels_mut()
         .iter_mut()
-        .zip(image.rgba.chunks_exact(4))
+        .zip(image.rgba.as_chunks::<4>().0)
     {
         *target = resvg::tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3])
             .premultiply();
