@@ -208,7 +208,7 @@ impl MemoryDict {
             .iter()
             .filter(|(okuri_ari, _)| !okuri_ari)
             .map(|(_, key)| key.as_str())
-            .filter(|key| key.starts_with(prefix))
+            .filter(|key| key.starts_with(prefix) && completes(key))
             .take(limit)
             .collect()
     }
@@ -224,6 +224,7 @@ impl MemoryDict {
         self.okuri_nashi
             .range(prefix.to_owned()..)
             .take_while(|(key, _)| key.starts_with(prefix))
+            .filter(|(key, _)| completes(key))
             .take(limit)
             .map(|(key, _)| key.as_str())
             .collect()
@@ -324,6 +325,14 @@ fn section_marker(line: &str) -> Option<bool> {
     }
 }
 
+/// 補完に出してよい見出しか。
+///
+/// 接頭辞の見出し (`さい>`) は出さない。**`>` を打てばその場で変換される**
+/// ので、補完で選ぶ場面が無い。出せば「さい」から続く本当の語を押しのける。
+fn completes(key: &str) -> bool {
+    !key.ends_with('>')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +423,16 @@ skk /SKK/
         dict.learn(&query, "幹事");
         let words: Vec<String> = dict.lookup(&query).iter().map(|c| c.word.clone()).collect();
         assert_eq!(words, ["幹事", "漢字", "感じ"]);
+    }
+
+    #[test]
+    fn prefixes_are_not_offered_for_completion() {
+        let mut dict = MemoryDict::new();
+        for key in ["さい>", "さいご"] {
+            dict.learn(&Query::okuri_nashi(key), "語");
+        }
+        assert_eq!(dict.complete("さい", 8), ["さいご"]);
+        assert_eq!(dict.complete_recent("さい", 8), ["さいご"]);
     }
 
     #[test]
