@@ -33,6 +33,7 @@ pub mod dialog;
 pub mod dict;
 pub mod display;
 pub mod dpi;
+pub mod draw;
 pub mod edit;
 pub mod factory;
 pub mod guard;

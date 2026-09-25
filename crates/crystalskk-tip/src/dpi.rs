@@ -17,9 +17,7 @@
 //! 取り違えると二重に伸びるので、アプリの扱いを見てから決める。
 
 use windows::Win32::Foundation::POINT;
-use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, HFONT, MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
-};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_PER_MONITOR_AWARE, DPI_AWARENESS_SYSTEM_AWARE,
     GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor, GetDpiForSystem,
@@ -57,11 +55,11 @@ pub fn scale(value: i32, dpi: u32) -> i32 {
     i32::try_from(scaled).unwrap_or(value)
 }
 
-/// 案内に使う書体を、`dpi` の大きさで作る。
+/// 案内に使う書体の名前、100% のときの大きさ (DIP)、太さ。
 ///
 /// 書体はシステムの設定 (メッセージの書体) に従う。自前で選ぶと、利用者が
-/// 大きさを変えていても追随できない。
-pub fn message_font(dpi: u32) -> Option<HFONT> {
+/// 大きさを変えていても追随できない。大きさは描く先が拡大率に合わせる。
+pub fn message_font_spec() -> Option<(String, f32, i32)> {
     let mut metrics = NONCLIENTMETRICSW {
         cbSize: u32::try_from(size_of::<NONCLIENTMETRICSW>()).unwrap_or(0),
         ..Default::default()
@@ -73,16 +71,24 @@ pub fn message_font(dpi: u32) -> Option<HFONT> {
             metrics.cbSize,
             Some(std::ptr::from_mut::<NONCLIENTMETRICSW>(&mut metrics).cast()),
             0,
-            dpi,
+            BASE,
         )
     }
     .is_ok();
     if !ok {
         return None;
     }
-    // SAFETY: 受け取った書体の指定をそのまま使う。
-    let font = unsafe { CreateFontIndirectW(&metrics.lfMessageFont) };
-    (!font.is_invalid()).then_some(font)
+    let font = &metrics.lfMessageFont;
+    let end = font
+        .lfFaceName
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(font.lfFaceName.len());
+    let family = String::from_utf16_lossy(&font.lfFaceName[..end]);
+    // 負の高さは文字そのものの高さで、DirectWrite の大きさと同じ意味になる。
+    #[allow(clippy::cast_precision_loss)]
+    let size = font.lfHeight.unsigned_abs() as f32;
+    (!family.is_empty() && size > 0.0).then_some((family, size, font.lfWeight))
 }
 
 #[cfg(test)]
@@ -103,6 +109,6 @@ mod tests {
     fn a_scale_can_be_found_anywhere() {
         let dpi = at(POINT { x: 0, y: 0 });
         assert!(dpi >= BASE, "{dpi}");
-        assert!(message_font(dpi).is_some());
+        assert!(message_font_spec().is_some());
     }
 }

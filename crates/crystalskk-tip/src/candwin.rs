@@ -22,21 +22,21 @@
 //!
 //! # 描き方
 //!
-//! 角を丸めた窓に、押すキーを枠で囲んで並べる。色は設定に従い、明るい組と暗い組をアプリの明るさで
+//! 角を丸めた窓に、押すキーを枠で囲んで並べる。描くのは Direct2D
+//! ([`crate::draw`])。色は設定に従い、明るい組と暗い組をアプリの明るさで
 //! 選ぶ (ADR-0026)。大きさは窓を出すモニターの拡大率に従う ([`crate::dpi`])。
 //! 候補の注釈は本文の右に薄く添える (ADR-0027)。描き方は `paint` の一箇所に
 //! 閉じてある。
 
 use std::cell::{Cell, RefCell};
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreatePen, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
-    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint,
-    FillRect, FrameRect, GetDC, GetStockObject, GetTextExtentPoint32W, HDC, InvalidateRect,
-    NULL_BRUSH, NULL_PEN, PAINTSTRUCT, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ROUNDED_RECT,
 };
+use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_HWNDPARENT, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST,
@@ -47,11 +47,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
-use crate::dpi;
 use crate::guard::guard;
 use crate::log;
 use crate::popup;
 use crate::theme::Palette;
+use crate::{dpi, draw};
 
 /// 窓に出すもの。
 ///
@@ -528,16 +528,10 @@ unsafe extern "system" fn window_proc(
                 // SAFETY: 描画の手順どおり。預けた箱は窓が持っている。
                 unsafe {
                     let mut ps = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(hwnd, &mut ps);
+                    let _ = BeginPaint(hwnd, &mut ps);
                     let stored = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Painted;
                     if let Some(painted) = stored.as_ref() {
-                        paint(
-                            hdc,
-                            &painted.content,
-                            painted.palette,
-                            painted.dpi,
-                            painted.rounded,
-                        );
+                        paint(hwnd, painted);
                     }
                     let _ = EndPaint(hwnd, &ps);
                 }
@@ -546,6 +540,7 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            draw::forget(hwnd);
             // SAFETY: 預けたのは自分の箱。二度落とさないよう 0 に戻す。
             unsafe {
                 let stored = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -561,276 +556,173 @@ unsafe extern "system" fn window_proc(
 }
 
 /// 一覧を描く。**絵柄はここだけに閉じてある。**
-///
-/// `rounded` は、角を DWM が丸めているか。丸めているなら枠も DWM が描く。
-///
-/// # Safety
-///
-/// `hdc` が描画中のものであること。
-unsafe fn paint(hdc: HDC, content: &Content, palette: Palette, dpi: u32, rounded: bool) {
-    // SAFETY: 呼び出し側の約束による。作ったものはこの関数の中で片付ける。
-    unsafe {
-        let font = dpi::message_font(dpi);
-        let previous = font.map(|f| SelectObject(hdc, f.into()));
+fn paint(hwnd: HWND, painted: &Painted) {
+    let Painted {
+        content,
+        palette,
+        dpi,
+        rounded,
+    } = painted;
+    let (palette, dpi) = (*palette, *dpi);
+    let font = draw::Font::message();
+    let (Some(line_format), Some(key_format), Some(wrap_format)) = (
+        font.line(),
+        font.scaled(KEY_FONT).centered(),
+        font.wrapping(),
+    ) else {
+        return;
+    };
+    let layout = Layout::of(content, &line_format, &wrap_format);
+    #[allow(clippy::cast_precision_loss)]
+    let hair = dpi::BASE as f32 / dpi as f32;
 
-        let (width, height) = measure(content, dpi);
-        let area = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
+    draw::with_target(hwnd, dpi, |target| {
+        let brush = |rgb: u32| {
+            // SAFETY: 描いている最中の描く先に、筆を作らせるだけ。
+            unsafe { target.CreateSolidColorBrush(&draw::color(rgb), None) }.ok()
+        };
+        let text = |s: &str, format: &IDWriteTextFormat, area: D2D_RECT_F, rgb: u32| {
+            let Some(ink) = brush(rgb) else {
+                return;
+            };
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            // SAFETY: 描いている最中の描く先に、文字を描かせるだけ。
+            unsafe {
+                target.DrawText(
+                    &wide,
+                    format,
+                    &area,
+                    &ink,
+                    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        };
+        let fill = |area: D2D_RECT_F, radius: f32, rgb: u32| {
+            if let Some(ground) = brush(rgb) {
+                let rounded = D2D1_ROUNDED_RECT {
+                    rect: area,
+                    radiusX: radius,
+                    radiusY: radius,
+                };
+                // SAFETY: 描いている最中の描く先に、塗らせるだけ。
+                unsafe { target.FillRoundedRectangle(&rounded, &ground) };
+            }
         };
 
-        let background = CreateSolidBrush(colorref(palette.background));
-        FillRect(hdc, &area, background);
-        let _ = DeleteObject(background.into());
+        // SAFETY: 描いている最中の描く先を塗りつぶすだけ。
+        unsafe { target.Clear(Some(&draw::color(palette.background))) };
 
         // 枠。地と同じ色では、背景に溶けて境目が分からない。角を丸めて
-        // いるなら DWM が丸みに沿って描くので、四角い枠は重ねない。
-        if !rounded {
-            let border = CreateSolidBrush(colorref(palette.border));
-            FrameRect(hdc, &area, border);
-            let _ = DeleteObject(border.into());
+        // いるなら DWM が丸みに沿って描く (`crate::popup`)。
+        if !rounded && let Some(border) = brush(palette.border) {
+            let half = hair / 2.0;
+            let edge = draw::rect(half, half, layout.width - half, layout.height - half);
+            // SAFETY: 描いている最中の描く先に、線を引かせるだけ。
+            unsafe { target.DrawRectangle(&edge, &border, hair, None) };
         }
 
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, colorref(palette.text));
-
-        let inset = dpi::scale(WINDOW_PAD, dpi);
-        let row_pad = dpi::scale(ROW_PAD, dpi);
+        let pad = WINDOW_PAD + ROW_PAD;
 
         // 注釈だけの窓は、窓の幅で折り返して全文を出す。
         if content.wraps() {
-            let pad = inset + row_pad;
-            let text = content
+            let body = content
                 .lines()
                 .into_iter()
                 .next()
                 .map(|line| line.text)
                 .unwrap_or_default();
-            let mut rect = RECT {
-                left: pad,
-                top: pad,
-                right: width - pad,
-                bottom: height - pad,
-            };
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut wide,
-                &mut rect,
-                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX,
+            let area = draw::rect(pad, pad, layout.width - pad, layout.height - pad);
+            text(&body, &wrap_format, area, palette.text);
+            return;
+        }
+
+        let lead = content.lead();
+        let highlight = content.highlight();
+        for (index, line) in content.lines().iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let top = WINDOW_PAD + layout.line * index as f32;
+            let row = draw::rect(
+                WINDOW_PAD,
+                top,
+                layout.width - WINDOW_PAD,
+                top + layout.line,
             );
-        } else {
-            let metrics = Metrics::of(hdc, dpi);
-            let lead = content.lead();
-            let highlight = content.highlight();
-            for (index, line) in content.lines().iter().enumerate() {
-                let top = inset + metrics.line * i32::try_from(index).unwrap_or(0);
-                let row = RECT {
-                    left: inset,
-                    top,
-                    right: width - inset,
-                    bottom: top + metrics.line,
-                };
 
-                // 選んでいる行には帯を敷き、左端に印を立てる。
-                //
-                // 帯は窓の幅いっぱいに敷く。文字の幅だけ塗ると、行によって
-                // 帯の長さが変わってちらついて見える。
-                let selected = highlight == Some(index);
-                if selected {
-                    round_fill(
-                        hdc,
-                        row,
-                        palette.selected_background,
-                        dpi::scale(BAND_ROUND, dpi),
-                    );
-                    let mark_height = metrics.line / 2;
-                    let mark_top = row.top + (metrics.line - mark_height) / 2;
-                    let mark_left = row.left + dpi::scale(MARK_OFFSET, dpi);
-                    let mark_width = dpi::scale(MARK_WIDTH, dpi);
-                    let mark = RECT {
-                        left: mark_left,
-                        top: mark_top,
-                        right: mark_left + mark_width,
-                        bottom: mark_top + mark_height,
-                    };
-                    round_fill(hdc, mark, palette.key, mark_width);
-                }
-                let (ink, ground) = if selected {
-                    (palette.selected_text, palette.selected_background)
-                } else {
-                    (palette.text, palette.background)
-                };
+            // 選んでいる行には帯を敷き、左端に印を立てる。
+            //
+            // 帯は窓の幅いっぱいに敷く。文字の幅だけ塗ると、行によって
+            // 帯の長さが変わってちらついて見える。
+            let selected = highlight == Some(index);
+            if selected {
+                fill(row, BAND_RADIUS, palette.selected_background);
+                let mark_height = layout.line / 2.0;
+                let mark_top = row.top + (layout.line - mark_height) / 2.0;
+                let mark_left = row.left + MARK_OFFSET;
+                let mark = draw::rect(
+                    mark_left,
+                    mark_top,
+                    mark_left + MARK_WIDTH,
+                    mark_top + mark_height,
+                );
+                fill(mark, MARK_WIDTH / 2.0, palette.key);
+            }
+            let (ink, ground) = if selected {
+                (palette.selected_text, palette.selected_background)
+            } else {
+                (palette.text, palette.background)
+            };
 
-                let left = row.left + row_pad;
-                if let (Lead::Key, Some(key)) = (lead, line.key) {
-                    let key_box = KeyBox {
-                        left,
-                        row,
-                        side: metrics.key,
+            let left = row.left + ROW_PAD;
+            if let (Lead::Key, Some(key)) = (lead, line.key) {
+                // **枠の大きさはキーによらず同じにする。** キーごとに幅が
+                // 変わると、本文の書き出しがずれる。
+                let top = row.top + (layout.line - layout.key) / 2.0;
+                let frame = draw::rect(left, top, left + layout.key, top + layout.key);
+                if let Some(pen) = brush(palette.key) {
+                    let half = hair / 2.0;
+                    let edge = D2D1_ROUNDED_RECT {
+                        rect: draw::rect(
+                            frame.left + half,
+                            frame.top + half,
+                            frame.right - half,
+                            frame.bottom - half,
+                        ),
+                        radiusX: KEY_RADIUS,
+                        radiusY: KEY_RADIUS,
                     };
-                    draw_key(hdc, key, key_box, palette.key, mix(ink, ground));
+                    // SAFETY: 描いている最中の描く先に、線を引かせるだけ。
+                    unsafe { target.DrawRoundedRectangle(&edge, &pen, hair, None) };
                 }
-                let text = RECT {
-                    left: left + metrics.lead(lead, dpi),
-                    right: row.right - row_pad,
-                    ..row
-                };
-                draw_line(hdc, line, text, ink, ground, dpi);
+                // キーボードの刻印に合わせて大文字で出す。
+                let label = key.to_ascii_uppercase().to_string();
+                text(&label, &key_format, frame, mix(ink, ground));
+            }
+
+            let start = left + layout.lead;
+            let end = row.right - ROW_PAD;
+            text(
+                &line.text,
+                &line_format,
+                draw::rect(start, row.top, end, row.bottom),
+                ink,
+            );
+
+            // 注釈は本文の右に薄く添え、[`NOTE_WIDTH`] で切る。**一覧の窓が
+            // 長い注釈で画面いっぱいに広がっては、候補が読めない。**
+            if let Some(note) = &line.note {
+                let (width, _) = draw::measure(&line.text, &line_format, f32::MAX);
+                let note_left = start + width + NOTE_GAP;
+                let note_right = (note_left + NOTE_WIDTH).min(end);
+                text(
+                    note,
+                    &line_format,
+                    draw::rect(note_left, row.top, note_right, row.bottom),
+                    mix(ink, ground),
+                );
             }
         }
-
-        if let (Some(previous), Some(font)) = (previous, font) {
-            SelectObject(hdc, previous);
-            let _ = DeleteObject(font.into());
-        }
-    }
-}
-
-/// 角の丸い四角を塗る。`round` は角の丸みの直径。
-///
-/// # Safety
-///
-/// `hdc` が描画中のものであること。
-unsafe fn round_fill(hdc: HDC, rect: RECT, color: u32, round: i32) {
-    // SAFETY: 呼び出し側の約束による。選んだものは戻し、作ったものは消す。
-    unsafe {
-        let brush = CreateSolidBrush(colorref(color));
-        let previous_brush = SelectObject(hdc, brush.into());
-        let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        // 線を引かないと、右と下が一画素ずつ欠ける。その分を足す。
-        let _ = RoundRect(
-            hdc,
-            rect.left,
-            rect.top,
-            rect.right + 1,
-            rect.bottom + 1,
-            round,
-            round,
-        );
-        SelectObject(hdc, previous_pen);
-        SelectObject(hdc, previous_brush);
-        let _ = DeleteObject(brush.into());
-    }
-}
-
-/// キーを囲む枠の置き場所。`left` から始まる一辺 `side` の正方形を、
-/// `row` の縦の真ん中に置く。
-#[derive(Debug, Clone, Copy)]
-struct KeyBox {
-    left: i32,
-    row: RECT,
-    side: i32,
-}
-
-/// 押すキーを、角の丸い枠で囲んで描く。
-///
-/// **枠の大きさはキーによらず同じにする。** キーごとに幅が変わると、本文の
-/// 書き出しがずれる。
-///
-/// # Safety
-///
-/// `hdc` に書体が選ばれていること。
-unsafe fn draw_key(hdc: HDC, key: char, place: KeyBox, frame: u32, ink: u32) {
-    // SAFETY: 呼び出し側の約束による。選んだものは戻し、作ったものは消す。
-    unsafe {
-        let top = place.row.top + (place.row.bottom - place.row.top - place.side) / 2;
-        let mut rect = RECT {
-            left: place.left,
-            top,
-            right: place.left + place.side,
-            bottom: top + place.side,
-        };
-        let pen = CreatePen(PS_SOLID, 1, colorref(frame));
-        let previous_pen = SelectObject(hdc, pen.into());
-        let previous_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let round = place.side / 3;
-        let _ = RoundRect(
-            hdc,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            round,
-            round,
-        );
-        SelectObject(hdc, previous_brush);
-        SelectObject(hdc, previous_pen);
-        let _ = DeleteObject(pen.into());
-
-        // キーボードの刻印に合わせて大文字で出す。
-        SetTextColor(hdc, colorref(ink));
-        let mut text: Vec<u16> = key
-            .to_ascii_uppercase()
-            .to_string()
-            .encode_utf16()
-            .collect();
-        DrawTextW(
-            hdc,
-            &mut text,
-            &mut rect,
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-        );
-    }
-}
-
-/// 一行を描く。本文のあとに、注釈を薄い色で添える。
-///
-/// 注釈は [`NOTE_WIDTH`] で切り、はみ出す分は「…」にする。**一覧の窓が
-/// 長い注釈で画面いっぱいに広がっては、候補が読めない。**
-///
-/// # Safety
-///
-/// `hdc` に書体が選ばれていること。
-unsafe fn draw_line(hdc: HDC, line: &Line, rect: RECT, ink: u32, ground: u32, dpi: u32) {
-    // SAFETY: 呼び出し側の約束による。
-    unsafe {
-        SetTextColor(hdc, colorref(ink));
-        let mut text: Vec<u16> = line.text.encode_utf16().collect();
-        let mut area = rect;
-        DrawTextW(
-            hdc,
-            &mut text,
-            &mut area,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-        );
-
-        let Some(note) = &line.note else {
-            return;
-        };
-        let left = rect.left + text_width(hdc, &line.text) + dpi::scale(NOTE_GAP, dpi);
-        let mut area = RECT {
-            left,
-            right: (left + dpi::scale(NOTE_WIDTH, dpi)).min(rect.right),
-            ..rect
-        };
-        SetTextColor(hdc, colorref(mix(ink, ground)));
-        let mut text: Vec<u16> = note.encode_utf16().collect();
-        DrawTextW(
-            hdc,
-            &mut text,
-            &mut area,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
-        );
-    }
-}
-
-/// 文字列の幅。
-///
-/// # Safety
-///
-/// `hdc` に書体が選ばれていること。
-unsafe fn text_width(hdc: HDC, text: &str) -> i32 {
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    let mut size = SIZE::default();
-    // SAFETY: 呼び出し側の約束による。
-    if unsafe { GetTextExtentPoint32W(hdc, &wide, &mut size) }.as_bool() {
-        size.cx
-    } else {
-        0
-    }
+    });
 }
 
 /// 二つの色の中間。注釈を本文より薄く見せるのに使う。
@@ -838,15 +730,6 @@ fn mix(a: u32, b: u32) -> u32 {
     let channel = |shift: u32| ((((a >> shift) & 0xFF) + ((b >> shift) & 0xFF)) / 2) << shift;
     channel(16) | channel(8) | channel(0)
 }
-
-/// 本文と注釈のあいだ。
-const NOTE_GAP: i32 = 12;
-
-/// 一覧の注釈を切る幅。これを超える分は「…」にする。
-const NOTE_WIDTH: i32 = 240;
-
-/// 注釈だけの窓を折り返す幅。
-const WRAP_WIDTH: i32 = 360;
 
 /// 窓に預ける、描くものと色の組。
 struct Painted {
@@ -858,110 +741,82 @@ struct Painted {
     rounded: bool,
 }
 
-/// `0xRRGGBB` を `COLORREF` (`0x00BBGGRR`) にする。
-fn colorref(rgb: u32) -> COLORREF {
-    COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
+/// 窓の大きさ (画素)。
+fn measure(content: &Content, dpi: u32) -> (i32, i32) {
+    let font = draw::Font::message();
+    let (Some(line_format), Some(wrap_format)) = (font.line(), font.wrapping()) else {
+        return (0, 0);
+    };
+    let layout = Layout::of(content, &line_format, &wrap_format);
+    (
+        draw::pixels(layout.width, dpi),
+        draw::pixels(layout.height, dpi),
+    )
 }
 
-/// 窓の大きさを測る。
-fn measure(content: &Content, dpi: u32) -> (i32, i32) {
-    // SAFETY: 画面の DC を借りて測り、すぐ返す。
-    unsafe {
-        let hdc = GetDC(None);
-        let font = dpi::message_font(dpi);
-        let previous = font.map(|f| SelectObject(hdc, f.into()));
-        let row_pad = dpi::scale(ROW_PAD, dpi);
+/// 窓の寸法。どれも DIP で、書体の高さから決める。
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    width: f32,
+    height: f32,
+    /// 一行の高さ。
+    line: f32,
+    /// キーを囲む枠の一辺。
+    key: f32,
+    /// 本文の左に空ける幅。
+    lead: f32,
+}
 
-        let measured = if content.wraps() {
+impl Layout {
+    fn of(
+        content: &Content,
+        line_format: &IDWriteTextFormat,
+        wrap_format: &IDWriteTextFormat,
+    ) -> Self {
+        let (_, text_height) = draw::measure("あA", line_format, f32::MAX);
+        let line = text_height + LINE_GAP;
+        let key = text_height + KEY_GROW;
+        let lead = match content.lead() {
+            Lead::None => 0.0,
+            Lead::Key => key + KEY_GAP,
+            Lead::Mark => MARK_SPACE,
+        };
+        let edge = (WINDOW_PAD + ROW_PAD) * 2.0;
+
+        let (width, height) = if content.wraps() {
             // 折り返したときの大きさを、描く前に尋ねる。
-            let text = content
+            let body = content
                 .lines()
                 .into_iter()
                 .next()
                 .map(|line| line.text)
                 .unwrap_or_default();
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                right: dpi::scale(WRAP_WIDTH, dpi),
-                bottom: 0,
-            };
-            DrawTextW(
-                hdc,
-                &mut wide,
-                &mut rect,
-                DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
-            );
-            (
-                rect.right - rect.left + row_pad * 2,
-                rect.bottom - rect.top + row_pad * 2,
-            )
+            let (width, height) = draw::measure(&body, wrap_format, WRAP_WIDTH);
+            (width + edge, height + edge)
         } else {
-            let metrics = Metrics::of(hdc, dpi);
-            let lead = metrics.lead(content.lead(), dpi);
             let lines = content.lines();
             let widest = lines
                 .iter()
                 .map(|line| {
-                    let note = line.note.as_deref().map_or(0, |note| {
-                        dpi::scale(NOTE_GAP, dpi)
-                            + text_width(hdc, note).min(dpi::scale(NOTE_WIDTH, dpi))
+                    let (text, _) = draw::measure(&line.text, line_format, f32::MAX);
+                    let note = line.note.as_deref().map_or(0.0, |note| {
+                        let (width, _) = draw::measure(note, line_format, f32::MAX);
+                        NOTE_GAP + width.min(NOTE_WIDTH)
                     });
-                    lead + text_width(hdc, &line.text) + note
+                    lead + text + note
                 })
-                .max()
-                .unwrap_or(0);
-            let rows = i32::try_from(lines.len()).unwrap_or(1);
-            (widest + row_pad * 2, metrics.line * rows)
-        };
-
-        if let (Some(previous), Some(font)) = (previous, font) {
-            SelectObject(hdc, previous);
-            let _ = DeleteObject(font.into());
-        }
-        ReleaseDC(None, hdc);
-
-        // 行は窓の縁から少し離して並べる。帯の丸みが縁に食われないように。
-        let inset = dpi::scale(WINDOW_PAD, dpi);
-        (measured.0 + inset * 2, measured.1 + inset * 2)
-    }
-}
-
-/// 行の寸法。どれも書体の高さから決める。
-#[derive(Debug, Clone, Copy)]
-struct Metrics {
-    /// 一行の高さ。
-    line: i32,
-    /// キーを囲む枠の一辺。
-    key: i32,
-}
-
-impl Metrics {
-    /// # Safety
-    ///
-    /// `hdc` に測りたい書体が選ばれていること。
-    unsafe fn of(hdc: HDC, dpi: u32) -> Self {
-        let sample: Vec<u16> = "あA".encode_utf16().collect();
-        let mut size = SIZE::default();
-        // SAFETY: 呼び出し側の約束による。
-        let height = if unsafe { GetTextExtentPoint32W(hdc, &sample, &mut size) }.as_bool() {
-            size.cy
-        } else {
-            dpi::scale(FALLBACK_TEXT_HEIGHT, dpi)
+                .fold(0.0, f32::max);
+            #[allow(clippy::cast_precision_loss)]
+            let rows = lines.len() as f32;
+            // 行は窓の縁から少し離して並べる。帯の丸みが縁に食われないように。
+            (widest + edge, line * rows + WINDOW_PAD * 2.0)
         };
         Self {
-            line: height + dpi::scale(LINE_GAP, dpi),
-            key: height + dpi::scale(KEY_GROW, dpi),
-        }
-    }
-
-    /// 本文の左に空ける幅。
-    fn lead(self, lead: Lead, dpi: u32) -> i32 {
-        match lead {
-            Lead::None => 0,
-            Lead::Key => self.key + dpi::scale(KEY_GAP, dpi),
-            Lead::Mark => dpi::scale(MARK_SPACE, dpi),
+            width: width.ceil(),
+            height: height.ceil(),
+            line,
+            key,
+            lead,
         }
     }
 }
@@ -1001,34 +856,46 @@ fn place(anchor: RECT, width: i32, height: i32) -> (i32, i32) {
 }
 
 /// 窓の縁と帯の間。
-const WINDOW_PAD: i32 = 4;
+const WINDOW_PAD: f32 = 4.0;
 
 /// 帯の縁と文字の間。
-const ROW_PAD: i32 = 8;
+const ROW_PAD: f32 = 8.0;
 
 /// 一行の高さのうち、文字の上下に空ける分。
-const LINE_GAP: i32 = 12;
+const LINE_GAP: f32 = 12.0;
 
-/// 帯の角の丸みの直径。
-const BAND_ROUND: i32 = 8;
+/// 帯の角の丸み。
+const BAND_RADIUS: f32 = 4.0;
 
 /// キーを囲む枠が、文字の高さより大きい分。
-const KEY_GROW: i32 = 4;
+const KEY_GROW: f32 = 4.0;
+
+/// キーを囲む枠の角の丸み。
+const KEY_RADIUS: f32 = 4.0;
+
+/// キーの文字の大きさ。本文に対する比。本文より控えめにする。
+const KEY_FONT: f32 = 0.85;
 
 /// キーを囲む枠と本文の間。
-const KEY_GAP: i32 = 10;
+const KEY_GAP: f32 = 10.0;
 
 /// 選んでいる行の印の太さ。
-const MARK_WIDTH: i32 = 3;
+const MARK_WIDTH: f32 = 3.0;
 
 /// 帯の縁から印までの距離。
-const MARK_OFFSET: i32 = 3;
+const MARK_OFFSET: f32 = 3.0;
 
 /// 印のために本文の左に空ける幅。選んでいない行も同じだけ空ける。
-const MARK_SPACE: i32 = 6;
+const MARK_SPACE: f32 = 6.0;
 
-/// 書体を測れなかったときの文字の高さ。
-const FALLBACK_TEXT_HEIGHT: i32 = 16;
+/// 本文と注釈のあいだ。
+const NOTE_GAP: f32 = 12.0;
+
+/// 一覧の注釈を切る幅。これを超える分は「…」にする。
+const NOTE_WIDTH: f32 = 240.0;
+
+/// 注釈だけの窓を折り返す幅。
+const WRAP_WIDTH: f32 = 360.0;
 
 #[cfg(test)]
 mod tests {
@@ -1063,6 +930,19 @@ mod tests {
         assert!(content.wraps());
         assert!(!content.is_empty());
         assert!(!Content::Page(page(&[('a', "橋")], 1, 1)).wraps());
+    }
+
+    #[test]
+    fn a_window_has_room_for_every_line() {
+        let one = measure(&Content::Page(page(&[('a', "漢字")], 1, 1)), dpi::BASE);
+        let two = measure(
+            &Content::Page(page(&[('a', "漢字"), ('s', "感じ")], 1, 1)),
+            dpi::BASE,
+        );
+        assert!(one.0 > 0 && one.1 > 0);
+        assert!(two.1 > one.1, "行が増えれば高くなる");
+        let doubled = measure(&Content::Page(page(&[('a', "漢字")], 1, 1)), dpi::BASE * 2);
+        assert!(doubled.0 >= one.0 * 2 - 1, "拡大率に合わせて広がる");
     }
 
     #[test]
