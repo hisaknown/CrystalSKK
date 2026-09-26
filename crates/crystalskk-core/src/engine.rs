@@ -577,9 +577,12 @@ impl Engine {
     fn would_handle_direct(&self, key: Key) -> bool {
         let command = self.command(key);
         let registering = !self.registrations.is_empty();
-        // ひらがなへ戻す操作だけは、どのモードでも受け取る。
+        // ひらがなへ戻す操作は、どのモードでも、すでにひらがなでも受け取る。
+        // **行き先の決まった切り替えは、押せばいつも同じになる。** すでに
+        // ひらがなだからといってアプリへ渡すと、同じキーがモードによって
+        // SKK のものになったりアプリのものになったりする (ADR-0038)。
         if command == Some(Command::Hiragana) {
-            return !self.hiragana_is_noop();
+            return true;
         }
         if !self.mode.is_kana() {
             return match (command, key) {
@@ -604,14 +607,6 @@ impl Engine {
             (_, Key::Char(_) | Key::Space) => true,
             _ => false,
         }
-    }
-
-    /// ひらがなへ戻す操作が何もしないときか。
-    ///
-    /// すでにひらがなで、打ちかけも登録も無ければ、することが無い。
-    /// **何もしないなら食べない** (ADR-0038)。
-    fn hiragana_is_noop(&self) -> bool {
-        self.mode == InputMode::Hiragana && self.romaji.is_empty() && self.registrations.is_empty()
     }
 
     /// 辞書登録の欄へ文字列を貼る。
@@ -1005,10 +1000,6 @@ impl Engine {
         self.state = State::Direct;
 
         if self.command(key) == Some(Command::Hiragana) {
-            if self.hiragana_is_noop() {
-                out.handled = false;
-                return;
-            }
             let rest = self.romaji.flush();
             self.emit(&self.mode.render_kana(&rest).clone(), out);
             self.mode = InputMode::Hiragana;

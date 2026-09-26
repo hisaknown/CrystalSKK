@@ -242,13 +242,7 @@ fn a_space_that_does_not_convert_is_part_of_the_reading() {
 fn a_command_that_does_nothing_goes_to_the_application() {
     // 取り消すものも確定するものも無ければ、キーはアプリのもの。
     let mut engine = engine_with(common::keymap());
-    for key in [
-        Key::Ctrl('g'),
-        Key::Escape,
-        Key::Ctrl('j'),
-        Key::Enter,
-        Key::Backspace,
-    ] {
+    for key in [Key::Ctrl('g'), Key::Escape, Key::Enter, Key::Backspace] {
         assert!(!engine.would_handle(key), "{key:?}");
         assert!(!engine.press(key).handled, "{key:?}");
     }
@@ -282,4 +276,13 @@ fn arrows_are_not_skk_keys() {
     press_all(&mut engine, "Takusan ");
     assert!(!engine.press(Key::Down).handled);
     assert!(engine.candidates().is_some(), "候補はそのまま");
+}
+
+#[test]
+fn going_back_to_hiragana_is_eaten_even_in_hiragana() {
+    // ひらがなへ戻す操作は冪等。すでにひらがなでもアプリへ漏らさない。
+    let mut engine = engine_with(common::keymap());
+    assert!(engine.would_handle(Key::Ctrl('j')));
+    assert!(engine.press(Key::Ctrl('j')).handled);
+    assert_eq!(engine.mode(), crystalskk_core::InputMode::Hiragana);
 }
