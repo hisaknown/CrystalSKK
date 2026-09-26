@@ -11,12 +11,12 @@ use std::cell::RefCell;
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+    ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -25,6 +25,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{HSTRING, w};
 
@@ -48,8 +49,8 @@ thread_local! {
     };
     /// 設定の大きさと書体。設定を受け取るたびに差し替える ([`configure`])。
     static LOOK: RefCell<Look> = RefCell::new(Look::default());
-    /// 窓ごとの描く先。作るのは重いので、窓があるあいだ使い回す。
-    static TARGETS: RefCell<Vec<(isize, ID2D1HwndRenderTarget)>> = const { RefCell::new(Vec::new()) };
+    /// 描く先。窓の画面へ、描くたびに結びつけ直して使い回す。
+    static TARGET: RefCell<Option<ID2D1DCRenderTarget>> = const { RefCell::new(None) };
 }
 
 /// 設定の大きさと書体。
@@ -264,56 +265,62 @@ pub fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
 
 /// `hwnd` の描く先を用意して `draw` に渡す。
 ///
-/// 描く先は窓ごとに使い回す。大きさと拡大率は、描くたびに合わせる。**描く先が
-/// 使えなくなったら (画面の設定が変わったときなど) 捨てて、次に作り直す。**
-pub fn with_target(hwnd: HWND, dpi: u32, draw: impl FnOnce(&ID2D1HwndRenderTarget)) {
+/// 描く先は窓ではなく、**窓の GDI の画面 (HDC) に結びつける** (`BindDC`)。
+/// 窓に直接描く描く先 (`CreateHwndRenderTarget`) は、裏で DXGI の画面を作る。
+/// ストアアプリの入れ物の中ではそれが断られ (DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)、
+/// 窓は出るのに中身が白いままになった。CorvusSKK と Weasel も、GDI の画面に
+/// 描く描く先を使っている。
+///
+/// 描く先はスレッドに一つで、描くたびに窓の画面へ結びつけ直す。描く命令は
+/// これまでどおり Direct2D と DirectWrite である。**描く先が使えなくなったら
+/// 捨てて、次に作り直す。**
+pub fn with_target(hwnd: HWND, dpi: u32, draw: impl FnOnce(&ID2D1RenderTarget)) {
     let mut client = RECT::default();
     // SAFETY: 窓の大きさを尋ねるだけ。
     if let Err(e) = unsafe { GetClientRect(hwnd, &mut client) } {
         log::error(&format!("窓の大きさを尋ねられなかった: {}", e.message()));
         return;
     }
-    let size = D2D_SIZE_U {
-        width: u32::try_from(client.right - client.left).unwrap_or(0),
-        height: u32::try_from(client.bottom - client.top).unwrap_or(0),
-    };
-    let Some(target) = target(hwnd, size) else {
+    let Some(target) = target() else {
         return;
     };
+    // SAFETY: 自分の窓の画面を借りる。描き終えたら返す。
+    let hdc = unsafe { GetDC(Some(hwnd)) };
+    if hdc.is_invalid() {
+        log::error("窓の画面を借りられなかった");
+        return;
+    }
     #[allow(clippy::cast_precision_loss)]
     let dpi = dpi as f32;
-    // SAFETY: 描く手順どおり。
+    // SAFETY: 描く手順どおり。借りた画面は、この中でだけ使う。
     let ended = unsafe {
-        let _ = target.Resize(&size);
-        target.SetDpi(dpi, dpi);
-        target.BeginDraw();
-        draw(&target);
-        target.EndDraw(None, None)
+        target.BindDC(hdc, &client).and_then(|()| {
+            target.SetDpi(dpi, dpi);
+            target.BeginDraw();
+            draw(&target);
+            target.EndDraw(None, None)
+        })
     };
+    // SAFETY: 借りた画面を返す。
+    unsafe {
+        ReleaseDC(Some(hwnd), hdc);
+    }
     if let Err(e) = ended {
         log::error(&format!("描き終えられなかった: {}", e.message()));
-        forget(hwnd);
+        TARGET.with(|target| target.borrow_mut().take());
     }
 }
 
-/// 窓の描く先を捨てる。窓を壊すときに呼ぶ。
-pub fn forget(hwnd: HWND) {
-    TARGETS.with(|targets| targets.borrow_mut().retain(|(h, _)| *h != hwnd.0 as isize));
-}
-
-fn target(hwnd: HWND, size: D2D_SIZE_U) -> Option<ID2D1HwndRenderTarget> {
-    let key = hwnd.0 as isize;
-    if let Some(found) = TARGETS.with(|targets| {
-        targets
-            .borrow()
-            .iter()
-            .find(|(h, _)| *h == key)
-            .map(|(_, t)| t.clone())
-    }) {
+/// このスレッドの描く先。無ければ作る。
+fn target() -> Option<ID2D1DCRenderTarget> {
+    if let Some(found) = TARGET.with(|target| target.borrow().clone()) {
         return Some(found);
     }
     let properties = D2D1_RENDER_TARGET_PROPERTIES {
-        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        // CPU で描く。小窓には十分で、GPU の用意 (アプリごとにドライバを
+        // 読み込む) を待たずに済む。Weasel でも、最初の打鍵が数百 ms 遅れる
+        // 原因として挙がっている。
+        r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         // 地を透かせるよう、アルファを持たせておく。
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -321,47 +328,13 @@ fn target(hwnd: HWND, size: D2D_SIZE_U) -> Option<ID2D1HwndRenderTarget> {
         },
         ..Default::default()
     };
-    let window = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-        hwnd,
-        pixelSize: size,
-        presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-    };
     let created = D2D.with(|factory| {
-        let factory = factory.as_ref()?;
-        // SAFETY: 自分の窓に描く先を作るだけ。
-        let create = |properties| unsafe { factory.CreateHwndRenderTarget(properties, &window) };
-        match create(&properties) {
-            Ok(target) => Some(target),
-            // ストアアプリの入れ物の中では、GPU の描く先を断られることがある
-            // (DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)。**窓は出るのに中身が白い
-            // ままになる。** そのときは CPU で描く。小窓なので重さは問題に
-            // ならない。
-            Err(gpu) => {
-                let software = D2D1_RENDER_TARGET_PROPERTIES {
-                    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                    ..properties
-                };
-                match create(&software) {
-                    Ok(target) => {
-                        log::write(&format!(
-                            "GPU の描く先を作れなかったので、CPU で描く: {}",
-                            gpu.message()
-                        ));
-                        Some(target)
-                    }
-                    Err(cpu) => {
-                        log::error(&format!(
-                            "描く先を作れなかった: GPU は {}、CPU は {}",
-                            gpu.message(),
-                            cpu.message()
-                        ));
-                        None
-                    }
-                }
-            }
-        }
+        // SAFETY: 描く先を作るだけ。
+        unsafe { factory.as_ref()?.CreateDCRenderTarget(&properties) }
+            .inspect_err(|e| log::error(&format!("描く先を作れなかった: {}", e.message())))
+            .ok()
     })?;
-    TARGETS.with(|targets| targets.borrow_mut().push((key, created.clone())));
+    TARGET.with(|target| *target.borrow_mut() = Some(created.clone()));
     Some(created)
 }
 

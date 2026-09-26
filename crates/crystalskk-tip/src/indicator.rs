@@ -439,10 +439,7 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
-        WM_DESTROY => {
-            draw::forget(hwnd);
-            LRESULT(0)
-        }
+        WM_DESTROY => LRESULT(0),
         // SAFETY: 既定の処理に委ねる。
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }

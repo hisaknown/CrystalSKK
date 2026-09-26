@@ -568,7 +568,6 @@ unsafe extern "system" fn window_proc(
             unsafe { DefWindowProcW(hwnd, message, WPARAM(1), lparam) }
         }
         WM_DESTROY => {
-            draw::forget(hwnd);
             // SAFETY: 預けたのは自分の箱。二度落とさないよう 0 に戻す。
             unsafe {
                 let stored = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
