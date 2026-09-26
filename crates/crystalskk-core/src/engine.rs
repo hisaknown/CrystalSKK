@@ -576,35 +576,42 @@ impl Engine {
 
     fn would_handle_direct(&self, key: Key) -> bool {
         let command = self.command(key);
-        // ひらがなへ戻す操作だけは、どのモードでも受け取る。
-        if command == Some(Command::Kakutei) {
-            return true;
-        }
         let registering = !self.registrations.is_empty();
+        // ひらがなへ戻す操作だけは、どのモードでも受け取る。
+        if command == Some(Command::Hiragana) {
+            return !self.hiragana_is_noop();
+        }
         if !self.mode.is_kana() {
             return match (command, key) {
-                (Some(Command::Cancel), _) => registering,
+                (Some(Command::Cancel | Command::Kakutei | Command::DeleteBackward), _) => {
+                    registering
+                }
                 // 登録中は英数モードでも打鍵を受け取る。**登録語を打って
                 // いるのだから、アプリへ抜けては困る。**
                 (_, Key::Char(_) | Key::Space) => self.mode == InputMode::FullAscii || registering,
-                (_, Key::Enter | Key::Backspace | Key::Escape) => registering,
                 _ => false,
             };
         }
         match (command, key) {
-            (Some(command), _) if DIRECT_COMMANDS.contains(&command) => true,
-            (_, Key::Char(_) | Key::Space) => true,
-            // 登録を取りやめるときだけ受け取る。
-            (_, Key::Escape) => registering,
-            (_, Key::Ctrl(_) | Key::Paste | Key::Tab | Key::Up | Key::Down) => false,
+            // 打ちかけを捨てるか、登録を取りやめるときだけ受け取る。
+            (Some(Command::Cancel), _) => registering || !self.romaji.is_empty(),
             // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
-            (_, Key::Enter) => {
-                !self.registrations.is_empty() || self.romaji.pending_kana().is_some()
-            }
+            (Some(Command::Kakutei), _) => registering || self.romaji.pending_kana().is_some(),
             // 消すものがあるときだけ受け取る。登録中はいつでも受け取る。
             // **登録語が空でもアプリへ渡すと、置いてある未確定が消える。**
-            (_, Key::Backspace) => registering || !self.romaji.is_empty(),
+            (Some(Command::DeleteBackward), _) => registering || !self.romaji.is_empty(),
+            (Some(command), _) if DIRECT_COMMANDS.contains(&command) => true,
+            (_, Key::Char(_) | Key::Space) => true,
+            _ => false,
         }
+    }
+
+    /// ひらがなへ戻す操作が何もしないときか。
+    ///
+    /// すでにひらがなで、打ちかけも登録も無ければ、することが無い。
+    /// **何もしないなら食べない** (ADR-0038)。
+    fn hiragana_is_noop(&self) -> bool {
+        self.mode == InputMode::Hiragana && self.romaji.is_empty() && self.registrations.is_empty()
     }
 
     /// 辞書登録の欄へ文字列を貼る。
@@ -997,7 +1004,11 @@ impl Engine {
     fn on_direct(&mut self, key: Key, out: &mut Out) {
         self.state = State::Direct;
 
-        if self.command(key) == Some(Command::Kakutei) {
+        if self.command(key) == Some(Command::Hiragana) {
+            if self.hiragana_is_noop() {
+                out.handled = false;
+                return;
+            }
             let rest = self.romaji.flush();
             self.emit(&self.mode.render_kana(&rest).clone(), out);
             self.mode = InputMode::Hiragana;
@@ -1020,18 +1031,38 @@ impl Engine {
         match (self.command(key), key) {
             (Some(Command::Cancel), _) => {
                 // 打ちかけのローマ字が残っていれば、まずそれを捨てる。
-                // 何も残っていないなら、登録そのものを取りやめる。
-                //
-                // 登録中でないときは、捨てるものが無くても打鍵は食べる。
-                // 取り消し (`Ctrl+G`) は SKK の操作であって、アプリへ渡して
-                // よいキーではない。
-                if self.romaji.is_empty() && !self.registrations.is_empty() {
+                // 何も残っていないなら、登録そのものを取りやめる。どちらも
+                // 無ければ取り消すものが無いので、アプリへ渡す。
+                if self.romaji.is_empty() {
                     self.cancel_registration(out);
                 } else {
                     self.romaji.clear();
                 }
             }
-            (_, Key::Escape) => self.cancel_registration(out),
+            (Some(Command::Kakutei), _) => {
+                if self.registrations.is_empty() {
+                    let before = out.commit.len();
+                    self.flush_romaji(out);
+                    // 未確定を確定させただけなら改行は送らない。何もなければ
+                    // 改行はアプリの仕事なので素通しする。
+                    out.handled = out.commit.len() != before;
+                } else {
+                    self.flush_romaji(out);
+                    self.finish_registration(out);
+                }
+            }
+            (Some(Command::DeleteBackward), _) => {
+                if self.romaji.backspace() {
+                    return;
+                }
+                // 登録中は、消すものが無くても食べる。欄が空なら何もしない。
+                match self.registrations.last_mut() {
+                    Some(reg) => {
+                        reg.buffer.pop();
+                    }
+                    None => out.handled = false,
+                }
+            }
             (Some(Command::HalfKatakana), _) => {
                 self.flush_romaji(out);
                 self.mode = match self.mode {
@@ -1088,33 +1119,8 @@ impl Engine {
                 self.flush_romaji(out);
                 self.emit(" ", out);
             }
-            (_, Key::Enter) => {
-                if self.registrations.is_empty() {
-                    let before = out.commit.len();
-                    self.flush_romaji(out);
-                    // 未確定を確定させただけなら改行は送らない。何もなければ
-                    // 改行はアプリの仕事なので素通しする。
-                    out.handled = out.commit.len() != before;
-                } else {
-                    self.flush_romaji(out);
-                    self.finish_registration(out);
-                }
-            }
-            (_, Key::Backspace) => {
-                if self.romaji.backspace() {
-                    return;
-                }
-                // 登録中は、消すものが無くても食べる。欄が空なら何もしない。
-                match self.registrations.last_mut() {
-                    Some(reg) => {
-                        reg.buffer.pop();
-                    }
-                    None => out.handled = false,
-                }
-            }
-            (_, Key::Tab | Key::Up | Key::Down | Key::Ctrl(_) | Key::Paste) => {
-                out.handled = false;
-            }
+            // 直接入力で意味を持たない操作と、割り当ての無いキー。
+            _ => out.handled = false,
         }
     }
 
@@ -1143,35 +1149,26 @@ impl Engine {
 
     /// 英数モードの直接入力。かな変換を通さない。
     fn on_direct_ascii(&mut self, key: Key, out: &mut Out) {
-        if self.command(key) == Some(Command::Cancel) && !self.registrations.is_empty() {
-            self.cancel_registration(out);
-            return;
-        }
-        match (self.mode, key) {
-            (InputMode::FullAscii, Key::Char(c)) => {
-                let text = kana::to_fullwidth_ascii(&c.to_string());
-                self.emit(&text, out);
-            }
-            (InputMode::FullAscii, Key::Space) => self.emit("　", out),
-            // 登録中は半角英数でも打鍵を受け取り、登録語に溜める。
-            (InputMode::Ascii, Key::Char(c)) if !self.registrations.is_empty() => {
-                self.emit(&c.to_string(), out);
-            }
-            (InputMode::Ascii, Key::Space) if !self.registrations.is_empty() => {
-                self.emit(" ", out);
-            }
-            (_, Key::Enter) if !self.registrations.is_empty() => {
-                self.finish_registration(out);
-            }
-            (_, Key::Backspace) if !self.registrations.is_empty() => {
+        let registering = !self.registrations.is_empty();
+        match (self.command(key), self.mode, key) {
+            (Some(Command::Cancel), _, _) if registering => self.cancel_registration(out),
+            (Some(Command::Kakutei), _, _) if registering => self.finish_registration(out),
+            (Some(Command::DeleteBackward), _, _) if registering => {
                 // 欄が空でも食べる。アプリへ渡すと未確定が消える。
                 if let Some(frame) = self.registrations.last_mut() {
                     frame.buffer.pop();
                 }
             }
-            (_, Key::Escape) if !self.registrations.is_empty() => {
-                self.cancel_registration(out);
+            (_, InputMode::FullAscii, Key::Char(c)) => {
+                let text = kana::to_fullwidth_ascii(&c.to_string());
+                self.emit(&text, out);
             }
+            (_, InputMode::FullAscii, Key::Space) => self.emit("　", out),
+            // 登録中は半角英数でも打鍵を受け取り、登録語に溜める。
+            (_, InputMode::Ascii, Key::Char(c)) if registering => {
+                self.emit(&c.to_string(), out);
+            }
+            (_, InputMode::Ascii, Key::Space) if registering => self.emit(" ", out),
             _ => out.handled = false,
         }
     }
@@ -1221,11 +1218,11 @@ impl Engine {
         }
 
         match (self.command(key), key) {
-            (Some(Command::Cancel), _) | (_, Key::Escape) => {
+            (Some(Command::Cancel), _) => {
                 self.romaji.clear();
                 self.state = State::Direct;
             }
-            (Some(Command::Kakutei), _) | (_, Key::Enter) => {
+            (Some(Command::Kakutei | Command::Hiragana), _) => {
                 self.absorb_pending(&mut comp);
                 let text = self.commit_text_of(&comp);
                 self.emit(&text, out);
@@ -1284,7 +1281,7 @@ impl Engine {
                     self.convert(comp);
                 }
             }
-            (_, Key::Backspace) => {
+            (Some(Command::DeleteBackward), _) => {
                 let erased = self.romaji.backspace();
                 // 送り仮名の途中なら、一文字と一緒に区切りも消す。`▽おく*r`
                 // は `▽おく` になる。区切りだけ残っても、続けて打つか
@@ -1375,7 +1372,8 @@ impl Engine {
                 }
                 self.convert_if_okuri_complete(comp);
             }
-            (_, Key::Up | Key::Down | Key::Tab | Key::Ctrl(_)) => {
+            // 見出し語入力で意味を持たない操作と、割り当ての無いキー。
+            _ => {
                 out.handled = false;
                 self.state = State::Composing(comp);
             }
@@ -1532,7 +1530,9 @@ impl Engine {
                 Some(
                     Command::StartHenkan
                     | Command::PreviousCandidate
+                    | Command::DeleteBackward
                     | Command::Kakutei
+                    | Command::Hiragana
                     | Command::Cancel
                     | Command::Purge
                     | Command::Affix,
@@ -1540,15 +1540,23 @@ impl Engine {
                 _,
             ) => true,
             (Some(command), _) if DIRECT_COMMANDS.contains(&command) => true,
-            (_, Key::Ctrl(_) | Key::Tab | Key::Paste) => false,
-            _ => true,
+            (_, Key::Char(_) | Key::Space) => true,
+            _ => false,
         }
     }
 
     /// 見出し語入力中に受け取るキーか。[`Self::would_handle`] の一部。
     fn would_handle_composing(&self, comp: &Composing, key: Key) -> bool {
         match (self.command(key), key) {
-            (Some(Command::Cancel | Command::Kakutei), _) => true,
+            (
+                Some(
+                    Command::Cancel
+                    | Command::Kakutei
+                    | Command::Hiragana
+                    | Command::DeleteBackward,
+                ),
+                _,
+            ) => true,
             (Some(Command::ToggleKana | Command::HalfKatakana), _) if !comp.abbrev => true,
             // 補完候補があるときだけ受け取る。
             (Some(Command::Complete), _) => self
@@ -1557,8 +1565,8 @@ impl Engine {
             (Some(Command::StartHenkan | Command::SetHenkanPoint), _) => true,
             (Some(Command::TakeCompletion), _) if offers_completion(comp) => true,
             (Some(Command::Affix), _) if !comp.abbrev && comp.okuri.is_none() => true,
-            (_, Key::Ctrl(_) | Key::Up | Key::Down | Key::Tab | Key::Paste) => false,
-            _ => true,
+            (_, Key::Char(_) | Key::Space) => true,
+            _ => false,
         }
     }
 
@@ -1593,7 +1601,7 @@ impl Engine {
             return;
         }
         match (self.command(key), key) {
-            (Some(Command::StartHenkan), _) | (_, Key::Down) => {
+            (Some(Command::StartHenkan), _) => {
                 // 一覧を出しているなら、送るのは一件ずつではなく一ページ
                 // ずつ。見えているものを送り直しても意味がない。
                 let next = if sel.listing() {
@@ -1622,10 +1630,12 @@ impl Engine {
             // ddskk (`skk-delete-implies-kakutei` の既定 t) も CorvusSKK
             // (「後退に確定を含める」の既定) もこうする。確定した後は
             // ただの文字なので、送り仮名の区切りも残らない。
-            (_, Key::Backspace) if !sel.listing() => self.commit_selection_but_last(sel, out),
+            (Some(Command::DeleteBackward), _) if !sel.listing() => {
+                self.commit_selection_but_last(sel, out);
+            }
             // 一覧が出ているあいだは、Backspace も前の一覧へ戻る。ddskk も
             // CorvusSKK もこうする。
-            (Some(Command::PreviousCandidate), _) | (_, Key::Up | Key::Backspace) => {
+            (Some(Command::PreviousCandidate | Command::DeleteBackward), _) => {
                 if sel.listing() {
                     let start = sel.page_start();
                     let first = sel.layout.first_listed();
@@ -1644,8 +1654,8 @@ impl Engine {
                     self.back_to_composing(sel.origin);
                 }
             }
-            (Some(Command::Kakutei), _) | (_, Key::Enter) => self.commit_selection(sel, out),
-            (Some(Command::Cancel), _) | (_, Key::Escape) => {
+            (Some(Command::Kakutei | Command::Hiragana), _) => self.commit_selection(sel, out),
+            (Some(Command::Cancel), _) => {
                 self.back_to_composing(sel.origin);
             }
             // 候補を辞書から消す。消す前に y/n で確かめる。一覧が出ている
@@ -1675,7 +1685,8 @@ impl Engine {
                 self.commit_selection(sel, out);
                 self.on_direct(key, out);
             }
-            (_, Key::Tab | Key::Ctrl(_) | Key::Paste) => {
+            // 候補選択で意味を持たない操作と、割り当ての無いキー。
+            _ => {
                 out.handled = false;
                 self.state = State::Selecting(sel);
             }
@@ -1684,7 +1695,7 @@ impl Engine {
 
     /// 候補を消してよいか尋ねているあいだの打鍵。
     ///
-    /// `y` で消し、`n` `C-g` Esc でやめて候補に戻る。**ほかのキーは食べる。**
+    /// `y` で消し、`n` か `cancel` でやめて候補に戻る。**ほかのキーは食べる。**
     /// `X` は `x` の隣なので押し間違えやすい。そこから続けて打ったキーで
     /// 確定や削除が起きては困る。
     fn on_confirming_purge(&mut self, mut sel: Selecting, key: Key, out: &mut Out) {
@@ -1696,10 +1707,7 @@ impl Engine {
                 });
                 self.state = State::Direct;
             }
-            _ if key == Key::Char('n')
-                || key == Key::Escape
-                || self.command(key) == Some(Command::Cancel) =>
-            {
+            _ if key == Key::Char('n') || self.command(key) == Some(Command::Cancel) => {
                 sel.purging = false;
                 self.state = State::Selecting(sel);
             }
@@ -1850,8 +1858,7 @@ fn offers_completion(comp: &Composing) -> bool {
 
 /// 直接入力で意味を持つ操作。候補選択中に押されれば、暗黙の確定をしてから
 /// 直接入力として解釈し直す。
-const DIRECT_COMMANDS: [Command; 7] = [
-    Command::Cancel,
+const DIRECT_COMMANDS: [Command; 6] = [
     Command::HalfKatakana,
     Command::ToggleKana,
     Command::Ascii,

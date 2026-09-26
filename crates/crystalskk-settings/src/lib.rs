@@ -1175,7 +1175,9 @@ mod tests {
     fn the_template_keeps_the_familiar_keys() {
         use crystalskk_core::{Command, Key};
         let keys = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().engine.keys;
-        assert_eq!(keys.command(Key::Ctrl('j')), Some(Command::Kakutei));
+        assert_eq!(keys.command(Key::Ctrl('j')), Some(Command::Hiragana));
+        assert_eq!(keys.command(Key::Enter), Some(Command::Kakutei));
+        assert_eq!(keys.command(Key::Escape), Some(Command::Cancel));
         assert_eq!(keys.command(Key::Space), Some(Command::StartHenkan));
         assert_eq!(keys.first_char(Command::TakeCompletion), Some('.'));
     }

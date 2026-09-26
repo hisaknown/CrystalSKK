@@ -41,8 +41,11 @@ pub fn options() -> Options {
 /// 雛形と同じキーの割り当て。
 pub fn keymap() -> Keymap {
     Keymap::new(vec![
-        (Key::Ctrl('j'), Command::Kakutei),
+        (Key::Enter, Command::Kakutei),
+        (Key::Ctrl('j'), Command::Hiragana),
         (Key::Ctrl('g'), Command::Cancel),
+        (Key::Escape, Command::Cancel),
+        (Key::Backspace, Command::DeleteBackward),
         (Key::Space, Command::StartHenkan),
         (Key::Char('x'), Command::PreviousCandidate),
         (Key::Char('X'), Command::Purge),

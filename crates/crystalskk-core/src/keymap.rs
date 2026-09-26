@@ -7,12 +7,19 @@
 //! 引き受ける。ddskk の `skk-kakutei-key` や `skk-previous-candidate-char`
 //! と同じ考え方である (ADR-0038)。
 //!
-//! 割り当てないキーもある。
+//! Enter・Backspace・Escape も特別扱いしない。雛形でそれぞれ `kakutei`・
+//! `delete_backward`・`cancel` に並べてあるだけである。上下の矢印は SKK の
+//! 操作に使わない。
+//!
+//! **未確定が何も無いときに何もしない操作は、打鍵を食べない。** アプリへ
+//! 渡す。取り消すものの無い `cancel` や、確定するものの無い `kakutei` が
+//! そうである。未確定があるあいだは、何も起きなくても食べる。アプリへ渡すと、
+//! 未確定を残したまま文書が動いてしまう。
+//!
+//! 割り当てないものもある。
 //!
 //! - シフトで見出し語や送り仮名を始めること。SKK の根幹で、キーではなく
 //!   「大文字で打つ」ことに意味がある。
-//! - Enter・Backspace・Escape・上下の矢印。どのアプリでも意味の決まって
-//!   いるキーで、SKK はその意味に沿って使っているだけである。
 //! - 候補の一覧から選ぶキーと、消してよいかの y/n。前者は
 //!   `candidates.labels` で決まり、後者は問いへの答えである。
 //!
@@ -23,10 +30,14 @@ use crate::key::Key;
 /// 名前の付いた操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Command {
-    /// 確定する。直接入力ではひらがなへ戻る (英数からかなへ戻る唯一の手段)。
+    /// 確定する。モードは変えない。辞書登録では登録を終える。
     Kakutei,
+    /// 確定し、ひらがなへ戻る。英数からかなへ戻る手段でもある。
+    Hiragana,
     /// 取り消す。打ちかけを捨て、見出し語や候補を捨て、登録をやめる。
     Cancel,
+    /// 一文字消す。候補を選んでいるあいだは、確定してから一文字消す。
+    DeleteBackward,
     /// 変換を始める。候補選択では次の候補へ。
     StartHenkan,
     /// 前の候補へ。
@@ -55,9 +66,11 @@ pub enum Command {
 
 impl Command {
     /// すべての操作と、設定ファイルでの名前。
-    pub const ALL: [(Self, &'static str); 14] = [
+    pub const ALL: [(Self, &'static str); 16] = [
         (Self::Kakutei, "kakutei"),
+        (Self::Hiragana, "hiragana"),
         (Self::Cancel, "cancel"),
+        (Self::DeleteBackward, "delete_backward"),
         (Self::StartHenkan, "start_henkan"),
         (Self::PreviousCandidate, "previous_candidate"),
         (Self::Purge, "purge"),

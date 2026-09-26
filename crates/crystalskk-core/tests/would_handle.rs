@@ -170,7 +170,10 @@ fn the_two_answers_agree_all_the_way_through_a_sentence() {
 fn unusual_keymap() -> Keymap {
     Keymap::new(vec![
         (Key::Ctrl('m'), Command::Kakutei),
+        (Key::Enter, Command::Hiragana),
         (Key::Escape, Command::Cancel),
+        (Key::Ctrl('h'), Command::DeleteBackward),
+        (Key::Up, Command::PreviousCandidate),
         (Key::Tab, Command::StartHenkan),
         (Key::Space, Command::Complete),
         (Key::Ctrl('p'), Command::PreviousCandidate),
@@ -208,6 +211,7 @@ fn wandering_keys() -> Vec<Key> {
     let mut keys = every_key();
     keys.extend([
         Key::Ctrl('m'),
+        Key::Ctrl('h'),
         Key::Ctrl('p'),
         Key::Ctrl('x'),
         Key::Ctrl('k'),

@@ -202,7 +202,7 @@ fn engine_with(keys: crystalskk_core::Keymap) -> Engine {
 #[test]
 fn the_keys_follow_the_settings() {
     // `Ctrl+J` の代わりに `Ctrl+M` で確定し、かなへ戻る。
-    let mut engine = engine_with(rebind(Command::Kakutei, &[Key::Ctrl('m')]));
+    let mut engine = engine_with(rebind(Command::Hiragana, &[Key::Ctrl('m')]));
     press_all(&mut engine, "l");
     assert!(!engine.press(Key::Ctrl('j')).handled, "外したキーは素通し");
     engine.press(Key::Ctrl('m'));
@@ -236,4 +236,50 @@ fn a_space_that_does_not_convert_is_part_of_the_reading() {
     assert!(engine.candidates().is_none(), "空白では変換しない");
     engine.press(Key::Ctrl('t'));
     assert!(engine.candidates().is_some() || engine.registration().is_some());
+}
+
+#[test]
+fn a_command_that_does_nothing_goes_to_the_application() {
+    // 取り消すものも確定するものも無ければ、キーはアプリのもの。
+    let mut engine = engine_with(common::keymap());
+    for key in [
+        Key::Ctrl('g'),
+        Key::Escape,
+        Key::Ctrl('j'),
+        Key::Enter,
+        Key::Backspace,
+    ] {
+        assert!(!engine.would_handle(key), "{key:?}");
+        assert!(!engine.press(key).handled, "{key:?}");
+    }
+}
+
+#[test]
+fn a_command_that_undoes_typing_is_eaten() {
+    let mut engine = engine_with(common::keymap());
+    press_all(&mut engine, "k");
+    assert!(engine.press(Key::Ctrl('g')).handled, "打ちかけを捨てる");
+    assert_eq!(press_all(&mut engine, "a"), "あ", "k は捨てられている");
+}
+
+#[test]
+fn enter_confirms_without_changing_the_mode() {
+    // Enter (kakutei) は Ctrl+J (hiragana) と違い、英数からかなへ戻さない。
+    let mut engine = engine_with(common::keymap());
+    press_all(&mut engine, "l");
+    assert!(
+        !engine.press(Key::Enter).handled,
+        "英数の Enter は改行のまま"
+    );
+    assert_eq!(engine.mode(), crystalskk_core::InputMode::Ascii);
+    engine.press(Key::Ctrl('j'));
+    assert_eq!(engine.mode(), crystalskk_core::InputMode::Hiragana);
+}
+
+#[test]
+fn arrows_are_not_skk_keys() {
+    let mut engine = engine_with(common::keymap());
+    press_all(&mut engine, "Takusan ");
+    assert!(!engine.press(Key::Down).handled);
+    assert!(engine.candidates().is_some(), "候補はそのまま");
 }

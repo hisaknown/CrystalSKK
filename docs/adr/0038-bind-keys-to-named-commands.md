@@ -42,10 +42,10 @@ ddskk の `skk-kakutei-key` や `skk-previous-candidate-char` と同じ考え方
 
 ### 変換の操作
 
-`[keys]` に 14 の操作を置く。`kakutei`・`cancel`・`start_henkan`・
-`previous_candidate`・`purge`・`toggle_kana`・`half_katakana`・`ascii`・
-`full_ascii`・`abbrev`・`set_henkan_point`・`complete`・`take_completion`・
-`affix`。
+`[keys]` に 16 の操作を置く。`kakutei`・`hiragana`・`cancel`・
+`delete_backward`・`start_henkan`・`previous_candidate`・`purge`・
+`toggle_kana`・`half_katakana`・`ascii`・`full_ascii`・`abbrev`・
+`set_henkan_point`・`complete`・`take_completion`・`affix`。
 
 - 値はキーの名前の配列。幾つ並べてもよく、`[]` ならその操作は使わない。
 - **一つのキーは一つの操作にしか割り当てられない。** 重なれば、両方の名前を
@@ -58,13 +58,33 @@ ddskk の `skk-kakutei-key` や `skk-previous-candidate-char` と同じ考え方
 - `completion.take_key` は `keys.take_completion` に移した。補完の窓に出す
   キーは、そこに並べた最初の文字のキーである。
 
+**Enter・Backspace・Escape も特別扱いしない。** 雛形でそれぞれ `kakutei`・
+`delete_backward`・`cancel` に並べてあるだけである。CorvusSKK も同じで、
+Enter は Ctrl+M と並ぶ「確定」のキーの一つにすぎない。
+
+- Ctrl+J と Enter は、直接入力での働きが違う。Ctrl+J は英数やカタカナからも
+  ひらがなへ戻すが、Enter は入力モードを変えない。Enter を Ctrl+J と同じ操作に
+  すると、英数モードの Enter がかなへ戻って改行も入らなくなる。そこで二つに
+  分けた。`kakutei` (Enter) は確定だけ、`hiragana` (Ctrl+J) は確定して
+  ひらがなへ戻る。CorvusSKK も「確定」と「ひらがなモード」を分けている。
+- **上下の矢印は SKK の操作に使わない。** これまでは候補選択で前後の候補に
+  していたが、これは CorvusSKK の流儀である。ddskk では、▼ で矢印を押すと
+  確定してからカーソルが動く。どちらにしても SKK に要る操作ではないので、
+  割り当ての無いキーとして扱う。使いたければ `previous_candidate` などに並べ
+  られる。
+
+**未確定が何も無いときに何もしない操作は、打鍵を食べない。** アプリへ渡す。
+取り消すものの無い `cancel` や、確定するものの無い `kakutei`、すでにひらがなで
+打ちかけの無いときの `hiragana` がそうである。これまで直接入力の Ctrl+G は
+何もしなくても食べていたが、それをやめた。一方で、未確定があるあいだ (▽・▼・
+辞書登録) は、何も起きなくても食べる。アプリへ渡すと、未確定を残したまま
+文書が動いてしまう。候補の無いラベルキーや、確かめているあいだの y/n 以外の
+キーがそうである。
+
 割り当てないもの。
 
 - シフトで見出し語や送り仮名を始めること。SKK の根幹で、キーではなく
   「大文字で打つ」ことに意味がある。
-- Enter・Backspace・Escape・上下の矢印の、もともとの働き。どのアプリでも意味の
-  決まっているキーで、SKK はその意味に沿って使っているだけである。操作に
-  割り当てれば、その操作としても働く。
 - 候補の一覧から選ぶキー (`candidates.labels`) と、消してよいかの y/n。
 
 ローマ字の打ちかけの続きになる文字は、これまでどおり割り当てより先に
@@ -102,7 +122,13 @@ ddskk の `skk-kakutei-key` や `skk-previous-candidate-char` と同じ考え方
 
 ## 帰結
 
-- 雛形のキーはこれまでと同じなので、振る舞いは変わらない。
+- 雛形のキーはほぼこれまでどおりである。振る舞いが変わるのは二つ。直接入力で
+  何も打ちかけていないときの Ctrl+G がアプリへ届くようになった。上下の矢印で
+  候補を送れなくなった。
+- Enter で確定と改行を両方する流儀 (ddskk の既定、`skk-egg-like-newline` が
+  nil) は、`kakutei_newline` のような操作として足せば、Enter の割り当てを変える
+  だけで選べる。ただし「確定したうえでキーをアプリへ渡す」を TSF で作れるかを
+  先に確かめる必要があり、ここでは入れない。
 - 前の版の設定ファイルには `[keys]` が無いので、節ごと書き足される
   (ADR-0020)。`completion.take_key` を変えていた人は、それが知らない項目
   として知らされるので、`keys.take_completion` へ移す必要がある。
