@@ -29,17 +29,22 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{HSTRING, w};
 
 use crate::dpi;
+use crate::log;
 
 thread_local! {
     /// Direct2D の工場。入力スレッドごとに一つ持つ (一つのスレッドでしか使わない)。
     static D2D: Option<ID2D1Factory> = {
         // SAFETY: 工場を作るだけ。
-        unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }.ok()
+        unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
+            .inspect_err(|e| log::error(&format!("Direct2D の工場を作れなかった: {}", e.message())))
+            .ok()
     };
     /// DirectWrite の工場。
     static DWRITE: Option<IDWriteFactory> = {
         // SAFETY: 工場を作るだけ。
-        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()
+        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+            .inspect_err(|e| log::error(&format!("DirectWrite の工場を作れなかった: {}", e.message())))
+            .ok()
     };
     /// 設定の大きさと書体。設定を受け取るたびに差し替える ([`configure`])。
     static LOOK: RefCell<Look> = RefCell::new(Look::default());
@@ -264,7 +269,8 @@ pub fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
 pub fn with_target(hwnd: HWND, dpi: u32, draw: impl FnOnce(&ID2D1HwndRenderTarget)) {
     let mut client = RECT::default();
     // SAFETY: 窓の大きさを尋ねるだけ。
-    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+    if let Err(e) = unsafe { GetClientRect(hwnd, &mut client) } {
+        log::error(&format!("窓の大きさを尋ねられなかった: {}", e.message()));
         return;
     }
     let size = D2D_SIZE_U {
@@ -284,7 +290,8 @@ pub fn with_target(hwnd: HWND, dpi: u32, draw: impl FnOnce(&ID2D1HwndRenderTarge
         draw(&target);
         target.EndDraw(None, None)
     };
-    if ended.is_err() {
+    if let Err(e) = ended {
+        log::error(&format!("描き終えられなかった: {}", e.message()));
         forget(hwnd);
     }
 }
@@ -325,6 +332,7 @@ fn target(hwnd: HWND, size: D2D_SIZE_U) -> Option<ID2D1HwndRenderTarget> {
             factory
                 .as_ref()?
                 .CreateHwndRenderTarget(&properties, &window)
+                .inspect_err(|e| log::error(&format!("描く先を作れなかった: {}", e.message())))
                 .ok()
         }
     })?;

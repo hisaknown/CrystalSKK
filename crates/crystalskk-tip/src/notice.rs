@@ -84,12 +84,17 @@ impl Listener {
         // 管理者として動くアプリでは、ふつうの権限の辞書サーバからの知らせが
         // 窓に届かない (UIPI)。この一つだけは通す。
         if let Some(message) = settings_changed_message() {
+            //
+            // 隔離された入れ物 (app container) の中では、この操作そのものが
+            // 拒まれる。ただしそこでは、権限の高いサーバから低い側への送信なので、
+            // 許さなくても届く。**誤りとしては記録しない。**
+            //
             // SAFETY: 自分で作った窓に、受け取るメッセージを一つ足すだけ。
             if let Err(e) =
                 unsafe { ChangeWindowMessageFilterEx(hwnd, message, MSGFLT_ALLOW, None) }
             {
-                log::error(&format!(
-                    "設定の知らせを受け取れるようにできなかった: {}",
+                log::trace(&format!(
+                    "設定の知らせを通す許可を足せなかった (隔離された入れ物なら要らない): {}",
                     e.message()
                 ));
             }
