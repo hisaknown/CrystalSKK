@@ -130,6 +130,8 @@ pub struct TextService {
     /// **既定の値では動かない** (ADR-0020)。ファイルに書かれていない値で
     /// 動けば、利用者の知らない設定が効くことになる。
     settings: RefCell<Option<crystalskk_settings::Settings>>,
+    /// 登録している入切のキー。外すときに同じものを渡す。
+    preserved: RefCell<preserved::Registered>,
     /// 設定を受け取れなかった理由。受け取れたら消す。
     settings_problem: RefCell<Option<String>>,
     /// 最後に設定を尋ねた時刻。受け取れないあいだ、打鍵のたびに
@@ -173,6 +175,7 @@ impl TextService {
             atoms: RefCell::new(None),
             mode_window: Rc::new(crate::indicator::ModeWindow::new()),
             settings: RefCell::new(None),
+            preserved: RefCell::new(Vec::new()),
             settings_problem: RefCell::new(None),
             settings_asked: std::cell::Cell::new(None),
             announced: RefCell::new(None),
@@ -209,6 +212,21 @@ impl TextService {
             .map(|a| (a.keystrokes.clone(), a.client_id))
     }
 
+    /// 入切のキーを、設定と入切の状態に合わせて登録し直す。
+    ///
+    /// 設定を受け取っていなければ外すだけにする。
+    fn register_on_off(&self, open: bool) {
+        let Some((keystrokes, client_id)) = self.keystroke_manager() else {
+            return;
+        };
+        preserved::unregister(&keystrokes, &self.preserved.take());
+        let settings = self.settings.borrow();
+        if let Some(settings) = settings.as_ref() {
+            *self.preserved.borrow_mut() =
+                preserved::register(&keystrokes, client_id, open, &settings.on_off);
+        }
+    }
+
     /// いま打鍵を受け取ってよいか。
     ///
     /// 入力方式が切なら受け取らない。入力先が文字を断っていても受け取らない。
@@ -234,10 +252,7 @@ impl TextService {
         // 入切のキーを、いまの状態に合わせて登録し直す。入切を兼ねる
         // キーの意味は登録の順で決まるので、状態が変わるたびにやり直す。
         // 入にする手立てが無ければ、切られたまま二度と戻らない。
-        if let Some((keystrokes, client_id)) = self.keystroke_manager() {
-            preserved::unregister(&keystrokes, client_id);
-            preserved::register(&keystrokes, client_id, open);
-        }
+        self.register_on_off(open);
 
         if open {
             // 入にされた直後は半角英数から始める。**入にしただけで打鍵の
@@ -540,7 +555,16 @@ impl TextService {
             Ok(settings) => {
                 self.engine.borrow_mut().configure(settings.engine.clone());
                 self.source.set_ranking(&settings.ranker);
+                let keys_changed = self
+                    .settings
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|old| old.on_off != settings.on_off);
                 *self.settings.borrow_mut() = Some(settings);
+                // 入切のキーが変わったなら、いまの状態のまま登録し直す。
+                if keys_changed && let Some(thread_manager) = self.thread_manager() {
+                    self.register_on_off(compartment::is_open(&thread_manager));
+                }
                 if self.settings_problem.borrow_mut().take().is_some() {
                     log::write("設定を受け取れるようになりました");
                 }
@@ -626,7 +650,36 @@ impl TextService {
                 let problem = self.settings_problem.borrow().clone();
                 match problem {
                     Some(problem) => dialog::complain(&problem),
-                    None => dialog::tell("設定を読み直しました。"),
+                    None => {
+                        // キーとローマ字のぶつかりは、ここでだけ知らせる。
+                        // 意図してのこともあるので断らず、ふだんは黙っている
+                        // (ADR-0038)。
+                        let clashes = self
+                            .settings
+                            .borrow()
+                            .as_ref()
+                            .map(|settings| {
+                                crystalskk_settings::clashes(
+                                    &settings.engine.keys,
+                                    &settings.engine.romaji,
+                                )
+                            })
+                            .unwrap_or_default();
+                        if clashes.is_empty() {
+                            dialog::tell("設定を読み直しました。");
+                        } else {
+                            dialog::tell(&format!(
+                                "設定を読み直しました。\n\n\
+                                 次のキーはローマ字テーブルとぶつかっています。\
+                                 意図したものなら、このままで構いません。\n\n{}",
+                                clashes
+                                    .iter()
+                                    .map(|clash| format!("・{clash}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            ));
+                        }
+                    }
                 }
             }
             Command::ResetSettings | Command::ResetRomaji => {
@@ -764,7 +817,10 @@ impl TextService {
                 .collect(),
             current: completion.current,
             taken: completion.taken,
-            take_key: settings.engine.completion.take_key,
+            take_key: settings
+                .engine
+                .keys
+                .first_char(crystalskk_core::Command::TakeCompletion),
             number: completion.number,
             count: completion.count,
         }))
@@ -830,7 +886,7 @@ impl TextService {
                 let _ = source.UnadviseSink(cookie);
             }
         }
-        preserved::unregister(&activation.keystrokes, activation.client_id);
+        preserved::unregister(&activation.keystrokes, &self.preserved.take());
         langbar::remove(&activation.thread_manager, &activation.indicator);
         // 受け口を外す。外せなくても、保持していたものは落とす。
         // SAFETY: 有効化のときに受け取った識別子をそのまま返している。

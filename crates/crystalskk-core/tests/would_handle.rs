@@ -11,7 +11,7 @@ mod common;
 use std::collections::HashMap;
 
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
-use crystalskk_core::{Engine, Key};
+use crystalskk_core::{Command, Engine, Key, Keymap};
 
 struct FixedDict(HashMap<String, Vec<Candidate>>);
 
@@ -22,12 +22,16 @@ impl CandidateSource for FixedDict {
 }
 
 fn engine() -> Engine {
+    common::engine(Box::new(dict()))
+}
+
+fn dict() -> FixedDict {
     let entries = [
         ("かんじ", &["漢字", "感じ"][..]),
         ("おくr", &["送"][..]),
         ("skk", &["SKK"][..]),
     ];
-    let dict = FixedDict(
+    FixedDict(
         entries
             .iter()
             .map(|(key, words)| {
@@ -37,8 +41,7 @@ fn engine() -> Engine {
                 )
             })
             .collect(),
-    );
-    common::engine(Box::new(dict))
+    )
 }
 
 /// 照合に使う打鍵。エンジンが分岐する種類を一通り含める。
@@ -161,4 +164,75 @@ fn the_two_answers_agree_all_the_way_through_a_sentence() {
             assert_eq!(predicted, actual, "{source:?} の途中、{key:?} で食い違った");
         }
     }
+}
+
+/// 雛形とはまるで違う割り当て。使わない操作もある。
+fn unusual_keymap() -> Keymap {
+    Keymap::new(vec![
+        (Key::Ctrl('m'), Command::Kakutei),
+        (Key::Escape, Command::Cancel),
+        (Key::Tab, Command::StartHenkan),
+        (Key::Space, Command::Complete),
+        (Key::Ctrl('p'), Command::PreviousCandidate),
+        (Key::Ctrl('x'), Command::Purge),
+        (Key::Ctrl('k'), Command::ToggleKana),
+        (Key::Char('q'), Command::HalfKatakana),
+        (Key::Ctrl('l'), Command::Ascii),
+        (Key::Ctrl('a'), Command::Abbrev),
+        (Key::Char(','), Command::TakeCompletion),
+        (Key::Char('>'), Command::TakeCompletion),
+    ])
+    .expect("重なっていない")
+}
+
+/// 決まった乱数で打鍵を長く流し、一打ごとに照合する。
+fn wander(mut engine: Engine, keys: &[Key]) {
+    let mut seed: u32 = 12345;
+    let mut history = Vec::new();
+    for _ in 0..20000 {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        let key = keys[(seed >> 16) as usize % keys.len()];
+        history.push(key);
+        let predicted = engine.would_handle(key);
+        let actual = engine.press(key).handled;
+        assert_eq!(
+            predicted,
+            actual,
+            "{key:?} で食い違った。直前の打鍵: {:?}",
+            &history[history.len().saturating_sub(12)..]
+        );
+    }
+}
+
+fn wandering_keys() -> Vec<Key> {
+    let mut keys = every_key();
+    keys.extend([
+        Key::Ctrl('m'),
+        Key::Ctrl('p'),
+        Key::Ctrl('x'),
+        Key::Ctrl('k'),
+        Key::Ctrl('l'),
+        Key::Char('X'),
+        Key::Char('Q'),
+        Key::Char('>'),
+        Key::Char('.'),
+        Key::Char(','),
+        Key::Char('i'),
+        Key::Char('J'),
+    ]);
+    keys
+}
+
+#[test]
+fn the_two_answers_agree_on_a_long_walk() {
+    wander(engine(), &wandering_keys());
+}
+
+#[test]
+fn the_two_answers_agree_whatever_the_keys_are() {
+    let mut options = common::options();
+    options.keys = unusual_keymap();
+    let mut engine = Engine::new(Box::new(dict()));
+    engine.configure(options);
+    wander(engine, &wandering_keys());
 }

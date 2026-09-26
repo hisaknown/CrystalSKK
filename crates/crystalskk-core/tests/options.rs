@@ -5,9 +5,10 @@
 
 mod common;
 
+use common::rebind;
 use crystalskk_core::dict::{Candidate, CandidateSource, Query};
 use crystalskk_core::engine::Role;
-use crystalskk_core::{Engine, Key};
+use crystalskk_core::{Command, Engine, Key};
 
 /// 見出し語ごとに候補を返し、前方一致で補完する。
 struct Dict(Vec<(&'static str, Vec<String>)>);
@@ -143,7 +144,7 @@ fn the_minimum_length_decides_when_guessing_starts() {
 #[test]
 fn the_take_key_can_be_changed() {
     let mut options = common::options();
-    options.completion.take_key = ',';
+    options.keys = rebind(Command::TakeCompletion, &[Key::Char(',')]);
     let mut engine = Engine::new(Box::new(Dict::sample()));
     engine.configure(options);
 
@@ -188,4 +189,51 @@ fn the_same_settings_again_change_nothing() {
     press_all(&mut engine, "Kanji");
     engine.configure(common::options());
     assert!(engine.preedit().display().starts_with("▽かんじ"));
+}
+
+fn engine_with(keys: crystalskk_core::Keymap) -> Engine {
+    let mut options = common::options();
+    options.keys = keys;
+    let mut engine = Engine::new(Box::new(Dict::sample()));
+    engine.configure(options);
+    engine
+}
+
+#[test]
+fn the_keys_follow_the_settings() {
+    // `Ctrl+J` の代わりに `Ctrl+M` で確定し、かなへ戻る。
+    let mut engine = engine_with(rebind(Command::Kakutei, &[Key::Ctrl('m')]));
+    press_all(&mut engine, "l");
+    assert!(!engine.press(Key::Ctrl('j')).handled, "外したキーは素通し");
+    engine.press(Key::Ctrl('m'));
+    assert_eq!(press_all(&mut engine, "ka"), "か");
+}
+
+#[test]
+fn a_command_can_have_several_keys() {
+    let mut engine = engine_with(rebind(
+        Command::PreviousCandidate,
+        &[Key::Char('x'), Key::Ctrl('p')],
+    ));
+    press_all(&mut engine, "Takusan  ");
+    engine.press(Key::Ctrl('p'));
+    let view = engine.candidates().expect("選んでいる");
+    assert_eq!(view.index, 0);
+}
+
+#[test]
+fn a_command_without_keys_is_not_there() {
+    // `l` に何も割り当てなければ、ただの文字として打てる。
+    let mut engine = engine_with(rebind(Command::Ascii, &[]));
+    press_all(&mut engine, "lo");
+    assert_eq!(engine.mode(), crystalskk_core::InputMode::Hiragana);
+}
+
+#[test]
+fn a_space_that_does_not_convert_is_part_of_the_reading() {
+    let mut engine = engine_with(rebind(Command::StartHenkan, &[Key::Ctrl('t')]));
+    press_all(&mut engine, "/a b");
+    assert!(engine.candidates().is_none(), "空白では変換しない");
+    engine.press(Key::Ctrl('t'));
+    assert!(engine.candidates().is_some() || engine.registration().is_some());
 }

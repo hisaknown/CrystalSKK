@@ -7,6 +7,7 @@
 //! 値の正しさ (空でない、重ならない、など) は読み込む側が確かめてから
 //! 渡す。**ここに来た時点で使える値である。**
 
+use crate::keymap::Keymap;
 use crate::romaji::RomajiTable;
 
 /// エンジンの振る舞いを決める値の一式。
@@ -16,6 +17,8 @@ pub struct Options {
     pub candidates: CandidateOptions,
     /// ローマ字の規則表。利用者のファイルから読んだもの (ADR-0021)。
     pub romaji: RomajiTable,
+    /// キーの割り当て (ADR-0038)。
+    pub keys: Keymap,
 }
 
 /// 補完。
@@ -29,8 +32,6 @@ pub struct CompletionOptions {
     pub min_length: usize,
     /// 一度に覚えておく補完の数。Tab はこの範囲を巡る。
     pub limit: usize,
-    /// 補完候補を受け取り、変換して確定するキー。
-    pub take_key: char,
 }
 
 /// 候補の並べ方。

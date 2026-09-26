@@ -65,11 +65,14 @@ pub fn completion(view: &CompletionView, settings: &Settings) -> String {
         }
     };
     if !view.taken {
-        return format!(
-            "{}: {}",
-            settings.engine.completion.take_key,
-            show(view.current())
-        );
+        let take = settings
+            .engine
+            .keys
+            .first_char(crystalskk_core::Command::TakeCompletion);
+        return match take {
+            Some(key) => format!("{key}: {}", show(view.current())),
+            None => show(view.current()),
+        };
     }
     let page: Vec<String> = view
         .entries

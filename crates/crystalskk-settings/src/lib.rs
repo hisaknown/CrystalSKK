@@ -35,6 +35,10 @@ use std::path::Path;
 
 use std::path::PathBuf;
 
+mod keys;
+
+pub use keys::{Hotkey, HotkeyKey, OnOffKeys, clashes};
+
 use crystalskk_core::RomajiTable;
 use crystalskk_core::options::{CandidateOptions, CompletionOptions, Options};
 use toml_edit::{DocumentMut, Item, Table};
@@ -72,6 +76,8 @@ pub struct Settings {
     pub ranker: Ranker,
     /// 未確定の印を、文書に書くときの文字 (ADR-0033)。
     pub markers: Markers,
+    /// 入切のキー (ADR-0038)。**TIP だけが使う。**
+    pub on_off: OnOffKeys,
 }
 
 /// 未確定の印を、文書に書くときの文字。**TIP だけが使う。** CLI は
@@ -328,7 +334,7 @@ pub struct Window {
 pub struct Error(String);
 
 impl Error {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -508,6 +514,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
 
     let completion = section(&doc, "completion")?;
     let candidates = section(&doc, "candidates")?;
+    let keys = section(&doc, "keys")?;
     let table_name = romaji_table_name(&doc)?;
     let romaji = RomajiTable::parse(romaji)
         .map_err(|e| Error::new(format!("{table_name} を読めません: {e}")))?;
@@ -518,13 +525,13 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
                 dynamic: boolean(completion, "completion", "dynamic")?,
                 min_length: count(completion, "completion", "min_length")?,
                 limit: count(completion, "completion", "limit")?,
-                take_key: one_char(completion, "completion", "take_key")?,
             },
             candidates: CandidateOptions {
                 until_list: count(candidates, "candidates", "until_list")?,
                 labels: labels(candidates, "candidates", "labels")?,
             },
             romaji,
+            keys: keys::keymap(keys)?,
         },
         window: Window {
             show_reading: boolean(completion, "completion", "show_reading")?,
@@ -552,6 +559,7 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
             }
         },
         ranker: ranker(section(&doc, "ranker")?)?,
+        on_off: keys::on_off(keys)?,
     })
 }
 
@@ -795,7 +803,7 @@ fn section<'a>(doc: &'a DocumentMut, name: &str) -> Result<&'a Table, Error> {
     }
 }
 
-fn value<'a>(table: &'a Table, section: &str, key: &str) -> Result<&'a Item, Error> {
+pub(crate) fn value<'a>(table: &'a Table, section: &str, key: &str) -> Result<&'a Item, Error> {
     table
         .get(key)
         .ok_or_else(|| Error::new(format!("{section}.{key} がありません")))
@@ -834,18 +842,6 @@ fn string(table: &Table, section: &str, key: &str) -> Result<String, Error> {
                 "{section}.{key} は文字列で書いてください (例: \"▽\")"
             ))
         })
-}
-
-/// 一文字の文字列。
-fn one_char(table: &Table, section: &str, key: &str) -> Result<char, Error> {
-    let text = value(table, section, key)?.as_str();
-    let mut chars = text.into_iter().flat_map(str::chars);
-    match (chars.next(), chars.next()) {
-        (Some(c), None) if !c.is_whitespace() => Ok(c),
-        _ => Err(Error::new(format!(
-            "{section}.{key} は一文字で書いてください (例: \".\")"
-        ))),
-    }
 }
 
 /// 色の節。
@@ -1072,7 +1068,8 @@ mod tests {
 
     #[test]
     fn a_missing_section_is_written_in_whole() {
-        let user = "[completion]\ndynamic = false\nmin_length = 3\nlimit = 8\ntake_key = \",\"\nshow_reading = true\n";
+        let user =
+            "[completion]\ndynamic = false\nmin_length = 3\nlimit = 8\nshow_reading = true\n";
         let filled = fill(Some(user)).unwrap();
         // [completion] 以外の節の項目が、すべて書き足される。
         let expected: Vec<String> = leaves(template().as_table(), "")
@@ -1146,7 +1143,18 @@ mod tests {
         let cases = [
             ("labels = \"asdfjkl\"", "labels = \"\"", "candidates.labels"),
             ("labels = \"asdfjkl\"", "labels = \"asdfa\"", "二度"),
-            ("take_key = \".\"", "take_key = \"..\"", "一文字"),
+            ("abbrev = [\"/\"]", "abbrev = \"/\"", "配列"),
+            ("abbrev = [\"/\"]", "abbrev = [\"Alt+/\"]", "使えないキー"),
+            (
+                "abbrev = [\"/\"]",
+                "abbrev = [\"q\"]",
+                "keys.toggle_kana と keys.abbrev",
+            ),
+            (
+                "on_off = [\"半角/全角\", \"Alt+`\"]",
+                "on_off = [\"a\"]",
+                "keys.on_off",
+            ),
             ("min_length = 2", "min_length = 0", "1 以上"),
             ("dynamic = true", "dynamic = \"yes\"", "true か false"),
             ("until_list = 5", "until_list = 2.5", "整数"),
@@ -1161,6 +1169,32 @@ mod tests {
             let error = parse(&user, ROMAJI_TEMPLATE).expect_err(to);
             assert!(error.to_string().contains(expected), "{to}: {error}");
         }
+    }
+
+    #[test]
+    fn the_template_keeps_the_familiar_keys() {
+        use crystalskk_core::{Command, Key};
+        let keys = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().engine.keys;
+        assert_eq!(keys.command(Key::Ctrl('j')), Some(Command::Kakutei));
+        assert_eq!(keys.command(Key::Space), Some(Command::StartHenkan));
+        assert_eq!(keys.first_char(Command::TakeCompletion), Some('.'));
+    }
+
+    #[test]
+    fn a_command_can_be_left_without_keys() {
+        use crystalskk_core::Command;
+        let user = TEMPLATE.replace("purge = [\"X\"]", "purge = []");
+        let keys = parse(&user, ROMAJI_TEMPLATE).unwrap().engine.keys;
+        assert_eq!(keys.keys(Command::Purge).count(), 0);
+    }
+
+    #[test]
+    fn something_must_turn_the_input_on() {
+        let user = TEMPLATE
+            .replace("on_off = [\"半角/全角\", \"Alt+`\"]", "on_off = []")
+            .replace("on = [\"ImeOn\"]", "on = []");
+        let error = parse(&user, ROMAJI_TEMPLATE).unwrap_err();
+        assert!(error.to_string().contains("入にするキー"), "{error}");
     }
 
     #[test]

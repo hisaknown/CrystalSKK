@@ -161,7 +161,11 @@ fn converting_and_listing_work_with_the_shipped_values() {
 #[test]
 fn dynamic_completion_works_with_the_shipped_values() {
     let settings = shipped();
-    let take = settings.engine.completion.take_key;
+    let take = settings
+        .engine
+        .keys
+        .first_char(crystalskk_core::Command::TakeCompletion)
+        .expect("雛形は補完を文字のキーで受け取る");
     let mut engine = configured();
     press_all(&mut engine, "Kann");
     let guess = engine

@@ -144,9 +144,9 @@ impl Line {
         }
     }
 
-    fn keyed(key: char, text: impl Into<String>) -> Self {
+    fn keyed(key: impl Into<Option<char>>, text: impl Into<String>) -> Self {
         Self {
-            key: Some(key),
+            key: key.into(),
             ..Self::plain(text)
         }
     }
@@ -185,8 +185,9 @@ pub struct Completion {
     pub current: usize,
     /// もう受け取ったものか。
     pub taken: bool,
-    /// 補完候補を受け取るキー。受け取る前の一行に出す。
-    pub take_key: char,
+    /// 補完候補を受け取るキー。受け取る前の一行に出す。文字のキーを
+    /// 割り当てていなければ `None` で、キーは出さない。
+    pub take_key: Option<char>,
     /// いま何ページ目か。1 から数える。
     pub number: usize,
     /// 全部で何ページか。
@@ -1095,7 +1096,7 @@ mod tests {
     fn the_guess_shows_the_key_that_takes_it() {
         let line = Content::Completion(Completion {
             entries: vec!["漢字".to_owned()],
-            take_key: '.',
+            take_key: Some('.'),
             ..Completion::default()
         })
         .lines();
@@ -1107,7 +1108,7 @@ mod tests {
         // 次に何が来るかが見えないと、何度押せばよいか分からない。
         let content = Content::Completion(Completion {
             taken: true,
-            take_key: '.',
+            take_key: Some('.'),
             entries: vec!["漢字".to_owned(), "患者".to_owned()],
             current: 1,
             number: 1,
@@ -1124,7 +1125,7 @@ mod tests {
         // 同じキーが同じことをしないのに、案内を出したままにはできない。
         let lines = Content::Completion(Completion {
             taken: true,
-            take_key: '.',
+            take_key: Some('.'),
             entries: vec!["患者".to_owned()],
             current: 0,
             number: 1,
