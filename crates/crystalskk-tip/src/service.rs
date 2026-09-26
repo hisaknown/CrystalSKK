@@ -1004,7 +1004,7 @@ impl TextService_Impl {
     ///
     /// 戻り値は「この打鍵を食べたか」。食べなかった打鍵はアプリへ渡る。
     fn handle_key(&self, context: Ref<ITfContext>, wparam: WPARAM) -> BOOL {
-        if !self.this.accepts_keys() {
+        if keys::is_resent() || !self.this.accepts_keys() {
             return false.into();
         }
         let before = self.this.engine.borrow().mode();
@@ -1094,12 +1094,12 @@ impl TextService_Impl {
         if self.this.engine.borrow().mode() != before && self.this.indicates(|i| i.on_switch) {
             self.this.announce_mode(Some(context.clone()));
         }
-        // 確定と改行を一度にするときは、確定を書いたうえでキーをアプリへ
-        // 渡す。`OnTestKeyDown` では食べると答えているので、**二つの答えが
-        // ここだけ食い違う。** TSF は `OnKeyDown` の答えで決める (ADR-0039)。
+        // 確定と改行を一度にするときは、確定を書いたうえで同じキーを送り
+        // 直す。この打鍵は食べる。**食べなかったと答えるだけでは届かない
+        // アプリがある** (ADR-0039)。
         if response.pass_through {
-            log::trace("確定を書いたうえで、キーをアプリへ渡す");
-            return false.into();
+            log::trace("確定を書いたので、キーを送り直す");
+            keys::resend(wparam);
         }
         response.handled.into()
     }
@@ -1109,6 +1109,11 @@ impl TextService_Impl {
         // 打ち始めたら、カーソルのそばのモードの窓は消す。**打っている字に
         // かぶる。** モードを変える打鍵なら、処理のあとで出し直す。
         self.this.mode_window.hide();
+        // こちらが送り直したキー。確定はもう済んでいる。
+        if keys::is_resent() {
+            log::trace("送り直したキーなので素通しする");
+            return false.into();
+        }
         if !self.this.accepts_keys() {
             log::trace("入力方式が切か、入力先が打鍵を断っているので素通しする");
             return false.into();

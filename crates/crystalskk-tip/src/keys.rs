@@ -18,10 +18,13 @@
 use crystalskk_core::Key;
 use windows::Win32::Foundation::WPARAM;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, GetKeyboardLayout, GetKeyboardState, ToUnicodeEx, VIRTUAL_KEY, VK_BACK,
+    GetKeyState, GetKeyboardLayout, GetKeyboardState, INPUT, INPUT_0, INPUT_KEYBOARD,
+    KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, ToUnicodeEx, VIRTUAL_KEY, VK_BACK,
     VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_INSERT, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
     VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
+
+use windows::Win32::UI::WindowsAndMessaging::GetMessageExtraInfo;
 
 use crate::log;
 
@@ -181,4 +184,48 @@ fn to_character(virtual_key: VIRTUAL_KEY, state: &[u8; KEY_STATE_LEN]) -> Option
     } else {
         Some(character)
     }
+}
+
+/// 送り直した打鍵に付ける印。`dwExtraInfo` に入れて、戻ってきたときに見分ける。
+///
+/// 値に意味は無い。ほかのソフトの印と重ならなければよい ("CSKK")。
+const RESENT_MARK: usize = 0x4353_4B4B;
+
+/// 確定したあとで、同じキーをアプリへ送り直す (ADR-0039)。
+///
+/// `OnKeyDown` で食べなかったと答えるだけでは、アプリによっては届かない。
+/// Firefox は `OnTestKeyDown` の答えを見てキーを捨ててしまう。そこで一度
+/// 食べ、確定を書いてから本物のキーとして送り直す。修飾キーは押されたまま
+/// なので、送るのは仮想キーの押し下げと離しだけでよい。
+pub fn resend(wparam: WPARAM) {
+    let Ok(code) = u16::try_from(wparam.0 & 0xFFFF) else {
+        return;
+    };
+    let input = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(code),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: RESENT_MARK,
+            },
+        },
+    };
+    let inputs = [input(KEYBD_EVENT_FLAGS(0)), input(KEYEVENTF_KEYUP)];
+    // SAFETY: 長さ付きの配列と、その一つの大きさを渡している。
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        log::error(&format!("キーを送り直せなかった (VK={code:#04x})"));
+    }
+}
+
+/// いま処理している打鍵は、こちらが送り直したものか。
+///
+/// そうなら何も見ずにアプリへ渡す。**送り直したキーをまた食べると、
+/// 確定のたびに同じキーが回り続ける。**
+pub fn is_resent() -> bool {
+    // SAFETY: このスレッドが最後に受け取ったメッセージの付加情報を読むだけ。
+    unsafe { GetMessageExtraInfo() }.0 as usize == RESENT_MARK
 }
