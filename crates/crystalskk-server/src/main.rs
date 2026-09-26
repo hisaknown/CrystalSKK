@@ -106,6 +106,12 @@ fn serve() -> ExitCode {
         }
     };
 
+    // 設定ファイルが変わったら、全ウィンドウへ知らせる (ADR-0040)。
+    match crystalskk_server::paths::settings() {
+        Ok(settings) => crystalskk_server::announce::watch(settings),
+        Err(e) => eprintln!("crystalskk-server: 設定ファイルの置き場所が分かりません: {e}"),
+    }
+
     let listener = match pipe::Listener::open(&names::pipe()) {
         Ok(listener) => listener,
         Err(e) => {

@@ -75,6 +75,13 @@ pub enum Reset {
     Romaji,
 }
 
+/// 設定ファイルが変わったという知らせの名前 (ADR-0040)。
+///
+/// サーバはこの名前で Windows に番号を振ってもらい (`RegisterWindowMessageW`)、
+/// 全ウィンドウへ送る。TIP も同じ名前で番号を得て、受けたら設定を取り直す。
+/// **名前が同じなら、どのプロセスでも番号は同じになる。**
+pub const SETTINGS_CHANGED_MESSAGE: &str = "CrystalSKK.SettingsChanged";
+
 /// TIP からサーバへの頼み。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -108,6 +115,13 @@ pub enum Request {
     /// **開くのもサーバである。** 隔離された入れ物の中からは、エクス
     /// プローラーを立ち上げられないことがある。
     OpenFolder,
+    /// 設定ファイルが変わったと、全ウィンドウへ知らせる (ADR-0040)。
+    ///
+    /// ふだんはサーバがファイルを見張って自分で知らせる。これは利用者が
+    /// 「設定を検査する」を選んだときの頼みで、見張りの取りこぼしへの
+    /// 備えを兼ねる。**知らせるのもサーバである。** 隔離された入れ物の中の
+    /// TIP から送っても、ふつうのアプリの窓には届かない。
+    Announce,
     /// ユーザー辞書を書き出す。
     Save,
     /// 終わる。
@@ -160,6 +174,7 @@ impl Request {
             Self::Reset(Reset::Settings) => format!("reset{FIELD}settings"),
             Self::Reset(Reset::Romaji) => format!("reset{FIELD}romaji"),
             Self::OpenFolder => "open-folder".to_owned(),
+            Self::Announce => "announce".to_owned(),
             Self::Save => "save".to_owned(),
             Self::Exit => "exit".to_owned(),
         }
@@ -213,6 +228,7 @@ impl Request {
                 _ => None,
             },
             "open-folder" => Some(Self::OpenFolder),
+            "announce" => Some(Self::Announce),
             "save" => Some(Self::Save),
             "exit" => Some(Self::Exit),
             _ => None,
@@ -396,6 +412,7 @@ mod tests {
         roundtrip(&Request::Reset(Reset::Settings));
         roundtrip(&Request::Reset(Reset::Romaji));
         roundtrip(&Request::OpenFolder);
+        roundtrip(&Request::Announce);
     }
 
     #[test]

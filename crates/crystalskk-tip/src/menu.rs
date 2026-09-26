@@ -22,8 +22,9 @@ use windows::core::{HSTRING, Result};
 pub enum Command {
     /// 設定ファイルの置き場所を開く。
     OpenFolder,
-    /// 設定を読み直す。書き換えたものを、入力先を切り替えずに効かせる。
-    Reload,
+    /// 設定を検査する。読めているか、キーとローマ字がぶつかっていないかを
+    /// 窓に出す。ほかのアプリの TIP にも取り直させる (ADR-0040)。
+    Validate,
     /// 設定ファイルを雛形で上書きする。
     ResetSettings,
     /// ローマ字テーブルを雛形で上書きする。
@@ -35,7 +36,7 @@ impl Command {
     fn id(self) -> u32 {
         match self {
             Self::OpenFolder => 1,
-            Self::Reload => 2,
+            Self::Validate => 2,
             Self::ResetSettings => 3,
             Self::ResetRomaji => 4,
         }
@@ -56,7 +57,7 @@ impl Command {
 /// 上書きの二つには「…」を付ける。**押すと確かめてくる**という印である。
 pub const ITEMS: &[Option<(Command, &str)>] = &[
     Some((Command::OpenFolder, "設定フォルダを開く")),
-    Some((Command::Reload, "設定を読み直す")),
+    Some((Command::Validate, "設定を検査する")),
     None,
     Some((Command::ResetSettings, "設定ファイルを雛形で上書き…")),
     Some((Command::ResetRomaji, "ローマ字テーブルを雛形で上書き…")),

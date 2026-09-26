@@ -740,7 +740,12 @@ fn free_backup_name(path: &Path) -> PathBuf {
 }
 
 /// ローマ字テーブルの場所。設定ファイルと同じ場所からの相対で解く。
-fn romaji_path(settings: &Path, text: &str) -> Result<PathBuf, Error> {
+/// 設定ファイルの全文から、ローマ字テーブルのファイルの場所を解く。
+///
+/// 相対で書かれていれば、設定ファイルと同じ場所からの相対とみなす。
+/// **ファイルには触れない。** 辞書サーバが、見張るファイルを決めるのにも使う
+/// (ADR-0040)。
+pub fn romaji_path(settings: &Path, text: &str) -> Result<PathBuf, Error> {
     let doc = parse_document(text)?;
     let name = romaji_table_name(&doc)?;
     let name = Path::new(&name);

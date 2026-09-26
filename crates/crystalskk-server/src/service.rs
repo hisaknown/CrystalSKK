@@ -117,6 +117,7 @@ impl Service {
             Request::Settings => (self.settings(), Next::Listen),
             Request::Reset(what) => (self.reset(what), Next::Listen),
             Request::OpenFolder => (self.open_folder(), Next::Listen),
+            Request::Announce => (announce(), Next::Listen),
             Request::Save => (self.save(), Next::Listen),
             // 答えてから畳む。頼んだ側は「聞き届けた」ことを知れる。
             Request::Exit => (self.save(), Next::Stop),
@@ -368,6 +369,14 @@ impl Service {
             Ok(()) => Response::Ok(Vec::new()),
             Err(e) => Response::Error(format!("ユーザー辞書を書けません: {e}")),
         }
+    }
+}
+
+/// 設定ファイルが変わったと、全ウィンドウへ知らせる (ADR-0040)。
+fn announce() -> Response {
+    match crate::announce::announce() {
+        Ok(()) => Response::Done("設定の変化を知らせました。".to_owned()),
+        Err(e) => Response::Error(format!("設定の変化を知らせられません: {e}")),
     }
 }
 

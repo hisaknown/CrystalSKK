@@ -46,6 +46,7 @@ pub mod langbar;
 pub mod launch;
 pub mod log;
 pub mod menu;
+pub mod notice;
 pub mod popup;
 pub mod preserved;
 pub mod profile;
@@ -84,7 +85,7 @@ pub extern "system" fn DllMain(module: HMODULE, reason: u32, _reserved: *mut c_v
     }
     if reason == DLL_PROCESS_DETACH {
         candwin::unregister_class();
-        theme::unregister_class();
+        notice::unregister_class();
         indicator::unregister_class();
     }
     true.into()

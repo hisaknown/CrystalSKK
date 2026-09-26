@@ -74,9 +74,10 @@ struct Activation {
     open_close_cookie: Option<u32>,
     /// 入力先 (文書) の焦点の変化を聞くための受付番号。外すときに要る。
     thread_events_cookie: Option<u32>,
-    /// タスクバーの明るさの変化を聞く。落とせば聞くのをやめる。
+    /// タスクバーの明るさと、設定ファイルの変化を聞く。落とせば聞くのを
+    /// やめる。
     #[allow(dead_code, reason = "持っていること自体が役目")]
-    theme_watcher: Option<crate::theme::Watcher>,
+    listener: Option<crate::notice::Listener>,
     /// 入力先の組版の変化を聞く受け口 (自分自身)。小窓を出すたびに、
     /// その入力先へ差し出す (ADR-0028)。
     layout_sink: ITfTextLayoutSink,
@@ -632,6 +633,65 @@ impl TextService {
         }
     }
 
+    /// 設定ファイルが変わったと知らされた。写しを取り直す (ADR-0040)。
+    ///
+    /// 取り直した設定が前と違えば、打ちかけの未確定も片づける。エンジンは
+    /// 設定が変わると途中経過を捨てるので、**文書に未確定の見た目だけが
+    /// 残る。** 同じなら何もしない (書き足しのあとで、もう一度知らされる)。
+    fn on_settings_changed(&self) {
+        let before = self.settings.borrow().clone();
+        self.refresh_settings();
+        if *self.settings.borrow() != before {
+            self.drop_composition();
+        }
+    }
+
+    /// 設定を検査し、結果を窓に出す (ADR-0040)。
+    ///
+    /// 読み直すきっかけとしてはもう要らない (書き換えればサーバが知らせて
+    /// くる)。残る役目は、利用者が確かめることと、キーとローマ字のぶつかりを
+    /// 知らせることである。ぶつかりは**ここでだけ**知らせる。意図してのことも
+    /// あるので断らず、ふだんは黙っている (ADR-0038)。
+    ///
+    /// サーバにも全体への知らせを頼む。見張りが取りこぼしていても、これで
+    /// ほかのアプリの TIP が取り直す。
+    fn validate_settings(&self) {
+        self.on_settings_changed();
+        let announced = dict::ask_to_do(&crystalskk_ipc::Request::Announce);
+        let problem = self.settings_problem.borrow().clone();
+        if let Some(problem) = problem {
+            dialog::complain(&problem);
+            return;
+        }
+        let clashes = self
+            .settings
+            .borrow()
+            .as_ref()
+            .map(|settings| {
+                crystalskk_settings::clashes(&settings.engine.keys, &settings.engine.romaji)
+            })
+            .unwrap_or_default();
+        let mut told = String::from("設定は読めています。");
+        if !clashes.is_empty() {
+            told.push_str(&format!(
+                "\n\n次のキーはローマ字テーブルとぶつかっています。\
+                 意図したものなら、このままで構いません。\n\n{}",
+                clashes
+                    .iter()
+                    .map(|clash| format!("・{clash}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        if let Err(problem) = announced {
+            told.push_str(&format!(
+                "\n\nほかのアプリには知らせられませんでした。それらのアプリでは、\
+                 入力先を切り替えると効きます。({problem})"
+            ));
+        }
+        dialog::tell(&told);
+    }
+
     /// トレイの品書きで選ばれたことをする。
     ///
     /// ファイルを触るのは辞書サーバで、こちらは頼むだけである。**結果は
@@ -645,43 +705,7 @@ impl TextService {
                     dialog::complain(&problem);
                 }
             }
-            Command::Reload => {
-                self.refresh_settings();
-                let problem = self.settings_problem.borrow().clone();
-                match problem {
-                    Some(problem) => dialog::complain(&problem),
-                    None => {
-                        // キーとローマ字のぶつかりは、ここでだけ知らせる。
-                        // 意図してのこともあるので断らず、ふだんは黙っている
-                        // (ADR-0038)。
-                        let clashes = self
-                            .settings
-                            .borrow()
-                            .as_ref()
-                            .map(|settings| {
-                                crystalskk_settings::clashes(
-                                    &settings.engine.keys,
-                                    &settings.engine.romaji,
-                                )
-                            })
-                            .unwrap_or_default();
-                        if clashes.is_empty() {
-                            dialog::tell("設定を読み直しました。");
-                        } else {
-                            dialog::tell(&format!(
-                                "設定を読み直しました。\n\n\
-                                 次のキーはローマ字テーブルとぶつかっています。\
-                                 意図したものなら、このままで構いません。\n\n{}",
-                                clashes
-                                    .iter()
-                                    .map(|clash| format!("・{clash}"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            ));
-                        }
-                    }
-                }
-            }
+            Command::Validate => self.validate_settings(),
             Command::ResetSettings | Command::ResetRomaji => {
                 let (what, target) = match command {
                     Command::ResetSettings => (
@@ -936,7 +960,13 @@ impl TextService_Impl {
         indicator_object.set_handler(move |command| service.on_menu(command));
         // タスクバーの明るさが変わったら、入力モードの絵を描き直させる。
         let follower = indicator_object.clone();
-        let theme_watcher = crate::theme::Watcher::start(move || follower.follow_theme());
+        // 設定ファイルが変わったと辞書サーバが知らせてきたら、写しを取り
+        // 直す (ADR-0040)。
+        let reloader = self.to_object();
+        let listener = crate::notice::Listener::start(crate::notice::Handlers {
+            theme: Box::new(move || follower.follow_theme()),
+            settings: Box::new(move || reloader.on_settings_changed()),
+        });
         if let Err(e) = langbar::add(&thread_manager, &indicator) {
             log::error(&format!("言語バーに項目を出せなかった: {}", e.message()));
         }
@@ -969,7 +999,7 @@ impl TextService_Impl {
             indicator_object,
             open_close_cookie,
             thread_events_cookie,
-            theme_watcher,
+            listener,
             layout_sink,
         });
 
