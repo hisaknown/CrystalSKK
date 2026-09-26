@@ -233,14 +233,14 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-art"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "resvg",
 ]
 
 [[package]]
 name = "crystalskk-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "crystalskk-core",
@@ -250,11 +250,11 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "crystalskk-dict"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
  "encoding_rs",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-fetch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
  "crystalskk-dict",
@@ -272,14 +272,14 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
 ]
 
 [[package]]
 name = "crystalskk-lm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
  "libloading",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
  "crystalskk-dict",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-settings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-core",
  "toml_edit",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-setup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-dict",
  "crystalskk-fetch",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "crystalskk-tip"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crystalskk-art",
  "crystalskk-core",
