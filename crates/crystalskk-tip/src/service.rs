@@ -1094,6 +1094,13 @@ impl TextService_Impl {
         if self.this.engine.borrow().mode() != before && self.this.indicates(|i| i.on_switch) {
             self.this.announce_mode(Some(context.clone()));
         }
+        // 確定と改行を一度にするときは、確定を書いたうえでキーをアプリへ
+        // 渡す。`OnTestKeyDown` では食べると答えているので、**二つの答えが
+        // ここだけ食い違う。** TSF は `OnKeyDown` の答えで決める (ADR-0039)。
+        if response.pass_through {
+            log::trace("確定を書いたうえで、キーをアプリへ渡す");
+            return false.into();
+        }
         response.handled.into()
     }
 

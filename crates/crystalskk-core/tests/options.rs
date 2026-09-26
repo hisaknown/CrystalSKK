@@ -286,3 +286,36 @@ fn going_back_to_hiragana_is_eaten_even_in_hiragana() {
     assert!(engine.press(Key::Ctrl('j')).handled);
     assert_eq!(engine.mode(), crystalskk_core::InputMode::Hiragana);
 }
+
+#[test]
+fn kakutei_newline_confirms_and_lets_the_key_through() {
+    let mut engine = engine_with(rebind(Command::KakuteiNewline, &[Key::Ctrl('m')]));
+    press_all(&mut engine, "Kanji");
+    let response = engine.press(Key::Ctrl('m'));
+    assert_eq!(response.commit, "かんじ");
+    assert!(
+        response.handled && response.pass_through,
+        "確定して、キーも渡す"
+    );
+
+    press_all(&mut engine, "Kanji ");
+    let response = engine.press(Key::Ctrl('m'));
+    assert_eq!(response.commit, "漢字");
+    assert!(response.pass_through);
+
+    // 確定するものが無ければ、ただ素通しする。
+    let response = engine.press(Key::Ctrl('m'));
+    assert!(!response.handled && !response.pass_through);
+}
+
+#[test]
+fn kakutei_newline_does_not_leave_the_registration() {
+    // 登録の中で確定した語は欄に入る。キーを文書へ渡してはいけない。
+    let mut engine = engine_with(rebind(Command::KakuteiNewline, &[Key::Ctrl('m')]));
+    press_all(&mut engine, "Mikoto ");
+    assert!(engine.registration().is_some(), "登録に入った");
+    press_all(&mut engine, "Kanji");
+    let response = engine.press(Key::Ctrl('m'));
+    assert!(!response.pass_through);
+    assert!(engine.registration().is_some(), "まだ登録の中");
+}

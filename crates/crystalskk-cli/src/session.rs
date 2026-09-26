@@ -184,7 +184,8 @@ impl Session {
         // エンジンが受け取らなかった打鍵は、そのままアプリに届く。ここでは
         // 入力先アプリの役をこちらが務める。半角英数モードで文字が消えて
         // 見えないのは、この肩代わりがないと起きる。
-        if !response.handled {
+        // 確定と改行を一度にするときも、確定のあとで同じように届く。
+        if !response.handled || response.pass_through {
             self.apply_to_document(key);
         }
     }

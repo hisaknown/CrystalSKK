@@ -36,6 +36,9 @@ use crate::key::Key;
 pub enum Command {
     /// 確定する。モードは変えない。辞書登録では登録を終える。
     Kakutei,
+    /// 確定し、押したキーをアプリへも渡す。Enter に割り当てれば、確定と
+    /// 改行を一度にする (ddskk の既定)。確定するものが無ければ何もしない。
+    KakuteiNewline,
     /// 確定し、ひらがなへ戻る。英数からかなへ戻る手段でもある。
     Hiragana,
     /// 取り消す。打ちかけを捨て、見出し語や候補を捨て、登録をやめる。
@@ -70,8 +73,9 @@ pub enum Command {
 
 impl Command {
     /// すべての操作と、設定ファイルでの名前。
-    pub const ALL: [(Self, &'static str); 16] = [
+    pub const ALL: [(Self, &'static str); 17] = [
         (Self::Kakutei, "kakutei"),
+        (Self::KakuteiNewline, "kakutei_newline"),
         (Self::Hiragana, "hiragana"),
         (Self::Cancel, "cancel"),
         (Self::DeleteBackward, "delete_backward"),

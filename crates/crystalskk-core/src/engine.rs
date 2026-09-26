@@ -254,6 +254,12 @@ pub enum Event {
 pub struct Response {
     /// エンジンがこのキーを処理したか。`false` ならアプリへ素通しする。
     pub handled: bool,
+    /// 処理したうえで、このキーをアプリへも渡すか。
+    ///
+    /// 確定と改行を一度にする (`kakutei_newline`) ときに立つ。確定を文書に
+    /// 書いてから、キーそのものはアプリが受け取る。**`handled` とは別に持つ。**
+    /// エンジンは処理しているので、[`Engine::would_handle`] との一致は崩さない。
+    pub pass_through: bool,
     /// アプリへ確定入力する文字列。
     pub commit: String,
     /// 未確定の表示状態。
@@ -401,6 +407,7 @@ enum State {
 #[derive(Default)]
 struct Out {
     handled: bool,
+    pass_through: bool,
     commit: String,
     events: Vec<Event>,
 }
@@ -586,9 +593,15 @@ impl Engine {
         }
         if !self.mode.is_kana() {
             return match (command, key) {
-                (Some(Command::Cancel | Command::Kakutei | Command::DeleteBackward), _) => {
-                    registering
-                }
+                (
+                    Some(
+                        Command::Cancel
+                        | Command::Kakutei
+                        | Command::KakuteiNewline
+                        | Command::DeleteBackward,
+                    ),
+                    _,
+                ) => registering,
                 // 登録中は英数モードでも打鍵を受け取る。**登録語を打って
                 // いるのだから、アプリへ抜けては困る。**
                 (_, Key::Char(_) | Key::Space) => self.mode == InputMode::FullAscii || registering,
@@ -599,7 +612,9 @@ impl Engine {
             // 打ちかけを捨てるか、登録を取りやめるときだけ受け取る。
             (Some(Command::Cancel), _) => registering || !self.romaji.is_empty(),
             // 未確定を確定させるとき、または辞書登録を終えるときだけ受け取る。
-            (Some(Command::Kakutei), _) => registering || self.romaji.pending_kana().is_some(),
+            (Some(Command::Kakutei | Command::KakuteiNewline), _) => {
+                registering || self.romaji.pending_kana().is_some()
+            }
             // 消すものがあるときだけ受け取る。登録中はいつでも受け取る。
             // **登録語が空でもアプリへ渡すと、置いてある未確定が消える。**
             (Some(Command::DeleteBackward), _) => registering || !self.romaji.is_empty(),
@@ -607,6 +622,14 @@ impl Engine {
             (_, Key::Char(_) | Key::Space) => true,
             _ => false,
         }
+    }
+
+    /// 確定したあと、キーをアプリへも渡すか。
+    ///
+    /// 辞書登録の中では渡さない。確定した語は登録の欄に入るもので、改行を
+    /// 文書へ送る場面ではない。
+    fn passes_newline(&self, command: Command) -> bool {
+        command == Command::KakuteiNewline && self.registrations.is_empty()
     }
 
     /// 辞書登録の欄へ文字列を貼る。
@@ -630,6 +653,7 @@ impl Engine {
         }
         Response {
             handled,
+            pass_through: false,
             commit: String::new(),
             preedit: self.preedit(),
             candidates: self.candidates(),
@@ -646,6 +670,7 @@ impl Engine {
         if !self.is_configured() {
             return Response {
                 handled: false,
+                pass_through: false,
                 commit: String::new(),
                 preedit: self.preedit(),
                 candidates: None,
@@ -669,6 +694,7 @@ impl Engine {
 
         Response {
             handled: out.handled,
+            pass_through: out.pass_through,
             commit: out.commit,
             preedit: self.preedit(),
             candidates: self.candidates(),
@@ -1030,13 +1056,14 @@ impl Engine {
                     self.romaji.clear();
                 }
             }
-            (Some(Command::Kakutei), _) => {
+            (Some(command @ (Command::Kakutei | Command::KakuteiNewline)), _) => {
                 if self.registrations.is_empty() {
                     let before = out.commit.len();
                     self.flush_romaji(out);
                     // 未確定を確定させただけなら改行は送らない。何もなければ
                     // 改行はアプリの仕事なので素通しする。
                     out.handled = out.commit.len() != before;
+                    out.pass_through = out.handled && command == Command::KakuteiNewline;
                 } else {
                     self.flush_romaji(out);
                     self.finish_registration(out);
@@ -1143,7 +1170,9 @@ impl Engine {
         let registering = !self.registrations.is_empty();
         match (self.command(key), self.mode, key) {
             (Some(Command::Cancel), _, _) if registering => self.cancel_registration(out),
-            (Some(Command::Kakutei), _, _) if registering => self.finish_registration(out),
+            (Some(Command::Kakutei | Command::KakuteiNewline), _, _) if registering => {
+                self.finish_registration(out);
+            }
             (Some(Command::DeleteBackward), _, _) if registering => {
                 // 欄が空でも食べる。アプリへ渡すと未確定が消える。
                 if let Some(frame) = self.registrations.last_mut() {
@@ -1213,11 +1242,15 @@ impl Engine {
                 self.romaji.clear();
                 self.state = State::Direct;
             }
-            (Some(Command::Kakutei | Command::Hiragana), _) => {
+            (
+                Some(command @ (Command::Kakutei | Command::KakuteiNewline | Command::Hiragana)),
+                _,
+            ) => {
                 self.absorb_pending(&mut comp);
                 let text = self.commit_text_of(&comp);
                 self.emit(&text, out);
                 self.state = State::Direct;
+                out.pass_through = self.passes_newline(command);
             }
             (Some(Command::ToggleKana), _) if !comp.abbrev => {
                 self.absorb_pending(&mut comp);
@@ -1523,6 +1556,7 @@ impl Engine {
                     | Command::PreviousCandidate
                     | Command::DeleteBackward
                     | Command::Kakutei
+                    | Command::KakuteiNewline
                     | Command::Hiragana
                     | Command::Cancel
                     | Command::Purge
@@ -1543,6 +1577,7 @@ impl Engine {
                 Some(
                     Command::Cancel
                     | Command::Kakutei
+                    | Command::KakuteiNewline
                     | Command::Hiragana
                     | Command::DeleteBackward,
                 ),
@@ -1645,7 +1680,13 @@ impl Engine {
                     self.back_to_composing(sel.origin);
                 }
             }
-            (Some(Command::Kakutei | Command::Hiragana), _) => self.commit_selection(sel, out),
+            (
+                Some(command @ (Command::Kakutei | Command::KakuteiNewline | Command::Hiragana)),
+                _,
+            ) => {
+                self.commit_selection(sel, out);
+                out.pass_through = self.passes_newline(command);
+            }
             (Some(Command::Cancel), _) => {
                 self.back_to_composing(sel.origin);
             }
