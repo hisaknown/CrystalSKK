@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -327,13 +327,38 @@ fn target(hwnd: HWND, size: D2D_SIZE_U) -> Option<ID2D1HwndRenderTarget> {
         presentOptions: D2D1_PRESENT_OPTIONS_NONE,
     };
     let created = D2D.with(|factory| {
+        let factory = factory.as_ref()?;
         // SAFETY: 自分の窓に描く先を作るだけ。
-        unsafe {
-            factory
-                .as_ref()?
-                .CreateHwndRenderTarget(&properties, &window)
-                .inspect_err(|e| log::error(&format!("描く先を作れなかった: {}", e.message())))
-                .ok()
+        let create = |properties| unsafe { factory.CreateHwndRenderTarget(properties, &window) };
+        match create(&properties) {
+            Ok(target) => Some(target),
+            // ストアアプリの入れ物の中では、GPU の描く先を断られることがある
+            // (DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)。**窓は出るのに中身が白い
+            // ままになる。** そのときは CPU で描く。小窓なので重さは問題に
+            // ならない。
+            Err(gpu) => {
+                let software = D2D1_RENDER_TARGET_PROPERTIES {
+                    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                    ..properties
+                };
+                match create(&software) {
+                    Ok(target) => {
+                        log::write(&format!(
+                            "GPU の描く先を作れなかったので、CPU で描く: {}",
+                            gpu.message()
+                        ));
+                        Some(target)
+                    }
+                    Err(cpu) => {
+                        log::error(&format!(
+                            "描く先を作れなかった: GPU は {}、CPU は {}",
+                            gpu.message(),
+                            cpu.message()
+                        ));
+                        None
+                    }
+                }
+            }
         }
     })?;
     TARGETS.with(|targets| targets.borrow_mut().push((key, created.clone())));
