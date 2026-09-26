@@ -56,3 +56,4 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0037](0037-the-msi-stages-files-and-setup-does-the-rest.md) | MSI はファイルを置き場に置くだけにし、入れ替えと登録は crystalskk-setup が行う | Accepted | ADR-0007, ADR-0016, ADR-0031, ADR-0036 |
 | [0038](0038-bind-keys-to-named-commands.md) | キーは名前の付いた操作に割り当て、状態による意味の違いはエンジンが持つ | Accepted | PRD F-14, ADR-0020, ADR-0012 |
 | [0039](0039-confirm-then-let-the-key-through.md) | 確定と改行を一度にするときは、確定を書いてから同じキーを送り直す | Accepted | ADR-0038, ADR-0008 |
+| [0040](0040-tell-every-tip-when-the-settings-change.md) | 設定ファイルが変わったら、辞書サーバが全ウィンドウへ知らせる | Accepted | ADR-0020, ADR-0016, ADR-0038 |
