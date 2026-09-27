@@ -39,9 +39,8 @@ use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWri
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GWLP_HWNDPARENT, GWLP_USERDATA, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST,
-    IsWindowVisible, RegisterClassExW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
+    GWLP_HWNDPARENT, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
+    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_PAINT,
     WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -51,7 +50,7 @@ use crate::guard::guard;
 use crate::log;
 use crate::popup;
 use crate::theme::Palette;
-use crate::{dpi, draw};
+use crate::{dpi, draw, indicator};
 
 /// 窓に出すもの。
 ///
@@ -350,7 +349,7 @@ impl CandidateWindow {
         }
 
         let (width, height) = measure(content, dpi);
-        let (x, y) = place(anchor, width, height);
+        let (x, y) = place(anchor, width, height, indicator::work_area(anchor));
         // 中身が変われば描き直す。大きさが同じままでも中身は違いうるので、
         // 動かしただけで描き直されるとは限らない。
         // SAFETY: 窓は自分で作ったもの。
@@ -948,36 +947,18 @@ impl Layout {
 
 /// 窓を置く場所を決める。
 ///
-/// 未確定の文字列のすぐ下に出す。画面からはみ出すなら上へ回す。
+/// 未確定の文字列のすぐ下に出す。作業領域 (カーソルのある画面からタスクバーを
+/// 除いたところ) に入らないなら上へ回す。
 /// **はみ出したまま出すと、肝心の候補が見えない。**
-fn place(anchor: RECT, width: i32, height: i32) -> (i32, i32) {
-    // SAFETY: 画面の大きさを尋ねるだけ。
-    let (screen_left, screen_top, screen_width, screen_height) = unsafe {
-        (
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN),
-        )
-    };
-    let screen_right = screen_left + screen_width;
-    let screen_bottom = screen_top + screen_height;
-
-    let mut x = anchor.left;
-    let mut y = anchor.bottom;
-
-    if x + width > screen_right {
-        x = screen_right - width;
-    }
-    x = x.max(screen_left);
-
-    if y + height > screen_bottom {
+fn place(anchor: RECT, width: i32, height: i32, work: RECT) -> (i32, i32) {
+    let x = anchor.left.min(work.right - width).max(work.left);
+    let y = if anchor.bottom + height <= work.bottom {
+        anchor.bottom
+    } else {
         // 下に入らないなら、未確定の文字列の上へ。
-        y = anchor.top - height;
-    }
-    y = y.max(screen_top);
-
-    (x, y)
+        anchor.top - height
+    };
+    (x, y.max(work.top))
 }
 
 /// 窓の縁と帯の間。
@@ -1198,7 +1179,7 @@ mod tests {
             right: 1_000_100,
             bottom: 120,
         };
-        let (x, _) = place(far_right, 200, 100);
+        let (x, _) = place(far_right, 200, 100, SCREEN);
         assert!(x < far_right.left, "画面の外へは出さない");
     }
 
@@ -1210,7 +1191,33 @@ mod tests {
             right: 100,
             bottom: 1_000_020,
         };
-        let (_, y) = place(low, 200, 100);
+        let (_, y) = place(low, 200, 100, SCREEN);
         assert!(y < low.bottom, "下に入らないなら上へ回す");
     }
+
+    #[test]
+    fn the_taskbar_counts_as_no_room() {
+        // 作業領域の下端は 1040 (その下はタスクバー)。
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let anchor = RECT {
+            left: 10,
+            top: 960,
+            right: 100,
+            bottom: 980,
+        };
+        let (_, y) = place(anchor, 200, 100, work);
+        assert_eq!(y, 860, "タスクバーにかぶるなら上へ回す");
+    }
+
+    const SCREEN: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
 }

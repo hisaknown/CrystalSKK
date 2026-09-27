@@ -251,7 +251,7 @@ fn place(caret: RECT, width: i32, height: i32, work: RECT, gap: i32) -> (i32, i3
 }
 
 /// カーソルのある画面の作業領域。
-fn work_area(caret: RECT) -> RECT {
+pub(crate) fn work_area(caret: RECT) -> RECT {
     let point = POINT {
         x: caret.left,
         y: caret.bottom,
