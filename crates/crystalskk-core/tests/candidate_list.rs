@@ -454,7 +454,10 @@ fn a_pending_n_counts_as_typed_when_guessing() {
     let response = engine.press(Key::Char('.'));
     assert_eq!(response.commit, "漢字");
     assert_eq!(engine.preedit().display(), "", "確定まで進んでいる");
-    assert!(engine.registration().is_none(), "「かんじん」を登録しに行かない");
+    assert!(
+        engine.registration().is_none(),
+        "「かんじん」を登録しに行かない"
+    );
 }
 
 #[test]
