@@ -523,6 +523,31 @@ fn x_still_steps_back_to_the_midashi() {
 }
 
 #[test]
+fn cancelling_a_conversion_melts_the_okuri_into_the_midashi() {
+    // ddskk の `skk-delete-okuri-when-quit` の既定 (nil) と同じ。
+    let mut s = Session::new();
+    s.type_keys("OkuRi");
+    assert_eq!(s.preedit(), "▼送り");
+    s.press(Key::Ctrl('g'));
+    assert_eq!(s.preedit(), "▽おくり");
+}
+
+#[test]
+fn cancelling_a_registration_melts_the_okuri_too() {
+    // 辞書に無くてそのまま登録に入ったときも、取りやめた先は同じ姿になる。
+    let mut s = Session::new();
+    s.type_keys("MikoTo");
+    assert_eq!(s.engine.registration_depth(), 1);
+    s.press(Key::Ctrl('g'));
+    assert_eq!(s.engine.registration_depth(), 0);
+    assert_eq!(s.preedit(), "▽みこと");
+
+    // 続きを打てば、送りなしの見出し語として伸びる。
+    s.type_keys("ba");
+    assert_eq!(s.preedit(), "▽みことば");
+}
+
+#[test]
 fn unknown_word_enters_registration() {
     let mut s = Session::new();
     s.type_keys("Mikoto ");

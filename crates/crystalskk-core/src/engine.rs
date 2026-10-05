@@ -1147,7 +1147,8 @@ impl Engine {
     /// 戻る先は**候補選択の最後**である。候補を送り切って登録に入ったの
     /// だから、取りやめれば送り切る前に立っていた場所へ返るのが素直で、
     /// 見出し語入力まで巻き戻すのは一段行き過ぎになる。辞書に一件も
-    /// 無くて登録に入ったときだけ、戻る先が見出し語入力になる。
+    /// 無くて登録に入ったときだけ、戻る先が見出し語入力になる。そのときも
+    /// 候補選択を取りやめたときと同じく、送り仮名は見出し語に溶かす。
     ///
     /// 一番内側の枠だけを畳む。入れ子になっているなら、外側の登録は
     /// 続いている。**「直前に戻る」であって「全部やめる」ではない。**
@@ -1159,10 +1160,10 @@ impl Engine {
             return;
         };
         self.romaji.clear();
-        self.state = match frame.resume {
-            Some(selecting) => State::Selecting(selecting),
-            None => State::Composing(frame.origin),
-        };
+        match frame.resume {
+            Some(selecting) => self.state = State::Selecting(selecting),
+            None => self.back_to_composing(frame.origin),
+        }
     }
 
     /// 英数モードの直接入力。かな変換を通さない。
