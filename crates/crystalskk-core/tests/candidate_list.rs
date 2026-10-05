@@ -440,6 +440,37 @@ fn taking_the_guess_converts_and_commits_it() {
 }
 
 #[test]
+fn a_pending_n_counts_as_typed_when_guessing() {
+    // `n` は一つでは確定しないが、受け取るときには「ん」になる。**「か」で
+    // 引いた補完の後ろに「ん」を付けてはいけない。**
+    let mut engine = common::engine(Box::new(Completing(vec![
+        ("かき", "柿"),
+        ("かんじ", "漢字"),
+    ])));
+    assert_eq!(typed(&mut engine, "Kan"), "▽かn");
+    let view = engine.completion().expect("補完候補が出ている");
+    assert_eq!(view.current().heading, "かんじ", "「かん」で引いている");
+
+    let response = engine.press(Key::Char('.'));
+    assert_eq!(response.commit, "漢字");
+    assert_eq!(engine.preedit().display(), "", "確定まで進んでいる");
+    assert!(engine.registration().is_none(), "「かんじん」を登録しに行かない");
+}
+
+#[test]
+fn tab_counts_a_pending_n_too() {
+    // 「かき」で引くと「かきね」が先に来る。
+    let mut engine = common::engine(Box::new(Completing(vec![
+        ("かきね", "垣根"),
+        ("かきん", "課金"),
+    ])));
+    assert_eq!(typed(&mut engine, "Kakin	"), "▽かきん");
+    let view = engine.completion().expect("補完候補が出ている");
+    assert!(view.taken, "Tab で選んだものは受け取り済み");
+    assert_eq!(view.current().word, "課金");
+}
+
+#[test]
 fn the_window_shows_what_the_dot_would_take() {
     let mut engine = completing();
     typed(&mut engine, "Kann");

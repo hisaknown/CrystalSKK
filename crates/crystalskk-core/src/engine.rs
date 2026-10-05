@@ -743,13 +743,19 @@ impl Engine {
         let options = &self.options.as_ref()?.completion;
         // 送り仮名に入っていれば見出し語はもう決まっている。abbrev は
         // かなではないので、かなの見出しを補完しても仕方がない。
-        let eligible = comp.okuri.is_none()
-            && !comp.abbrev
-            && comp.midashi.chars().count() >= options.min_length;
-        if !eligible {
+        if comp.okuri.is_some() || comp.abbrev {
             return None;
         }
-        let prefix = comp.midashi.clone();
+        // 打ちかけのローマ字も、かなになるなら見出し語のうちに数える。
+        // `chan` の `n` は、受け取るときには「ん」になっている。**数えずに
+        // 「ちゃ」で引くと、受け取った後ろに「ん」が付いてしまう。**
+        let mut prefix = comp.midashi.clone();
+        if let Some(kana) = self.romaji.pending_kana() {
+            prefix.push_str(&kana);
+        }
+        if prefix.chars().count() < options.min_length {
+            return None;
+        }
         let entries = self.dict.complete(&prefix, options.limit);
         (!entries.is_empty()).then(|| Completion {
             prefix,
@@ -851,6 +857,9 @@ impl Engine {
         };
         completion.chosen = Some(index);
         comp.midashi = completion.entries[index].clone();
+        // 打ちかけのローマ字は補完を引くときに数えてある。選んだ見出しに
+        // もう入っているので、残さない。
+        self.romaji.clear();
         true
     }
 
