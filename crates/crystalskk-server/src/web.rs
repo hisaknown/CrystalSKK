@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use crystalskk_core::dict::{Candidate, Query};
+use crystalskk_core::kana;
 
 /// 読みを渡し、候補を取ってくるもの。裏のスレッドで呼ぶ。
 pub type Fetch = Arc<dyn Fn(&Query) -> Result<Vec<Candidate>, String> + Send + Sync>;
@@ -90,7 +91,7 @@ pub fn google(query: &Query) -> Result<Vec<Candidate>, String> {
     };
     let body = String::from_utf8(body).map_err(|_| "答えが UTF-8 ではありません".to_owned())?;
     let segments = parse_segments(&body).ok_or("答えを読めません")?;
-    Ok(candidates(&segments, okuri.as_deref()))
+    Ok(candidates(&segments, &text, okuri.as_deref()))
 }
 
 /// 尋ねる読み。送りありなら送り仮名まで含め、送り仮名も返す。
@@ -115,7 +116,20 @@ fn reading(query: &Query) -> (String, Option<String>) {
 /// つないだ一つだけにする。末尾に付けた `,` の文節は捨てる (読みを一つの
 /// 文節に留めるために付けたもの)。送りありなら、送り仮名で終わるものだけ
 /// を残し、送り仮名を外す。
-fn candidates(segments: &[(String, Vec<String>)], okuri: Option<&str>) -> Vec<Candidate> {
+///
+/// **読みをそのまま、またはカタカナにしただけのものは除く。** ひらがなは
+/// 確定すれば、カタカナは `q` で打てる。候補に並べても選ぶ手間が増えるだけ
+/// である。
+fn candidates(
+    segments: &[(String, Vec<String>)],
+    reading: &str,
+    okuri: Option<&str>,
+) -> Vec<Candidate> {
+    let obvious = [
+        reading.to_owned(),
+        kana::to_katakana(reading),
+        kana::to_halfwidth_katakana(reading),
+    ];
     let segments: Vec<_> = segments
         .iter()
         .filter(|(reading, _)| reading != ",")
@@ -132,6 +146,9 @@ fn candidates(segments: &[(String, Vec<String>)], okuri: Option<&str>) -> Vec<Ca
     };
     let mut out: Vec<Candidate> = Vec::new();
     for word in words {
+        if obvious.contains(&word) {
+            continue;
+        }
         let word = match okuri {
             Some(okuri) => match word.strip_suffix(okuri) {
                 Some(stem) if !stem.is_empty() => stem.to_owned(),
@@ -278,7 +295,7 @@ mod tests {
         let segments =
             parse_segments(r#"[["かんじ",["漢字","感じ","幹事"]],[",",[","]]]"#).unwrap();
         assert_eq!(
-            words(&candidates(&segments, None)),
+            words(&candidates(&segments, "かんじ", None)),
             ["漢字", "感じ", "幹事"]
         );
     }
@@ -287,22 +304,40 @@ mod tests {
     fn every_candidate_is_marked() {
         let segments = parse_segments(r#"[["かんじ",["漢字"]]]"#).unwrap();
         assert_eq!(
-            candidates(&segments, None),
+            candidates(&segments, "かんじ", None),
             [Candidate::with_annotation("漢字", MARK)]
         );
     }
 
     #[test]
     fn okuri_is_cut_off_and_must_match() {
-        let segments = parse_segments(r#"[["おくり",["送り","贈り","オクリ","送"]]]"#).unwrap();
-        assert_eq!(words(&candidates(&segments, Some("り"))), ["送", "贈"]);
+        let segments = parse_segments(r#"[["おくり",["送り","贈り","送"]]]"#).unwrap();
+        assert_eq!(
+            words(&candidates(&segments, "おくり", Some("り"))),
+            ["送", "贈"]
+        );
     }
 
     #[test]
     fn split_segments_become_one_word() {
         let segments =
             parse_segments(r#"[["くりすたる",["クリスタル"]],["すけ",["助","すけ"]]]"#).unwrap();
-        assert_eq!(words(&candidates(&segments, None)), ["クリスタル助"]);
+        assert_eq!(
+            words(&candidates(&segments, "くりすたるすけ", None)),
+            ["クリスタル助"]
+        );
+    }
+
+    #[test]
+    fn the_reading_in_kana_is_left_out() {
+        let segments =
+            parse_segments(r#"[["くりすたる",["クリスタル","Crystal","くりすたる","ｸﾘｽﾀﾙ"]]]"#)
+                .unwrap();
+        assert_eq!(
+            words(&candidates(&segments, "くりすたる", None)),
+            ["Crystal"],
+            "ひらがな・カタカナ・半角カタカナは打てば出る"
+        );
     }
 
     #[test]
