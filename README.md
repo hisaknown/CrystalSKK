@@ -8,7 +8,6 @@
 > Installs a TSF text input processor (DLL) and a per-user conversion server.
 > Source-built releases are produced by GitHub Actions.
 > At install time it downloads llama.cpp from its official releases; at run time it downloads the SKK dictionaries listed in the settings.
-> If you turn on web candidates (off by default), readings missing from the dictionaries are sent to Google's transliteration API.
 
 Windows 向けの SKK 風 IME です。
 
