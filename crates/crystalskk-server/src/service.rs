@@ -15,6 +15,7 @@ use crystalskk_core::dict::{Candidate, CandidateSource, Context, NoopRanker, Que
 use crystalskk_dict::UserDict;
 
 use crate::library::Library;
+use crate::web::{self, WebSource};
 use crystalskk_ipc::{Request, Reset, Response};
 
 /// 頼みを聞き終えたあと、どうするか。
@@ -41,6 +42,10 @@ pub struct Service {
     ranker_settings: Option<crystalskk_settings::Ranker>,
     /// 裏で作っているランカー。できたら [`Self::poll_ranker`] で受け取る。
     ranker_loading: Option<mpsc::Receiver<Built>>,
+    /// ネットの候補 (ADR-0042)。使わない設定なら `None`。
+    web: Option<WebSource>,
+    /// ネットの候補を取ってくるもの。試験では差し替える。
+    web_fetch: web::Fetch,
 }
 
 /// 裏で作ったランカー。並べ替えない設定なら `None`。
@@ -65,7 +70,15 @@ impl Service {
             ranker: Box::new(NoopRanker),
             ranker_settings: None,
             ranker_loading: None,
+            web: None,
+            web_fetch: std::sync::Arc::new(web::google),
         }
+    }
+
+    /// ネットの候補を取ってくるものを差し替える。
+    pub fn set_web_fetch(&mut self, fetch: web::Fetch) {
+        self.web_fetch = fetch;
+        self.web = None;
     }
 
     /// 変換の候補を並べるものを差し替える。
@@ -95,6 +108,7 @@ impl Service {
                 before,
                 after,
             } => (self.convert(&query, before, after), Next::Listen),
+            Request::Web(query) => (self.web(&query), Next::Listen),
             Request::Complete { prefix, limit } => {
                 (Response::Ok(self.complete(&prefix, limit)), Next::Listen)
             }
@@ -173,6 +187,28 @@ impl Service {
             candidates.append(&mut rest);
         }
         Response::Ok(candidates)
+    }
+
+    /// ネットの候補を引く (ADR-0042)。**待たずに答える。**
+    ///
+    /// 辞書にもある語は除く。TIP はそれをもう見せている。
+    fn web(&mut self, query: &Query) -> Response {
+        let Some(web) = &mut self.web else {
+            return Response::Error("ネットの候補は使わない設定です".to_owned());
+        };
+        let Some(found) = web.lookup(query) else {
+            return Response::Pending;
+        };
+        let local = match self.search(query) {
+            Response::Ok(local) => local,
+            _ => Vec::new(),
+        };
+        Response::Ok(
+            found
+                .into_iter()
+                .filter(|c| !local.iter().any(|seen| seen.word == c.word))
+                .collect(),
+        )
     }
 
     /// 前方一致する見出しを返す。
@@ -264,7 +300,19 @@ impl Service {
             .configure(&loaded.settings.dictionaries, &directory);
         let ranker_dir = ranker_dir();
         self.configure_ranker(&loaded.settings.ranker, &ranker_dir);
+        self.configure_web(&loaded.settings.web);
         Ok(loaded)
+    }
+
+    /// ネットの候補を使うかを設定に合わせる。覚えたものは、切れば捨てる。
+    fn configure_web(&mut self, settings: &crystalskk_settings::Web) {
+        match (settings.enabled, self.web.is_some()) {
+            (true, false) => {
+                self.web = Some(WebSource::new(std::sync::Arc::clone(&self.web_fetch)));
+            }
+            (false, true) => self.web = None,
+            _ => {}
+        }
     }
 
     /// 設定が変わっていれば、ランカーを作り直す。
@@ -470,7 +518,7 @@ mod tests {
         match response {
             Response::Ok(candidates) => candidates.iter().map(|c| c.word.clone()).collect(),
             Response::Error(reason) => panic!("失敗した: {reason}"),
-            Response::Settings { .. } | Response::Done(_) => {
+            Response::Pending | Response::Settings { .. } | Response::Done(_) => {
                 panic!("候補ではないものが返った: {response:?}")
             }
         }
@@ -863,5 +911,40 @@ mod tests {
             response,
             Response::Ok(vec![Candidate::with_annotation("橋", "bridge")])
         );
+    }
+
+    #[test]
+    fn the_web_is_refused_unless_it_is_turned_on() {
+        let mut service = service();
+        let (response, _) = service.handle(Request::Web(Query::okuri_nashi("かんじ")));
+        assert!(matches!(response, Response::Error(_)));
+    }
+
+    #[test]
+    fn web_candidates_leave_out_what_the_dictionary_has() {
+        let mut service = service();
+        service.set_web_fetch(std::sync::Arc::new(|_query: &Query| {
+            Ok(vec![
+                Candidate::with_annotation("漢字", web::MARK),
+                Candidate::with_annotation("寛治", web::MARK),
+            ])
+        }));
+        service.configure_web(&crystalskk_settings::Web { enabled: true });
+        let query = Query::okuri_nashi("かんじ");
+
+        let (first, _) = service.handle(Request::Web(query.clone()));
+        assert_eq!(first, Response::Pending, "待たずに答える");
+
+        let start = std::time::Instant::now();
+        let found = loop {
+            match service.handle(Request::Web(query.clone())).0 {
+                Response::Pending => {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => break other,
+            }
+        };
+        assert_eq!(words(&found), ["寛治"]);
     }
 }

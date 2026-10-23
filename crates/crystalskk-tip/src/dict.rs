@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crystalskk_core::Engine;
-use crystalskk_core::dict::{Candidate, CandidateSource, Context, Query};
+use crystalskk_core::dict::{Candidate, CandidateSource, Context, Query, Web};
 use crystalskk_ipc::{Request, Response};
 use crystalskk_server::client;
 
@@ -87,7 +87,7 @@ impl ServerSource {
                 log::error(&format!("辞書サーバが断りました: {reason}"));
                 (Vec::new(), Some(reason))
             }
-            Response::Settings { .. } | Response::Done(_) => {
+            Response::Pending | Response::Settings { .. } | Response::Done(_) => {
                 log::error("検索に候補ではないものが返りました");
                 (Vec::new(), Some(UNREACHABLE_NOTICE.to_owned()))
             }
@@ -144,6 +144,18 @@ impl CandidateSource for ServerSource {
         }
     }
 
+    /// ネットの候補を尋ねる (ADR-0042)。サーバは待たずに答える。
+    ///
+    /// **届かなくても騒がない。** 辞書の候補はもう出ており、ネットの候補は
+    /// 足しにすぎない。断られたら (使わない設定) 尋ねる先が無いものとする。
+    fn lookup_web(&self, query: &Query) -> Web {
+        match client::ask(&Request::Web(query.clone())) {
+            Ok(Response::Ok(found)) => Web::Found(found),
+            Ok(Response::Pending) => Web::Pending,
+            _ => Web::Off,
+        }
+    }
+
     /// いま引ける状態か。
     ///
     /// 直近の引き方が届いていれば引ける。**届かなかったことをエンジンへ
@@ -194,6 +206,10 @@ impl CandidateSource for SharedSource {
         self.0.complete(prefix, limit)
     }
 
+    fn lookup_web(&self, query: &Query) -> Web {
+        self.0.lookup_web(query)
+    }
+
     fn available(&self) -> bool {
         self.0.available()
     }
@@ -240,7 +256,12 @@ impl Learning {
         let mut unsent = Vec::new();
         for request in pending.drain(..) {
             match client::ask(&request) {
-                Ok(Response::Ok(_) | Response::Settings { .. } | Response::Done(_)) => {}
+                Ok(
+                    Response::Ok(_)
+                    | Response::Pending
+                    | Response::Settings { .. }
+                    | Response::Done(_),
+                ) => {}
                 Ok(Response::Error(reason)) => {
                     log::error(&format!("学習を断られました: {reason}"));
                 }
@@ -274,7 +295,7 @@ pub fn fetch_settings() -> Result<crystalskk_settings::Settings, String> {
         Response::Settings { config, romaji } => crystalskk_settings::parse(&config, &romaji)
             .map_err(|e| format!("設定を読めません: {e}")),
         Response::Error(reason) => Err(format!("設定を読めません: {reason}")),
-        Response::Ok(_) | Response::Done(_) => {
+        Response::Ok(_) | Response::Pending | Response::Done(_) => {
             Err("設定を読めません: 辞書サーバの答えが噛み合いません".to_owned())
         }
     }
@@ -285,7 +306,7 @@ pub fn ask_to_do(request: &Request) -> Result<String, String> {
     match ask_server(request)? {
         Response::Done(told) => Ok(told),
         Response::Error(reason) => Err(reason),
-        Response::Ok(_) | Response::Settings { .. } => {
+        Response::Ok(_) | Response::Pending | Response::Settings { .. } => {
             Err("辞書サーバの答えが噛み合いません".to_owned())
         }
     }

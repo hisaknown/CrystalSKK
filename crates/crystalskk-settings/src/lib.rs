@@ -74,6 +74,9 @@ pub struct Settings {
     pub dictionaries: Vec<Source>,
     /// 変換の候補を前後の文章から並べる (ADR-0030)。
     pub ranker: Ranker,
+    /// 辞書の候補が尽きたら、ネットの候補を出す (ADR-0042)。**使うのは
+    /// 辞書サーバだけ。**
+    pub web: Web,
     /// 未確定の印を、文書に書くときの文字 (ADR-0033)。
     pub markers: Markers,
     /// 入切のキー (ADR-0038)。**TIP だけが使う。**
@@ -197,6 +200,13 @@ impl Source {
             }
         }
     }
+}
+
+/// ネットの候補の設定 (ADR-0042)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Web {
+    /// 使うか。
+    pub enabled: bool,
 }
 
 /// カーソルのそばに出す入力モードの絵。
@@ -559,6 +569,9 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
             }
         },
         ranker: ranker(section(&doc, "ranker")?)?,
+        web: Web {
+            enabled: boolean(section(&doc, "web")?, "web", "enabled")?,
+        },
         on_off: keys::on_off(keys)?,
     })
 }
@@ -1126,6 +1139,12 @@ mod tests {
         let filled = fill(Some(&user)).unwrap();
         assert!(filled.text.contains("limt = 3"), "消さない");
         assert_eq!(unknown_keys(&filled.text), ["completion.limt", "mystery"]);
+    }
+
+    #[test]
+    fn the_web_is_off_in_the_template() {
+        // 読みを外へ送る機能は、利用者が選んで初めて動く。
+        assert!(!parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().web.enabled);
     }
 
     #[test]

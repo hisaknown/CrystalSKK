@@ -27,3 +27,4 @@ pub mod pipe;
 pub mod security;
 pub mod service;
 pub mod shell;
+pub mod web;

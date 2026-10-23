@@ -17,6 +17,7 @@
 //! search\t<見出し語>\t<送り仮名>
 //! convert\t<見出し語>\t<送り仮名>\t<前の文章>\t<後ろの文章>
 //! learn\t<見出し語>\t<送り仮名>\t<語>
+//! web\t<見出し語>\t<送り仮名>
 //! settings
 //! reset\t<settings か romaji>
 //! open-folder
@@ -29,6 +30,7 @@
 //! ```text
 //! ok\t<候補>\u{1f}<候補>...
 //! settings\t<設定ファイルの全文>\u{1e}<ローマ字テーブルの全文>
+//! pending
 //! done\t<したこと>
 //! error\t<訳>
 //! ```
@@ -94,6 +96,12 @@ pub enum Request {
         before: String,
         after: String,
     },
+    /// ネットの候補を引く (ADR-0042)。
+    ///
+    /// **サーバは外の答えを待たずに答える。** まだ取れていなければ
+    /// [`Response::Pending`]、取れて無かったなら空の [`Response::Ok`]、
+    /// 使わない設定なら [`Response::Error`]。
+    Web(Query),
     /// 前方一致する見出しを引く。補完に使う。
     Complete { prefix: String, limit: usize },
     /// 選ばれた候補を覚える。並び順の学習に使う。
@@ -136,6 +144,8 @@ pub enum Request {
 pub enum Response {
     /// 引けた候補。頼みが検索でなければ空。
     Ok(Vec<Candidate>),
+    /// 頼まれたものをまだ取りに行っている。もう一度尋ねれば分かる。
+    Pending,
     /// 設定ファイルとローマ字テーブルの全文。設定ファイルの足りない項目は
     /// 書き足してある。
     Settings { config: String, romaji: String },
@@ -160,6 +170,7 @@ impl Request {
                 plain(before),
                 plain(after)
             ),
+            Self::Web(query) => format!("web{FIELD}{}", encode_query(query)),
             Self::Complete { prefix, limit } => format!("complete{FIELD}{prefix}{FIELD}{limit}"),
             Self::Learn { query, word } => {
                 format!("learn{FIELD}{}{FIELD}{word}", encode_query(query))
@@ -196,6 +207,7 @@ impl Request {
                     after: fields.next()?.to_owned(),
                 })
             }
+            "web" => Some(Self::Web(decode_query(&mut fields)?)),
             "complete" => Some(Self::Complete {
                 prefix: fields.next()?.to_owned(),
                 limit: fields.next()?.parse().ok()?,
@@ -248,6 +260,7 @@ impl Response {
                     .join(&BETWEEN_CANDIDATES.to_string());
                 format!("ok{FIELD}{body}")
             }
+            Self::Pending => "pending".to_owned(),
             Self::Settings { config, romaji } => {
                 format!(
                     "settings{FIELD}{}{BETWEEN_FILES}{}",
@@ -275,6 +288,7 @@ impl Response {
                     .map(decode_candidate)
                     .collect(),
             )),
+            "pending" => Some(Self::Pending),
             "settings" => {
                 let (config, romaji) = body.split_once(BETWEEN_FILES)?;
                 Some(Self::Settings {
@@ -430,6 +444,16 @@ mod tests {
         let line = response.encode();
         assert!(!line.contains('\n'));
         assert_eq!(Response::decode(&line), Some(response));
+    }
+
+    #[test]
+    fn a_web_lookup_survives_a_round_trip() {
+        roundtrip(&Request::Web(Query::okuri_nashi("くりすたる")));
+        roundtrip(&Request::Web(Query::okuri_ari("おく", 'r', "り")));
+        assert_eq!(
+            Response::decode(&Response::Pending.encode()),
+            Some(Response::Pending)
+        );
     }
 
     #[test]
