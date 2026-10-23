@@ -349,7 +349,8 @@ impl TextService {
             Content::Registration(_)
             | Content::Notice(_)
             | Content::Completion(_)
-            | Content::Annotation(_) => {
+            | Content::Annotation(_)
+            | Content::Fetching => {
                 self.withdraw_list();
                 true
             }
@@ -788,6 +789,13 @@ impl TextService {
             .as_ref()
             .is_some_and(|s| s.window.show_annotation);
 
+        // ネットの候補を取りに行っている (ADR-0042)。一覧が出ていれば、その
+        // 末尾に添える。出ていなければ、そのことだけを出す。**候補を取って
+        // いるのだから、候補の窓で言う。**
+        if engine.web_pending() && !engine.candidates().is_some_and(|view| view.listing) {
+            return Some(Content::Fetching);
+        }
+
         if let Some(view) = engine.candidates() {
             if view.listing {
                 let okuri = view.okuri.as_deref().unwrap_or("");
@@ -806,6 +814,7 @@ impl TextService {
                     },
                     number: view.page_number() + 1,
                     count: view.page_count(),
+                    fetching: engine.web_pending(),
                 }));
             }
             // 一つずつ見せているあいだは、その候補の注釈だけを出す。
@@ -887,6 +896,7 @@ impl TextService {
     }
 
     fn deactivate(&self) -> Result<()> {
+        crate::webpoll::stop();
         self.unwatch_layout();
         self.withdraw_list();
         self.drop_composition();
@@ -1070,6 +1080,33 @@ impl TextService_Impl {
                 response.preedit.display()
             ));
         }
+        self.reflect(context, client_id, &response);
+        // ネットの候補を取りに行かせたなら、届くのを待つ (ADR-0042)。
+        if self.this.engine.borrow().web_pending() {
+            crate::webpoll::start(self.to_object(), context.clone());
+        }
+
+        // 打鍵でモードが変わったら、カーソルのそばに出す。
+        if self.this.engine.borrow().mode() != before && self.this.indicates(|i| i.on_switch) {
+            self.this.announce_mode(Some(context.clone()));
+        }
+        // 確定と改行を一度にするときは、確定を書いたうえで同じキーを送り
+        // 直す。この打鍵は食べる。**食べなかったと答えるだけでは届かない
+        // アプリがある** (ADR-0039)。
+        if response.pass_through {
+            log::trace("確定を書いたので、キーを送り直す");
+            keys::resend(wparam);
+        }
+        response.handled.into()
+    }
+
+    /// エンジンの応答を、文書と候補の窓に映す。
+    fn reflect(
+        &self,
+        context: &ITfContext,
+        client_id: u32,
+        response: &crystalskk_core::engine::Response,
+    ) {
         self.this.apply_events(&response.events);
 
         self.this.show_mode();
@@ -1119,19 +1156,23 @@ impl TextService_Impl {
                 self.this.candidates.hide();
             }
         }
+    }
 
-        // 打鍵でモードが変わったら、カーソルのそばに出す。
-        if self.this.engine.borrow().mode() != before && self.this.indicates(|i| i.on_switch) {
-            self.this.announce_mode(Some(context.clone()));
+    /// 待っているネットの候補が届いたか尋ね、届いていれば映す (ADR-0042)。
+    ///
+    /// [`crate::webpoll`] の時計が鳴るたびに呼ぶ。待つものが無くなったら
+    /// 時計を止める。
+    pub fn poll_web(&self, context: &ITfContext) {
+        let response = self.this.engine.borrow_mut().poll_web();
+        if let Some(response) = response
+            && let Some(client_id) = self.this.client_id()
+        {
+            log::trace("ネットの候補が届いたので映す");
+            self.reflect(context, client_id, &response);
         }
-        // 確定と改行を一度にするときは、確定を書いたうえで同じキーを送り
-        // 直す。この打鍵は食べる。**食べなかったと答えるだけでは届かない
-        // アプリがある** (ADR-0039)。
-        if response.pass_through {
-            log::trace("確定を書いたので、キーを送り直す");
-            keys::resend(wparam);
+        if !self.this.engine.borrow().web_pending() {
+            crate::webpoll::stop();
         }
-        response.handled.into()
     }
 
     /// 打鍵を食べるかどうかだけを答える。状態は変えない。
@@ -1376,6 +1417,8 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
         _pdimprevfocus: Ref<ITfDocumentMgr>,
     ) -> Result<()> {
         guard("ThreadMgr::OnSetFocus", || {
+            // 待っていた候補は、前の入力先のもの。
+            crate::webpoll::stop();
             self.this.mode_window.hide();
             self.this.unwatch_layout();
             let Some(document) = pdimfocus.as_ref() else {

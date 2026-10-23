@@ -67,6 +67,8 @@ pub enum Content {
     Completion(Completion),
     /// 伝えたいこと。**黙って違う結果を出すより、言うほうがよい。**
     Notice(String),
+    /// ネットの候補を取りに行っている (ADR-0042)。一覧が出ていないときに出す。
+    Fetching,
     /// 候補を一つずつ見せているあいだの、その候補の注釈。
     ///
     /// 注釈は入力欄には出さない。**長いことが多く、打っている場所に
@@ -83,6 +85,7 @@ impl Content {
             Self::Completion(completion) => completion.lines(),
             Self::Notice(text) => vec![Line::plain(format!("[{text}]"))],
             Self::Annotation(text) => vec![Line::plain(text.clone())],
+            Self::Fetching => vec![Line::plain(FETCHING)],
         }
     }
 
@@ -124,6 +127,9 @@ impl Content {
         self.lines().is_empty()
     }
 }
+
+/// ネットの候補を取りに行っているあいだに出す一行 (ADR-0042)。
+const FETCHING: &str = "🌐 取得中…";
 
 /// 窓の一行。押すキーと本文と、その右に薄く添える注釈。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +266,8 @@ pub struct Page {
     pub number: usize,
     /// 全部で何ページか。
     pub count: usize,
+    /// ネットの候補を取りに行っている (ADR-0042)。候補の後ろに一行添える。
+    pub fetching: bool,
 }
 
 impl Page {
@@ -275,6 +283,9 @@ impl Page {
                 note: self.notes.get(at).cloned().flatten(),
             })
             .collect();
+        if self.fetching {
+            lines.push(Line::plain(FETCHING));
+        }
         if self.count > 1 {
             lines.push(Line::plain(format!("{} / {}", self.number, self.count)));
         }
@@ -1031,6 +1042,7 @@ mod tests {
             notes: Vec::new(),
             number,
             count,
+            fetching: false,
         }
     }
 
@@ -1134,6 +1146,14 @@ mod tests {
             many.lines().last().map(|line| line.text.clone()).as_deref(),
             Some("2 / 3")
         );
+    }
+
+    #[test]
+    fn fetching_is_told_after_the_candidates() {
+        let mut page = page(&[('a', "漢字")], 2, 2);
+        page.fetching = true;
+        assert_eq!(page.lines()[1], FETCHING);
+        assert_eq!(page.lines().len(), 3, "ページの位置はその下");
     }
 
     #[test]

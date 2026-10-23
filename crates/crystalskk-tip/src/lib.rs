@@ -54,6 +54,7 @@ pub mod registry;
 pub mod service;
 pub mod theme;
 pub mod uielement;
+pub mod webpoll;
 
 use factory::ClassFactory;
 use guids::CLSID_CRYSTALSKK;
