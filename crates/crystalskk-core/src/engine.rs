@@ -429,6 +429,17 @@ enum Grown {
     No,
 }
 
+/// ネットの候補を待っているとき、届いたら何をするか (ADR-0042)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebWait {
+    /// 辞書に一件も無かった。届いたら変換し直す。
+    Convert,
+    /// 候補を送り切ったところで待っている。届いたら送る。
+    Advance,
+    /// 最後のページで先に尋ねた。届いたら付け足すだけ。
+    Ahead,
+}
+
 /// 一打鍵の処理中に溜めていく出力。
 #[derive(Default)]
 struct Out {
@@ -449,8 +460,9 @@ pub struct Engine {
     context: Context,
     /// 振る舞いを決める値。**受け取るまでは何もしない。**
     options: Option<Options>,
-    /// この打鍵でネットの候補を取りに行かせ、まだ届いていない (ADR-0042)。
-    web_pending: bool,
+    /// ネットの候補を取りに行かせ、まだ届いていない (ADR-0042)。届いたら
+    /// 何をするかを持つ。打鍵があれば忘れる。
+    web_wait: Option<WebWait>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -483,7 +495,7 @@ impl Engine {
             ranker: Box::new(NoopRanker),
             context: Context::default(),
             options: None,
-            web_pending: false,
+            web_wait: None,
         }
     }
 
@@ -710,7 +722,7 @@ impl Engine {
             handled: true,
             ..Out::default()
         };
-        self.web_pending = false;
+        self.web_wait = None;
         let state = std::mem::take(&mut self.state);
         match state {
             State::Direct => self.on_direct(key, &mut out),
@@ -1032,10 +1044,48 @@ impl Engine {
 
     /// ネットの候補を取りに行かせたまま、まだ届いていないか (ADR-0042)。
     ///
-    /// 立つのはそうなった打鍵の後だけで、次の打鍵で倒れる。届いたかは、
-    /// もう一度送れば分かる。
+    /// 立っているあいだは、表示側が [`Self::poll_web`] で尋ね直す。打鍵が
+    /// あれば倒れる。
     pub fn web_pending(&self) -> bool {
-        self.web_pending
+        self.web_wait.is_some()
+    }
+
+    /// 待っているネットの候補が届いたか尋ね直す (ADR-0042)。
+    ///
+    /// 届いていれば、待たせた打鍵の続きをする。辞書に一件も無かったなら
+    /// 変換し、送り切ったところなら送る。届いて何も無かったなら、その打鍵で
+    /// 起きるはずだったとおり辞書登録へ進む。
+    ///
+    /// 見え方が変わったときだけ応答を返す。まだ届いていなければ `None` で、
+    /// [`Self::web_pending`] は立ったまま。
+    pub fn poll_web(&mut self) -> Option<Response> {
+        let wait = self.web_wait.take()?;
+        let state = std::mem::take(&mut self.state);
+        match (wait, state) {
+            (WebWait::Convert, State::Composing(comp)) => self.convert(comp),
+            (WebWait::Advance, State::Selecting(sel)) => self.send_on(sel),
+            (WebWait::Ahead, State::Selecting(mut sel)) => {
+                self.look_ahead(&mut sel);
+                self.state = State::Selecting(sel);
+            }
+            // 待っているあいだに状態が変わった。もう要らない。
+            (_, state) => {
+                self.state = state;
+                return None;
+            }
+        }
+        if self.web_wait == Some(wait) {
+            // まだ届いていない。見え方は変わっていない。
+            return None;
+        }
+        Some(Response {
+            handled: true,
+            pass_through: false,
+            commit: String::new(),
+            preedit: self.preedit(),
+            candidates: self.candidates(),
+            events: Vec::new(),
+        })
     }
 
     /// 候補選択中なら候補ウィンドウの内容。それ以外は `None`。
@@ -1580,9 +1630,8 @@ impl Engine {
             if !is_numeric(&query) {
                 match self.dict.lookup_web(&query) {
                     Web::Pending => {
-                        // 届くまで見出し語入力のまま待つ。もう一度変換すれば
-                        // また尋ねる。
-                        self.web_pending = true;
+                        // 届くまで見出し語入力のまま待つ。届いたら変換し直す。
+                        self.web_wait = Some(WebWait::Convert);
                         self.state = State::Composing(comp);
                         return;
                     }
@@ -1632,20 +1681,21 @@ impl Engine {
     /// ネットの候補を先に尋ねておく。送ったときに並んでいるように。
     fn look_ahead(&mut self, sel: &mut Selecting) {
         if sel.next() >= sel.candidates.len() {
-            let _ = self.grow_from_web(sel);
+            let _ = self.grow_from_web(sel, WebWait::Ahead);
         }
     }
 
-    /// ネットの候補を尋ね、来ていれば後ろに付け足す。
+    /// ネットの候補を尋ね、来ていれば後ろに付け足す。まだなら、届いたら
+    /// `wait` をすると覚えておく。
     ///
     /// 辞書にもある語は付け足さない。**並びは辞書が先で、ネットが後。**
-    fn grow_from_web(&mut self, sel: &mut Selecting) -> Grown {
+    fn grow_from_web(&mut self, sel: &mut Selecting, wait: WebWait) -> Grown {
         if sel.web_done || is_numeric(&sel.query) {
             return Grown::No;
         }
         match self.dict.lookup_web(&sel.query) {
             Web::Pending => {
-                self.web_pending = true;
+                self.web_wait = Some(wait);
                 Grown::Pending
             }
             Web::Off => {
@@ -1750,46 +1800,7 @@ impl Engine {
             return;
         }
         match (self.command(key), key) {
-            (Some(Command::StartHenkan), _) => {
-                let next = sel.next();
-                if next >= sel.candidates.len() {
-                    // 辞書登録へ進む前に、ネットの候補を尋ねる (ADR-0042)。
-                    match self.grow_from_web(&mut sel) {
-                        Grown::Grew => {
-                            // 付け足した分がいまのページの空きに収まったなら、
-                            // ページは送らない。そこに見えている。
-                            if next < sel.candidates.len() {
-                                sel.index = next;
-                            }
-                            self.look_ahead(&mut sel);
-                            self.state = State::Selecting(sel);
-                            return;
-                        }
-                        Grown::Pending => {
-                            self.state = State::Selecting(sel);
-                            return;
-                        }
-                        Grown::No => {}
-                    }
-                }
-                if next < sel.candidates.len() {
-                    sel.index = next;
-                    self.look_ahead(&mut sel);
-                    self.state = State::Selecting(sel);
-                } else {
-                    // 候補を出し切ったら辞書登録へ。取りやめたときに
-                    // 戻れるよう、**最後に見ていたところ**を控えておく。
-                    // 一覧が出ていたなら最後のページ、出ていなかったなら
-                    // 最後の一件。`page_start` がどちらも言い当てる。
-                    let resume = Selecting {
-                        index: sel
-                            .layout
-                            .page_start(sel.candidates.len().saturating_sub(1)),
-                        ..sel.clone()
-                    };
-                    self.start_registration(sel.query, sel.origin, Some(resume));
-                }
-            }
+            (Some(Command::StartHenkan), _) => self.send_on(sel),
             // 一覧が出ていないときの Backspace は、確定してから一文字消す。
             // ddskk (`skk-delete-implies-kakutei` の既定 t) も CorvusSKK
             // (「後退に確定を含める」の既定) もこうする。確定した後は
@@ -1863,6 +1874,48 @@ impl Engine {
         }
     }
 
+    /// 次の候補 (一覧なら次のページ) へ送る。尽きていれば、ネットの候補を
+    /// 尋ねてから辞書登録へ。
+    fn send_on(&mut self, mut sel: Selecting) {
+        let next = sel.next();
+        if next >= sel.candidates.len() {
+            // 辞書登録へ進む前に、ネットの候補を尋ねる (ADR-0042)。
+            match self.grow_from_web(&mut sel, WebWait::Advance) {
+                Grown::Grew => {
+                    // 付け足した分がいまのページの空きに収まったなら、
+                    // ページは送らない。そこに見えている。
+                    if next < sel.candidates.len() {
+                        sel.index = next;
+                    }
+                    self.look_ahead(&mut sel);
+                    self.state = State::Selecting(sel);
+                    return;
+                }
+                Grown::Pending => {
+                    self.state = State::Selecting(sel);
+                    return;
+                }
+                Grown::No => {}
+            }
+        }
+        if next < sel.candidates.len() {
+            sel.index = next;
+            self.look_ahead(&mut sel);
+            self.state = State::Selecting(sel);
+        } else {
+            // 候補を出し切ったら辞書登録へ。取りやめたときに
+            // 戻れるよう、**最後に見ていたところ**を控えておく。
+            // 一覧が出ていたなら最後のページ、出ていなかったなら
+            // 最後の一件。`page_start` がどちらも言い当てる。
+            let resume = Selecting {
+                index: sel
+                    .layout
+                    .page_start(sel.candidates.len().saturating_sub(1)),
+                ..sel.clone()
+            };
+            self.start_registration(sel.query, sel.origin, Some(resume));
+        }
+    }
     /// 候補を消してよいか尋ねているあいだの打鍵。
     ///
     /// `y` で消し、`n` か `cancel` でやめて候補に戻る。**ほかのキーは食べる。**

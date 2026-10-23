@@ -128,11 +128,46 @@ fn a_pending_answer_holds_the_last_candidate() {
     assert!(!s.registering(), "届くまでは辞書登録へ進まない");
     assert_eq!(s.engine.preedit().display(), "▼漢字");
     assert!(s.engine.web_pending());
+    assert!(s.engine.poll_web().is_none(), "まだなら見え方は変わらない");
+    assert!(s.engine.web_pending());
 
     s.answer(found(&["寛治"]));
-    s.type_keys(" ");
+    let response = s.engine.poll_web().expect("届いた");
     assert!(!s.engine.web_pending());
-    assert_eq!(s.engine.preedit().display(), "▼寛治", "届いたら送れる");
+    assert_eq!(
+        response.preedit.display(),
+        "▼寛治",
+        "届いたら、待たせた Space の続きで送る"
+    );
+}
+
+#[test]
+fn an_answer_asked_ahead_is_appended_without_moving() {
+    let mut s = Session::new(&["漢字"], Web::Pending);
+    s.type_keys("Kanji ");
+    s.answer(found(&["寛治"]));
+    let response = s.engine.poll_web().expect("届いた");
+    assert_eq!(response.preedit.display(), "▼漢字", "送ってはいない");
+    assert_eq!(s.words(), ["漢字", "寛治"]);
+}
+
+#[test]
+fn nothing_arriving_after_a_wait_leads_to_registration() {
+    let mut s = Session::new(&["漢字"], Web::Pending);
+    s.type_keys("Kanji  ");
+    s.answer(found(&[]));
+    s.engine.poll_web().expect("届いた");
+    assert!(s.registering(), "待たせた Space は辞書登録へ進むはずだった");
+}
+
+#[test]
+fn a_key_while_waiting_forgets_the_wait() {
+    let mut s = Session::new(&[], Web::Pending);
+    s.type_keys("Kurisutaru ");
+    s.engine.press(Key::Escape);
+    s.answer(found(&["クリスタル"]));
+    assert!(!s.engine.web_pending());
+    assert!(s.engine.poll_web().is_none(), "取り消したものは変換しない");
 }
 
 #[test]
@@ -160,8 +195,12 @@ fn an_empty_dictionary_asks_the_web() {
     assert!(s.engine.web_pending());
 
     s.answer(found(&["クリスタル"]));
-    s.type_keys(" ");
-    assert_eq!(s.engine.preedit().display(), "▼クリスタル");
+    let response = s.engine.poll_web().expect("届いた");
+    assert_eq!(
+        response.preedit.display(),
+        "▼クリスタル",
+        "届いたら変換して見せる"
+    );
 }
 
 #[test]
