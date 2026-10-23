@@ -7,7 +7,7 @@
 //! 状態は三つしかない。辞書登録はこれらと並ぶ第四の状態ではなく、直接入力の
 //! 上に積まれた枠として表現している。詳しくは ADR-0002 を参照。
 
-use crate::dict::{Candidate, CandidateSource, Context, EmptyDict, NoopRanker, Query, Ranker};
+use crate::dict::{Candidate, CandidateSource, Context, EmptyDict, NoopRanker, Query, Ranker, Web};
 use crate::kana;
 use crate::key::Key;
 use crate::keymap::Command;
@@ -358,9 +358,25 @@ struct Selecting {
     origin: Composing,
     /// 区切り方。変換を始めたときの設定で決まる。
     layout: Layout,
+    /// ネットの候補を尋ね終えたか (ADR-0042)。**一つの変換で「無い」と
+    /// 言われたら、もう尋ねない。**
+    web_done: bool,
 }
 
 impl Selecting {
+    /// 送った先の位置。一覧を出しているなら次のページの先頭。
+    ///
+    /// 候補の数を超えていれば、もう送る先が無い。
+    fn next(&self) -> usize {
+        // 一覧を出しているなら、送るのは一件ずつではなく一ページ
+        // ずつ。見えているものを送り直しても意味がない。
+        if self.listing() {
+            self.page_start() + self.layout.page_size()
+        } else {
+            self.index + 1
+        }
+    }
+
     /// 一覧を出す段階に入っているか。
     fn listing(&self) -> bool {
         self.layout.listing(self.index)
@@ -403,6 +419,16 @@ enum State {
     Selecting(Selecting),
 }
 
+/// ネットの候補を尋ねて、候補がどうなったか。
+enum Grown {
+    /// 増えた。
+    Grew,
+    /// まだ取りに行っている。
+    Pending,
+    /// 増えなかった。もう尋ねない。
+    No,
+}
+
 /// 一打鍵の処理中に溜めていく出力。
 #[derive(Default)]
 struct Out {
@@ -423,6 +449,8 @@ pub struct Engine {
     context: Context,
     /// 振る舞いを決める値。**受け取るまでは何もしない。**
     options: Option<Options>,
+    /// この打鍵でネットの候補を取りに行かせ、まだ届いていない (ADR-0042)。
+    web_pending: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -455,6 +483,7 @@ impl Engine {
             ranker: Box::new(NoopRanker),
             context: Context::default(),
             options: None,
+            web_pending: false,
         }
     }
 
@@ -681,6 +710,7 @@ impl Engine {
             handled: true,
             ..Out::default()
         };
+        self.web_pending = false;
         let state = std::mem::take(&mut self.state);
         match state {
             State::Direct => self.on_direct(key, &mut out),
@@ -998,6 +1028,14 @@ impl Engine {
             number: index / size + 1,
             count: completion.entries.len().div_ceil(size),
         })
+    }
+
+    /// ネットの候補を取りに行かせたまま、まだ届いていないか (ADR-0042)。
+    ///
+    /// 立つのはそうなった打鍵の後だけで、次の打鍵で倒れる。届いたかは、
+    /// もう一度送れば分かる。
+    pub fn web_pending(&self) -> bool {
+        self.web_pending
     }
 
     /// 候補選択中なら候補ウィンドウの内容。それ以外は `None`。
@@ -1539,13 +1577,43 @@ impl Engine {
                 self.state = State::Composing(comp);
                 return;
             }
+            if !is_numeric(&query) {
+                match self.dict.lookup_web(&query) {
+                    Web::Pending => {
+                        // 届くまで見出し語入力のまま待つ。もう一度変換すれば
+                        // また尋ねる。
+                        self.web_pending = true;
+                        self.state = State::Composing(comp);
+                        return;
+                    }
+                    Web::Found(found) if !found.is_empty() => {
+                        let Some(layout) = self.layout() else {
+                            self.state = State::Composing(comp);
+                            return;
+                        };
+                        let templates = found.iter().map(|c| c.word.clone()).collect();
+                        self.state = State::Selecting(Selecting {
+                            query,
+                            candidates: found,
+                            templates,
+                            index: 0,
+                            purging: false,
+                            origin: comp,
+                            layout,
+                            web_done: true,
+                        });
+                        return;
+                    }
+                    Web::Off | Web::Found(_) => {}
+                }
+            }
             self.start_registration(query, comp, None);
         } else {
             let Some(layout) = self.layout() else {
                 self.state = State::Composing(comp);
                 return;
             };
-            self.state = State::Selecting(Selecting {
+            let mut sel = Selecting {
                 query,
                 candidates,
                 templates,
@@ -1553,7 +1621,52 @@ impl Engine {
                 purging: false,
                 origin: comp,
                 layout,
-            });
+                web_done: false,
+            };
+            self.look_ahead(&mut sel);
+            self.state = State::Selecting(sel);
+        }
+    }
+
+    /// 最後のページ (一つずつ見せているなら最後の一件) に来ていれば、
+    /// ネットの候補を先に尋ねておく。送ったときに並んでいるように。
+    fn look_ahead(&mut self, sel: &mut Selecting) {
+        if sel.next() >= sel.candidates.len() {
+            let _ = self.grow_from_web(sel);
+        }
+    }
+
+    /// ネットの候補を尋ね、来ていれば後ろに付け足す。
+    ///
+    /// 辞書にもある語は付け足さない。**並びは辞書が先で、ネットが後。**
+    fn grow_from_web(&mut self, sel: &mut Selecting) -> Grown {
+        if sel.web_done || is_numeric(&sel.query) {
+            return Grown::No;
+        }
+        match self.dict.lookup_web(&sel.query) {
+            Web::Pending => {
+                self.web_pending = true;
+                Grown::Pending
+            }
+            Web::Off => {
+                sel.web_done = true;
+                Grown::No
+            }
+            Web::Found(found) => {
+                sel.web_done = true;
+                let before = sel.candidates.len();
+                for candidate in found {
+                    if !sel.candidates.iter().any(|c| c.word == candidate.word) {
+                        sel.templates.push(candidate.word.clone());
+                        sel.candidates.push(candidate);
+                    }
+                }
+                if sel.candidates.len() > before {
+                    Grown::Grew
+                } else {
+                    Grown::No
+                }
+            }
         }
     }
 
@@ -1638,15 +1751,30 @@ impl Engine {
         }
         match (self.command(key), key) {
             (Some(Command::StartHenkan), _) => {
-                // 一覧を出しているなら、送るのは一件ずつではなく一ページ
-                // ずつ。見えているものを送り直しても意味がない。
-                let next = if sel.listing() {
-                    sel.page_start() + sel.layout.page_size()
-                } else {
-                    sel.index + 1
-                };
+                let next = sel.next();
+                if next >= sel.candidates.len() {
+                    // 辞書登録へ進む前に、ネットの候補を尋ねる (ADR-0042)。
+                    match self.grow_from_web(&mut sel) {
+                        Grown::Grew => {
+                            // 付け足した分がいまのページの空きに収まったなら、
+                            // ページは送らない。そこに見えている。
+                            if next < sel.candidates.len() {
+                                sel.index = next;
+                            }
+                            self.look_ahead(&mut sel);
+                            self.state = State::Selecting(sel);
+                            return;
+                        }
+                        Grown::Pending => {
+                            self.state = State::Selecting(sel);
+                            return;
+                        }
+                        Grown::No => {}
+                    }
+                }
                 if next < sel.candidates.len() {
                     sel.index = next;
+                    self.look_ahead(&mut sel);
                     self.state = State::Selecting(sel);
                 } else {
                     // 候補を出し切ったら辞書登録へ。取りやめたときに
@@ -1841,6 +1969,11 @@ impl Engine {
         });
         self.state = State::Direct;
     }
+}
+
+/// 数値変換の問い合わせか。ネットには尋ねない。`#` の見出しは向こうに無い。
+fn is_numeric(query: &Query) -> bool {
+    query.key.contains('#')
 }
 
 /// 引くための問い合わせを組み立てる。

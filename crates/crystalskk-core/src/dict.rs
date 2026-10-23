@@ -104,6 +104,15 @@ pub trait CandidateSource {
         Vec::new()
     }
 
+    /// ネットの候補を引く (ADR-0042)。
+    ///
+    /// **待たずに答える。** 取りに行っている最中なら [`Web::Pending`] を
+    /// 返し、尋ねられるたびに様子を答える。既定は「使わない」。
+    fn lookup_web(&self, query: &Query) -> Web {
+        let _ = query;
+        Web::Off
+    }
+
     /// いま引ける状態か。
     ///
     /// **「候補が無い」と「引けなかった」は別である。** 前者なら辞書登録へ
@@ -116,6 +125,17 @@ pub trait CandidateSource {
     fn available(&self) -> bool {
         true
     }
+}
+
+/// ネットの候補を尋ねた答え。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Web {
+    /// 使わない。尋ねる先が無い。
+    Off,
+    /// 取りに行っている。もう一度尋ねれば分かる。
+    Pending,
+    /// 取れた。辞書にある語は除いてある。空なら、無かった。
+    Found(Vec<Candidate>),
 }
 
 /// 変換時に参照できる周辺情報。
