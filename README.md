@@ -8,6 +8,7 @@
 > Installs a TSF text input processor (DLL) and a per-user conversion server.
 > Source-built releases are produced by GitHub Actions.
 > At install time it downloads llama.cpp from its official releases; at run time it downloads the SKK dictionaries listed in the settings.
+> If you turn on web candidates (off by default), readings missing from the dictionaries are sent to Google's transliteration API.
 
 Windows 向けの SKK 風 IME です。
 
@@ -63,6 +64,12 @@ Windows 向けの SKK 風 IME です。
 - 自動カタカナ語辞書
     - SKKFEP ~~をパクった~~ にインスパイアされた機能です。
     - 指定の辞書から自動的にカタカナ語辞書を生成し、変換候補に追加します。
+- ネットの変換候補
+    - 辞書の候補を出し切ったとき (辞書に無い語を変換したときも) に、インターネットの変換 (Google CGI API for Japanese Input) に尋ねて候補を足します。
+    - 新しい固有名詞やネットミームのように、辞書にまだ無いけれど書き方がほぼ決まっている語に向いています。人名は書き方の組み合わせが多く当たりにくいので、人名辞書を使うほうが確実です。
+    - 取得中は候補の窓に「🌐 取得中…」が出て、届けばそのまま候補が出ます。ネット由来の候補には 🌐 が付き、選ぶとユーザー辞書に入ります。
+    - 辞書にすでにある語と、読みをひらがな・カタカナにしただけのものは出しません。
+    - 尋ねるのは辞書に無かった読みだけで、前後の文章は送りません。既定では無効なので、使うときは `config.toml` の `[web]` で `enabled = true` にしてください。
 
 ## 開発
 
