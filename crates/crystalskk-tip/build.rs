@@ -19,18 +19,14 @@ use std::path::{Path, PathBuf};
 /// よく使われる倍率の分はそれぞれ描いておく。
 const MODE_SIZES: [u32; 9] = [16, 20, 24, 28, 32, 36, 40, 48, 64];
 
-/// 入力モードの絵と、カーソルのそばに出すほかの絵。`(Rust での名前, ファイル名)`。
-///
-/// どれもトレイの絵と同じ大きさで描き、濃さだけを取り出す。
-const MODES: [(&str, &str); 7] = [
+/// 入力モードの絵。`(Rust での名前, ファイル名)`。
+const MODES: [(&str, &str); 6] = [
     ("HIRAGANA", "mode-hiragana"),
     ("KATAKANA", "mode-katakana"),
     ("HALFWIDTH_KATAKANA", "mode-halfwidth-katakana"),
     ("ASCII", "mode-ascii"),
     ("FULLWIDTH_ASCII", "mode-fullwidth-ascii"),
     ("OFF", "mode-off"),
-    // ネットの候補を取りに行っているあいだの地球儀 (ADR-0042)。
-    ("WEB", "web-pending"),
 ];
 
 fn main() {

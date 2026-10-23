@@ -517,29 +517,6 @@ impl TextService {
         });
     }
 
-    /// ネットの候補を取りに行っていることを、カーソルのそばに出す (ADR-0042)。
-    ///
-    /// 消すのは次の打鍵である。届いたかは、もう一度送れば分かる。
-    fn announce_web(&self, context: &ITfContext) {
-        /// 出しておく上限。送り直さずに放っておかれたときに消える。
-        const WEB_PENDING_MS: u32 = 10_000;
-        let Some(client_id) = self.client_id() else {
-            return;
-        };
-        let window = Rc::clone(&self.mode_window);
-        let palette = self.palette();
-        self.watch_layout(context);
-        edit::caret(context, client_id, move |caret, owner| {
-            window.show_glyph(
-                crate::indicator::Glyph::Web,
-                caret,
-                owner,
-                WEB_PENDING_MS,
-                palette,
-            );
-        });
-    }
-
     /// 小窓の色。設定の色を、いまの明るさに合わせて解く (ADR-0026)。
     ///
     /// 設定をまだ受け取っていなければ Windows の標準の色。**設定が読めない
@@ -1097,12 +1074,6 @@ impl TextService_Impl {
 
         self.this.show_mode();
         log::trace("モードを映した");
-
-        // ネットの候補を取りに行っているなら、カーソルのそばに地球儀を出す
-        // (ADR-0042)。次の打鍵で消える。
-        if self.this.engine.borrow().web_pending() {
-            self.this.announce_web(context);
-        }
 
         // 見え方を今の状態に合わせる。書けなくても、エンジンの状態は
         // もう進んでいる。ここで慌てても直せないので、食べたことだけは
