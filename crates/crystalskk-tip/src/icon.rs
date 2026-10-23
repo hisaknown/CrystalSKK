@@ -67,6 +67,11 @@ fn pick(drawing: drawn::Mode, wanted: u32) -> (u32, &'static [u8]) {
         .expect("どのモードの絵も一枚以上ある")
 }
 
+/// ネットの候補を取りに行っているあいだの地球儀の濃さ (ADR-0042)。
+pub fn web_coverage(wanted: u32) -> (u32, &'static [u8]) {
+    pick(drawn::WEB, wanted)
+}
+
 /// 入力モードの絵の濃さ。欲しい大きさに合うものを選ぶ。
 ///
 /// カーソルのそばに出す窓 ([`crate::indicator`]) も同じ絵を使う。

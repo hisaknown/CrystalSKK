@@ -5,6 +5,9 @@
 //! - カーソル (選択範囲) の真下に出す。下に入らなければ上へ回す。
 //! - 決めた時間が経ったら消える。打鍵があったときや、入力先が変わった
 //!   ときも消す。
+//! - ネットの候補を取りに行っているあいだは、同じ窓に地球儀を出す
+//!   (ADR-0042)。候補の窓はいつも出ているとは限らないが、この窓なら
+//!   どの場面でも出せる。
 //! - 絵はトレイと同じ入力モードの絵。色はアプリの明るさに合わせる
 //!   ([`crate::theme::Palette`])。暗ければ黒い地に白い絵。
 //! - **焦点を奪わず、クリックも受けない。** 一瞬出るだけの窓に、打鍵や
@@ -55,12 +58,21 @@ const GAP: i32 = 2;
 /// 消えるまでの時計の番号。
 const TIMER: usize = 1;
 
+/// 窓に出す絵。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glyph {
+    /// 入力モード。`None` は入力方式が切。
+    Mode(Option<InputMode>),
+    /// ネットの候補を取りに行っている (ADR-0042)。
+    Web,
+}
+
 /// カーソルのそばに出す、入力モードの窓。
 #[derive(Debug, Default)]
 pub struct ModeWindow {
     hwnd: RefCell<HWND>,
     /// いま出している絵。窓の手続きが描くときに読む。
-    shown: Cell<Option<Option<InputMode>>>,
+    shown: Cell<Option<Glyph>>,
     /// 描く色。出すときに受け取る。
     palette: Cell<Option<Palette>>,
     /// 描く拡大率。出すときに、出すモニターで決める。
@@ -86,10 +98,22 @@ impl ModeWindow {
         duration_ms: u32,
         palette: Palette,
     ) {
+        self.show_glyph(Glyph::Mode(mode), caret, owner, duration_ms, palette);
+    }
+
+    /// `caret` の真下に `glyph` を出し、`duration_ms` 後に消す。
+    pub fn show_glyph(
+        &self,
+        glyph: Glyph,
+        caret: RECT,
+        owner: Option<HWND>,
+        duration_ms: u32,
+        palette: Palette,
+    ) {
         let Some(hwnd) = self.ensure_window() else {
             return;
         };
-        self.shown.set(Some(mode));
+        self.shown.set(Some(glyph));
         self.palette.set(Some(palette));
         let rounded = self.rounded.get();
         if rounded {
@@ -281,7 +305,7 @@ pub(crate) fn work_area(caret: RECT) -> RECT {
 /// 絵は窓の真ん中に、拡大率に合った大きさのものを画素そのままで置く。
 /// **伸び縮みさせると滲む。**
 fn paint(hwnd: HWND, window: &ModeWindow) {
-    let (Some(mode), Some(palette)) = (window.shown.get(), window.palette.get()) else {
+    let (Some(glyph_kind), Some(palette)) = (window.shown.get(), window.palette.get()) else {
         return;
     };
     let dpi = window.dpi.get();
@@ -292,7 +316,10 @@ fn paint(hwnd: HWND, window: &ModeWindow) {
         dpi::BASE as f32 / dpi as f32,
     );
     let glyph = u32::try_from(dpi::scale(GLYPH, dpi)).unwrap_or(16);
-    let (size, coverage) = icon::mode_coverage(mode, glyph);
+    let (size, coverage) = match glyph_kind {
+        Glyph::Mode(mode) => icon::mode_coverage(mode, glyph),
+        Glyph::Web => icon::web_coverage(glyph),
+    };
     let tinted = premultiplied(coverage, palette.text);
 
     draw::with_target(hwnd, dpi, |target| {
