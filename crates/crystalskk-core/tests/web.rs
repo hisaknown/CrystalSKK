@@ -100,31 +100,45 @@ fn the_web_is_not_asked_while_the_dictionary_has_more() {
 }
 
 #[test]
-fn the_last_candidate_asks_ahead() {
+fn the_last_candidate_does_not_ask_yet() {
+    // 候補が一つきりの変換で、変換した途端に「取得中」が出ては困る。
+    let mut s = Session::new(&["漢字"], Web::Pending);
+    s.type_keys("Kanji ");
+    assert_eq!(
+        s.remote.asked.get(),
+        0,
+        "最後の一件を見せただけでは尋ねない"
+    );
+    assert!(!s.engine.web_pending());
+}
+
+#[test]
+fn sending_past_the_last_candidate_asks_and_moves_on() {
     let mut s = Session::new(&["漢字", "感じ"], found(&["寛治"]));
     s.type_keys("Kanji  ");
-    assert_eq!(s.remote.asked.get(), 1, "最後の一件で先に尋ねる");
-    assert_eq!(s.words(), ["漢字", "感じ", "寛治"], "辞書の後ろに付け足す");
-
+    assert_eq!(s.remote.asked.get(), 0);
     s.type_keys(" ");
-    assert_eq!(s.engine.preedit().display(), "▼寛治");
+    assert_eq!(
+        s.remote.asked.get(),
+        1,
+        "辞書登録へ進むはずのところで尋ねる"
+    );
+    assert_eq!(s.words(), ["漢字", "感じ", "寛治"], "辞書の後ろに付け足す");
+    assert_eq!(s.engine.preedit().display(), "▼寛治", "届いた候補へ送る");
 }
 
 #[test]
 fn words_the_dictionary_has_are_not_repeated() {
     let mut s = Session::new(&["漢字"], found(&["漢字", "寛治"]));
-    s.type_keys("Kanji");
-    s.type_keys(" ");
+    s.type_keys("Kanji  ");
     assert_eq!(s.words(), ["漢字", "寛治"]);
 }
 
 #[test]
 fn a_pending_answer_holds_the_last_candidate() {
     let mut s = Session::new(&["漢字"], Web::Pending);
-    s.type_keys("Kanji ");
+    s.type_keys("Kanji  ");
     assert!(s.engine.web_pending(), "取りに行っていると知らせる");
-
-    s.type_keys(" ");
     assert!(!s.registering(), "届くまでは辞書登録へ進まない");
     assert_eq!(s.engine.preedit().display(), "▼漢字");
     assert!(s.engine.web_pending());
@@ -139,16 +153,6 @@ fn a_pending_answer_holds_the_last_candidate() {
         "▼寛治",
         "届いたら、待たせた Space の続きで送る"
     );
-}
-
-#[test]
-fn an_answer_asked_ahead_is_appended_without_moving() {
-    let mut s = Session::new(&["漢字"], Web::Pending);
-    s.type_keys("Kanji ");
-    s.answer(found(&["寛治"]));
-    let response = s.engine.poll_web().expect("届いた");
-    assert_eq!(response.preedit.display(), "▼漢字", "送ってはいない");
-    assert_eq!(s.words(), ["漢字", "寛治"]);
 }
 
 #[test]

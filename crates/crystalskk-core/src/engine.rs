@@ -436,8 +436,6 @@ enum WebWait {
     Convert,
     /// 候補を送り切ったところで待っている。届いたら送る。
     Advance,
-    /// 最後のページで先に尋ねた。届いたら付け足すだけ。
-    Ahead,
 }
 
 /// 一打鍵の処理中に溜めていく出力。
@@ -1064,10 +1062,6 @@ impl Engine {
         match (wait, state) {
             (WebWait::Convert, State::Composing(comp)) => self.convert(comp),
             (WebWait::Advance, State::Selecting(sel)) => self.send_on(sel),
-            (WebWait::Ahead, State::Selecting(mut sel)) => {
-                self.look_ahead(&mut sel);
-                self.state = State::Selecting(sel);
-            }
             // 待っているあいだに状態が変わった。もう要らない。
             (_, state) => {
                 self.state = state;
@@ -1662,7 +1656,7 @@ impl Engine {
                 self.state = State::Composing(comp);
                 return;
             };
-            let mut sel = Selecting {
+            self.state = State::Selecting(Selecting {
                 query,
                 candidates,
                 templates,
@@ -1671,17 +1665,7 @@ impl Engine {
                 origin: comp,
                 layout,
                 web_done: false,
-            };
-            self.look_ahead(&mut sel);
-            self.state = State::Selecting(sel);
-        }
-    }
-
-    /// 最後のページ (一つずつ見せているなら最後の一件) に来ていれば、
-    /// ネットの候補を先に尋ねておく。送ったときに並んでいるように。
-    fn look_ahead(&mut self, sel: &mut Selecting) {
-        if sel.next() >= sel.candidates.len() {
-            let _ = self.grow_from_web(sel, WebWait::Ahead);
+            });
         }
     }
 
@@ -1887,7 +1871,6 @@ impl Engine {
                     if next < sel.candidates.len() {
                         sel.index = next;
                     }
-                    self.look_ahead(&mut sel);
                     self.state = State::Selecting(sel);
                     return;
                 }
@@ -1900,7 +1883,6 @@ impl Engine {
         }
         if next < sel.candidates.len() {
             sel.index = next;
-            self.look_ahead(&mut sel);
             self.state = State::Selecting(sel);
         } else {
             // 候補を出し切ったら辞書登録へ。取りやめたときに
