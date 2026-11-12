@@ -32,7 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, IsWindowVisible, KillTimer, RegisterClassExW,
     SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST,
-    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -120,6 +121,7 @@ impl ModeWindow {
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
+            popup::want_shown(hwnd, true);
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, side, side, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if self.backdrop.get() {
@@ -168,6 +170,7 @@ impl ModeWindow {
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER);
+            popup::want_shown(hwnd, false);
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
@@ -181,6 +184,7 @@ impl ModeWindow {
         // SAFETY: 自分で作った窓を壊す。預けた指し先は外してから。
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            popup::forget(hwnd);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -424,6 +428,11 @@ unsafe extern "system" fn window_proc(
             });
             LRESULT(0)
         }
+        // 自分で出したのでなければ出させない (`popup::want_shown`)。
+        WM_WINDOWPOSCHANGING => {
+            popup::refuse_unwanted_show(hwnd, lparam);
+            LRESULT(0)
+        }
         // クリックは下の窓へ通す。
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
@@ -435,6 +444,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: 自分の窓の時計を止めて隠す。
             unsafe {
                 let _ = KillTimer(Some(hwnd), TIMER);
+                popup::want_shown(hwnd, false);
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
             LRESULT(0)
