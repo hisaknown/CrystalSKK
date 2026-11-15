@@ -15,9 +15,12 @@
 //!
 //! # 自信があるときだけ、一つだけ持ち上げる
 //!
-//! 採点を候補のあいだで確率に直し (softmax)、一番の候補の確率が
-//! `confidence` 以上なら、それだけを先頭に出す。残りは辞書の順のままに
-//! する。2 位以下の採点はモデルにとって手がかりが無く、ほぼ雑音である。
+//! 採点はトークンごとに語彙全体で正規化した対数確率の和なので、`exp` を
+//! 取れば「モデルがこの読みからこの候補をそのまま出す確率」になる。一番の
+//! 候補のその確率が `confidence` 以上なら、それだけを先頭に出す。残りは
+//! 辞書の順のままにする。候補のあいだで正規化し直すことはしない。どの
+//! 候補にもモデルが自信を持っていないときでも、確率が大きく見えるから
+//! である。2 位以下の採点はモデルにとって手がかりが無く、ほぼ雑音である。
 //! 採点と辞書の順を足し合わせると、その雑音が 2 位以下の並びに乗る
 //! (ADR-0044)。持ち上げた候補には印
 //! ([`crystalskk_core::dict::RANKED_MARK`]) を付ける。
@@ -186,7 +189,7 @@ fn reading(query: &Query) -> String {
 /// 並べ方の決まり。
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
-    /// 一番の候補を持ち上げるのに要る、候補のあいだでの確率。
+    /// 一番の候補を持ち上げるのに要る、モデルがその候補を出す確率。
     pub confidence: f32,
     /// 並べ替えを待つ時間。
     pub deadline: Duration,
@@ -257,17 +260,13 @@ impl<S: Scorer> LmRanker<S> {
     }
 }
 
-/// 一番の候補の、候補のあいだでの確率が `confidence` 以上なら、それを
-/// 先頭に出して印を付ける。残りは辞書の順のまま。
+/// 一番の候補を、モデルがそれを出す確率が `confidence` 以上なら先頭に
+/// 出して印を付ける。残りは辞書の順のまま。
 fn promote(candidates: &mut Vec<Candidate>, scores: &[f32], confidence: f32) {
     let Some((best, &top)) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
         return;
     };
-    if best == 0 || !top.is_finite() {
-        return;
-    }
-    let total: f32 = scores.iter().map(|s| (s - top).exp()).sum();
-    if 1.0 / total < confidence {
+    if best == 0 || top.exp() < confidence {
         return;
     }
     let mut chosen = candidates.remove(best);
@@ -336,7 +335,7 @@ mod tests {
     #[test]
     fn the_most_natural_candidate_comes_first() {
         let mut candidates = kanji();
-        ranker(&[-9.0, -8.0, -1.0], 0.7).rank(
+        ranker(&[-9.0, -8.0, -0.1], 0.5).rank(
             &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
@@ -352,9 +351,10 @@ mod tests {
 
     #[test]
     fn the_dictionary_order_holds_unless_the_model_is_sure() {
-        // 一番でも、確率が足りなければ動かさない。
+        // 一番でも、モデルがそれを出す確率が足りなければ動かさない。
+        // 候補のあいだでは一番でも、どれにも自信が無いことがある。
         let mut candidates = kanji();
-        ranker(&[-5.0, -4.8, -4.9], 0.7).rank(
+        ranker(&[-3.0, -9.0, -1.0], 0.5).rank(
             &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn the_first_stays_unmarked_when_the_model_agrees() {
         let mut candidates = kanji();
-        ranker(&[-0.1, -8.0, -9.0], 0.7).rank(
+        ranker(&[-0.1, -8.0, -9.0], 0.5).rank(
             &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,

@@ -111,7 +111,7 @@ pub struct Markers {
 pub struct Ranker {
     /// 並べ替えるか。
     pub enabled: bool,
-    /// 一番の候補を持ち上げるのに要る、候補のあいだでの確率 (0〜1)。
+    /// 一番の候補を持ち上げるのに要る、モデルがその候補を出す確率 (0〜1)。
     pub confidence: Probability,
     /// 並べ替えを待つ時間 (ミリ秒)。
     pub deadline_ms: u32,
@@ -1148,13 +1148,13 @@ mod tests {
     fn the_ranker_is_on_in_the_template() {
         let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
         assert!(ranker.enabled);
-        assert_eq!(ranker.confidence, Probability(0.7));
+        assert_eq!(ranker.confidence, Probability(0.5));
         assert_eq!(ranker.before, 64);
     }
 
     #[test]
     fn a_whole_number_is_a_confidence_too() {
-        let user = TEMPLATE.replace("confidence = 0.7", "confidence = 1");
+        let user = TEMPLATE.replace("confidence = 0.5", "confidence = 1");
         let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
         assert_eq!(settings.ranker.confidence, Probability(1.0));
     }
@@ -1179,7 +1179,7 @@ mod tests {
             ("min_length = 2", "min_length = 0", "1 以上"),
             ("dynamic = true", "dynamic = \"yes\"", "true か false"),
             ("until_list = 5", "until_list = 2.5", "整数"),
-            ("confidence = 0.7", "confidence = 1.5", "ranker.confidence"),
+            ("confidence = 0.5", "confidence = 1.5", "ranker.confidence"),
             ("threads = 4", "threads = \"four\"", "ranker.threads"),
             ("top = 7", "top = 0", "ranker.top"),
             ("min_context = 2", "min_context = -1", "ranker.min_context"),

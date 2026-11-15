@@ -614,7 +614,7 @@ mod tests {
     fn ranker_settings(enabled: bool) -> crystalskk_settings::Ranker {
         crystalskk_settings::Ranker {
             enabled,
-            confidence: crystalskk_settings::Probability(0.7),
+            confidence: crystalskk_settings::Probability(0.5),
             deadline_ms: 100,
             before: 100,
             top: 7,
