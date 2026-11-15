@@ -24,8 +24,8 @@ fn ranker() -> Option<LmRanker<LlamaScorer>> {
     Some(LmRanker::new(
         scorer,
         Policy {
-            // 確率を問わず一番を持ち上げ、モデルの判断だけを確かめる。
-            confidence: 0.0,
+            // 既定と同じ足切りで、文脈が効くことを確かめる。
+            confidence: 0.2,
             deadline: Duration::from_secs(5),
             before: 64,
             top: 7,
@@ -60,9 +60,11 @@ fn the_context_decides_between_homophones() {
         return;
     };
     let words = ["漢字", "感じ", "幹事", "監事"];
+    // モデルは幹事を一番に推すが、漢字も推す。漢字は辞書でも 1 位なので、
+    // RRF では漢字が先に残り、幹事がその次に上がる。
     assert_eq!(
-        rank(&ranker, "かんじ", &words, "忘年会の", "を引き受けた")[0],
-        "幹事"
+        rank(&ranker, "かんじ", &words, "忘年会の", "を引き受けた")[..2],
+        ["漢字", "幹事"]
     );
     assert_eq!(
         rank(&ranker, "かんじ", &words, "小学校で習う", "の書き取り")[0],

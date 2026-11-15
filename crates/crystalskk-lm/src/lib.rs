@@ -13,22 +13,27 @@
 //! の確率を一つのバッチで求めて比べる。`</s>` まで含めるので、候補が
 //! 「そこで終わる」ことも確率に入る。後ろの文章はモデルが受け取らない。
 //!
-//! # モデルが推す候補だけを、前に差し込む
+//! # 辞書のランキングと、モデルのランキングを RRF で合わせる
 //!
 //! 採点はトークンごとに語彙全体で正規化した対数確率の和なので、`exp` を
 //! 取れば「モデルがこの読みからこの候補をそのまま出す確率」になる。その
-//! 確率が `confidence` 以上の候補を「モデルが推す候補」とし、モデルの順で
-//! 前に並べる。推さない候補は辞書の順のまま後ろに続ける。確率は全候補で
-//! 足しても 1 以下なので、推す候補は多くても `1 / confidence` 個である。
+//! 確率が `confidence` 以上の候補だけを、確率の高い順に並べて「モデルの
+//! ランキング」とする。確率は全候補で足しても 1 以下なので、載る候補は
+//! 多くても `1 / confidence` 個である。
 //!
-//! 候補のあいだで正規化し直すことはしない。どの候補にもモデルが自信を
-//! 持っていないときでも、確率が大きく見えるからである。推さない候補の
-//! 採点はモデルにとって手がかりが無く、ほぼ雑音なので、並びには使わない
-//! (ADR-0044)。
+//! 辞書の順 (全候補) とモデルのランキングを Reciprocal Rank Fusion で合わせる。
+//! 各ランキングでの順位 r (1 から) について `1 / (RRF_K + r)` を足し、その
+//! 合計で並べる。モデルのランキングに載らない候補は、辞書の分だけになる。
+//! 両方で上にいる候補が先に来るので、辞書の下のほうの候補が、モデルの
+//! 一押しだけで上位を追い越すことは少ない (ADR-0044)。
 //!
-//! 推した候補には、辞書の順のままの位置にあっても印
-//! ([`crystalskk_core::dict::RANKED_MARK`]) を付ける。印は「動いた」では
-//! なく「モデルが文脈から推している」ことを示す。
+//! 足切りは要る。全候補をモデルのランキングに載せると、二つのランキングが
+//! 打ち消し合って辞書の順とほとんど変わらなくなる。候補のあいだで正規化
+//! し直すこともしない。どの候補にもモデルが自信を持っていないときでも、
+//! 確率が大きく見えるからである。
+//!
+//! モデルのランキングに載った候補には、位置が変わらなくても印
+//! ([`crystalskk_core::dict::RANKED_MARK`]) を付ける。
 //!
 //! # 当てにならないときは並べない
 //!
@@ -265,8 +270,12 @@ impl<S: Scorer> LmRanker<S> {
     }
 }
 
-/// モデルがそれを出す確率が `confidence` 以上の候補を、モデルの順で前に
-/// 並べて印を付ける。残りは辞書の順のまま。
+/// RRF の定数。候補は多くても十数個なので、値はほとんど効かない。
+/// ハイブリッド検索などでよく使われる値にしておく。
+const RRF_K: f32 = 60.0;
+
+/// 辞書の順と、確率が `confidence` 以上の候補のモデルの順を RRF で合わせて
+/// 並べる。モデルの順に載った候補には印を付ける。同点なら辞書の順。
 fn endorse(candidates: &mut Vec<Candidate>, scores: &[f32], confidence: f32) {
     let mut endorsed: Vec<usize> = (0..candidates.len())
         .filter(|&i| scores[i].exp() >= confidence)
@@ -274,16 +283,20 @@ fn endorse(candidates: &mut Vec<Candidate>, scores: &[f32], confidence: f32) {
     if endorsed.is_empty() {
         return;
     }
-    // 同点なら辞書の順。
     endorsed.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
-    let mut slots: Vec<Option<Candidate>> = candidates.drain(..).map(Some).collect();
-    for &i in &endorsed {
-        if let Some(mut chosen) = slots[i].take() {
-            chosen.mark_ranked();
-            candidates.push(chosen);
-        }
+    let reciprocal = |rank: usize| 1.0 / (RRF_K + rank as f32);
+    let mut fused: Vec<f32> = (0..candidates.len()).map(|i| reciprocal(i + 1)).collect();
+    for (rank, &i) in endorsed.iter().enumerate() {
+        fused[i] += reciprocal(rank + 1);
     }
-    candidates.extend(slots.into_iter().flatten());
+    let mut keyed: Vec<(usize, Candidate)> = candidates.drain(..).enumerate().collect();
+    keyed.sort_by(|(a, _), (b, _)| fused[*b].total_cmp(&fused[*a]).then(a.cmp(b)));
+    for (i, mut candidate) in keyed {
+        if endorsed.contains(&i) {
+            candidate.mark_ranked();
+        }
+        candidates.push(candidate);
+    }
 }
 
 #[cfg(test)]
@@ -390,6 +403,33 @@ mod tests {
         assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
         assert_eq!(candidates[0].annotation.as_deref(), Some("✦"));
         assert_eq!(candidates[1].annotation, None);
+    }
+
+    #[test]
+    fn a_candidate_high_in_both_rankings_comes_before_the_models_favourite() {
+        // 辞書 A B C D E、モデルは D (0.61) と B (0.30) を推す。B は両方で
+        // 2 位、D は辞書 4 位でモデル 1 位なので、B が先に来る。
+        let mut candidates = ["A", "B", "C", "D", "E"].map(Candidate::new).to_vec();
+        let r = LmRanker::new(
+            Fixed {
+                scores: vec![-9.0, -1.2, -9.0, -0.5, -9.0],
+                seen: Vec::new(),
+                late: false,
+            },
+            Policy {
+                confidence: 0.2,
+                deadline: Duration::from_secs(1),
+                before: 3,
+                top: 5,
+                min_context: 1,
+            },
+        );
+        r.rank(
+            &context("会議の"),
+            &Query::okuri_nashi("a"),
+            &mut candidates,
+        );
+        assert_eq!(words(&candidates), ["B", "D", "A", "C", "E"]);
     }
 
     #[test]
