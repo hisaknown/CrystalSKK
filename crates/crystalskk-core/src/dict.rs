@@ -54,13 +54,6 @@ impl Candidate {
             _ => RANKED_MARK.to_owned(),
         });
     }
-
-    /// ランカーの印を除いた注釈。印しか無ければ `None`。
-    pub fn annotation_without_mark(&self) -> Option<&str> {
-        let note = self.annotation.as_deref()?;
-        let note = note.strip_prefix(RANKED_MARK).map_or(note, str::trim_start);
-        (!note.is_empty()).then_some(note)
-    }
 }
 
 /// 辞書が返す候補一件。
@@ -302,16 +295,14 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn the_ranked_mark_goes_before_the_annotation_and_comes_off_again() {
+    fn the_ranked_mark_goes_before_the_annotation() {
         let mut plain = Candidate::new("幹事");
         plain.mark_ranked();
         assert_eq!(plain.annotation.as_deref(), Some("✦"));
-        assert_eq!(plain.annotation_without_mark(), None);
 
         let mut noted = Candidate::with_annotation("橋", "bridge");
         noted.mark_ranked();
         assert_eq!(noted.annotation.as_deref(), Some("✦ bridge"));
-        assert_eq!(noted.annotation_without_mark(), Some("bridge"));
     }
 
     #[test]

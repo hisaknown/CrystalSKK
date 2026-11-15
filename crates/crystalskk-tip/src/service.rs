@@ -819,12 +819,12 @@ impl TextService {
                 }));
             }
             // 一つずつ見せているあいだは、その候補の注釈だけを出す。
-            // 注釈が無ければ窓は出さない。**ランカーの印は除く。** 印のため
-            // だけに窓を出すのはうるさい。印は一覧で本文の右に添える。
+            // 注釈が無ければ窓は出さない。ランカーの印 (✦) だけでも出す。
+            // 言語モデルが選んだことは、一覧を開く前から分かるほうがよい。
             let note = view
                 .candidates
                 .get(view.index)
-                .and_then(|candidate| candidate.annotation_without_mark().map(str::to_owned))
+                .and_then(|candidate| candidate.annotation.clone())
                 .filter(|note| show_annotation && !note.is_empty());
             return note.map(Content::Annotation);
         }
