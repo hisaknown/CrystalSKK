@@ -319,6 +319,11 @@ fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
         return;
     };
 
+    // 言語モデル一式は、辞書サーバを止める前に取得しておく。取得のあいだに
+    // サーバが起こし直されて、置き終える前のモデルを読まれないように。
+    let ranker_dir = crystalskk_server::paths::ranker_dir(directory);
+    let ranker = ranker::prepare(&ranker_dir, ranker_from);
+
     match install::install_server(&source, directory) {
         Ok(stopped) => {
             if stopped {
@@ -332,13 +337,9 @@ fn install_server(dll: &Path, ranker_from: Option<&Path>, report: &Report) {
         }
     }
 
-    // 言語モデル一式は、辞書サーバが止まっているうちに入れ替える。
+    // 言語モデル一式は、辞書サーバが止まっているうちに置く。
     // 動いているサーバは DLL とモデルを握っている。
-    ranker::install(
-        &crystalskk_server::paths::ranker_dir(directory),
-        ranker_from,
-        report,
-    );
+    ranker.put(&ranker_dir, report);
 }
 
 /// 結局どの DLL が使われるのかを、本人の目線で確かめて出す。

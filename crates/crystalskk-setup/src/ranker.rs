@@ -79,64 +79,103 @@ const RETIRED_FILES: [&str; 2] = ["LICENSE", "NOTICE.md"];
 /// 版を書いておくファイル。同じ版なら取り直さない。
 const VERSION_FILE: &str = "VERSION";
 
-/// 一式を揃える。`from` はモデル一式のあるフォルダ。
-pub fn install(ranker_dir: &Path, from: Option<&Path>, report: &Report) {
-    report.say("\n");
-    match install_runtime(&ranker_dir.join(crystalskk_server::paths::RANKER_RUNTIME)) {
-        Ok(true) => report.say(&format!("llama.cpp {LLAMA_CPP} を取得して置きました。\n")),
-        Ok(false) => {}
-        Err(e) => report.say(&format!("llama.cpp を置けません: {e}\n")),
-    }
-    for name in RETIRED_FILES {
-        let _ = std::fs::remove_file(ranker_dir.join(name));
-    }
-    let installed = match from {
+/// 取得して確かめた一式。置くのは [`Prepared::put`] で、辞書サーバを止めて
+/// から行う。
+///
+/// **取得はサーバを止める前に済ませる。** 取得には数十秒かかることがあり、
+/// そのあいだにどこかのアプリの TIP がサーバを起こし直すと、新しい一式を
+/// 置き終える前のモデルを読まれてしまう。止めてから置くまでを短くする。
+pub struct Prepared {
+    /// llama.cpp の zip。いまのものと同じ版なら `None`。
+    runtime: Result<Option<Vec<u8>>, String>,
+    /// モデル一式のうち、置き換えるファイル。
+    model: Result<Vec<(&'static str, Vec<u8>)>, String>,
+    /// 置いたときに言う、モデルの出どころ。
+    source: String,
+}
+
+/// 一式を取得して確かめる。何も置かない。`from` はモデル一式のあるフォルダ。
+pub fn prepare(ranker_dir: &Path, from: Option<&Path>) -> Prepared {
+    let runtime = fetch_runtime(&ranker_dir.join(crystalskk_server::paths::RANKER_RUNTIME));
+    let (model, source) = match from {
         Some(from) => {
             let read = |name: &str| {
                 let path = from.join(name);
                 std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
             };
-            install_model(read, ranker_dir).map(|n| {
-                (
-                    n,
-                    format!(
-                        "言語モデルを置きました (元: {})。
-",
-                        from.display()
-                    ),
-                )
-            })
-        }
-        None => install_model(download_model_file, ranker_dir).map(|n| {
             (
-                n,
-                "言語モデル (jinen) を取得して置きました。
-"
-                .to_owned(),
-            )
-        }),
-    };
-    match installed {
-        Ok((0, _)) => {}
-        Ok((_, message)) => report.say(&message),
-        Err(e) => {
-            report.say(&format!(
-                "言語モデルを置けません: {e}
-"
-            ));
-            report.say(
-                "候補の並べ替えは効きません。
+                gather_model(read, ranker_dir),
+                format!(
+                    "言語モデルを置きました (元: {})。
 ",
-            );
+                    from.display()
+                ),
+            )
+        }
+        None => (
+            gather_model(download_model_file, ranker_dir),
+            "言語モデル (jinen) を取得して置きました。
+"
+            .to_owned(),
+        ),
+    };
+    Prepared {
+        runtime,
+        model,
+        source,
+    }
+}
+
+impl Prepared {
+    /// 揃えた一式を置く。辞書サーバが止まっているうちに呼ぶ。
+    ///
+    /// **揃わなくても導入は止めない。** 並べ替えが効かないだけで、変換は
+    /// 辞書の順でできる。
+    pub fn put(self, ranker_dir: &Path, report: &Report) {
+        report.say(
+            "
+",
+        );
+        let runtime_dir = ranker_dir.join(crystalskk_server::paths::RANKER_RUNTIME);
+        match self.runtime.and_then(|zip| match zip {
+            Some(zip) => place_runtime(&zip, &runtime_dir).map(|()| true),
+            None => Ok(false),
+        }) {
+            Ok(true) => report.say(&format!(
+                "llama.cpp {LLAMA_CPP} を取得して置きました。
+"
+            )),
+            Ok(false) => {}
+            Err(e) => report.say(&format!(
+                "llama.cpp を置けません: {e}
+"
+            )),
+        }
+        for name in RETIRED_FILES {
+            let _ = std::fs::remove_file(ranker_dir.join(name));
+        }
+        match self.model.and_then(|files| place_model(&files, ranker_dir)) {
+            Ok(0) => {}
+            Ok(_) => report.say(&self.source),
+            Err(e) => {
+                report.say(&format!(
+                    "言語モデルを置けません: {e}
+"
+                ));
+                report.say(
+                    "候補の並べ替えは効きません。
+",
+                );
+            }
         }
     }
 }
 
-/// llama.cpp の DLL を揃える。取得したら `true`。
-fn install_runtime(directory: &Path) -> Result<bool, String> {
+/// llama.cpp の zip を取得して確かめる。いまのものと同じ版なら `None`。
+fn fetch_runtime(directory: &Path) -> Result<Option<Vec<u8>>, String> {
     let version = directory.join(VERSION_FILE);
     if std::fs::read_to_string(&version).is_ok_and(|v| v.trim() == LLAMA_CPP) {
-        return Ok(false);
+        return Ok(None);
     }
     let url = format!(
         "https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP}/{LLAMA_CPP_ZIP}"
@@ -149,9 +188,14 @@ fn install_runtime(directory: &Path) -> Result<bool, String> {
     if digest != LLAMA_CPP_SHA256 {
         return Err(format!("{LLAMA_CPP_ZIP} のハッシュが合いません ({digest})"));
     }
-    extract(&body, directory)?;
-    std::fs::write(&version, LLAMA_CPP).map_err(|e| format!("{}: {e}", version.display()))?;
-    Ok(true)
+    Ok(Some(body))
+}
+
+/// llama.cpp の DLL を置き、版を書いておく。
+fn place_runtime(zip: &[u8], directory: &Path) -> Result<(), String> {
+    extract(zip, directory)?;
+    let version = directory.join(VERSION_FILE);
+    std::fs::write(&version, LLAMA_CPP).map_err(|e| format!("{}: {e}", version.display()))
 }
 
 /// zip から要るものだけを取り出す。フォルダの構造は持ち込まない。
@@ -180,13 +224,13 @@ fn extract(zip: &[u8], directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// モデル一式を置く。`fetch` は置く名前から中身を得る。すでに
-/// 同じものが置かれているファイルは取りに行かない。ハッシュが合わない
-/// ものが一つでもあれば何も置かない。置いた数を返す。
-fn install_model(
+/// モデル一式のうち、置き換えるファイルを揃えて確かめる。`fetch` は置く
+/// 名前から中身を得る。すでに同じものが置かれているファイルは取りに
+/// 行かない。ハッシュが合わないものが一つでもあれば誤りにする。何も置かない。
+fn gather_model(
     fetch: impl Fn(&str) -> Result<Vec<u8>, String>,
     ranker_dir: &Path,
-) -> Result<usize, String> {
+) -> Result<Vec<(&'static str, Vec<u8>)>, String> {
     // 先に全部を揃えて確かめる。途中で違うものが見つかって、半端な一式が
     // 残るのを避ける。
     let mut fetched = Vec::new();
@@ -203,6 +247,11 @@ fn install_model(
         }
         fetched.push((name, bytes));
     }
+    Ok(fetched)
+}
+
+/// 揃えたファイルを置く。置いた数を返す。
+fn place_model(fetched: &[(&str, Vec<u8>)], ranker_dir: &Path) -> Result<usize, String> {
     if fetched.is_empty() {
         return Ok(0);
     }
@@ -210,7 +259,7 @@ fn install_model(
     crate::install::sweep_retired_where(ranker_dir, |base| {
         MODEL_FILES.iter().any(|(name, _, _)| *name == base)
     });
-    for (name, bytes) in &fetched {
+    for (name, bytes) in fetched {
         let destination = ranker_dir.join(name);
         crate::install::put(&destination, bytes)
             .map_err(|e| format!("{}: {e}", destination.display()))?;
@@ -284,7 +333,7 @@ mod tests {
         }
         let to = scratch("to");
         let read = |name: &str| std::fs::read(from.join(name)).map_err(|e| e.to_string());
-        let error = install_model(read, &to).unwrap_err();
+        let error = gather_model(read, &to).unwrap_err();
         assert!(error.contains("知っているもの"), "{error}");
         assert!(!to.join("model.gguf").exists(), "一つも写さない");
     }
