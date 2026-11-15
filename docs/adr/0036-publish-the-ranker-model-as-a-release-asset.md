@@ -1,6 +1,6 @@
 # ADR-0036: 候補を並べる言語モデルは GitHub Release に置き、導入のときに取得する
 
-- ステータス: Accepted
+- ステータス: Superseded by ADR-0043
 - 日付: 2026-09-25
 - 関連: ADR-0030, ADR-0031
 

@@ -5,10 +5,11 @@
 //! - **llama.cpp の DLL** (`ranker\llama.cpp`)。公式のリリースから、版を
 //!   固定した zip を取得し、ハッシュを確かめてから要るものだけ取り出す。
 //!   こちらから再配布はしない。
-//! - **モデルと語彙** (`model.gguf` ほか)。`tools/ranker-model/build.py` で
-//!   作ったものを、手元にあれば写し、無ければこのリポジトリの Release から
-//!   取得する (ADR-0036)。作り直しても同じバイト列になるので、ハッシュを
-//!   ここに書いておき、違うものは置かない。
+//! - **モデルと語彙** (`model.gguf` と `tokenizer.json`)。かな漢字変換の
+//!   モデル jinen を、Hugging Face から版 (コミット) を固定して取得する
+//!   (ADR-0043)。こちらから再配布はしない。ハッシュをここに書いておき、
+//!   違うものは置かない。`--ranker-from` で手元のフォルダを渡せば、そこから
+//!   写す (取得できない環境向け)。
 //!
 //! どちらも辞書サーバが読み込むので、置くときにはサーバの exe と同じく、
 //! 上書きできなければ古いものを退けてから置き、退けた残骸は次の導入で
@@ -18,7 +19,7 @@
 //! 辞書の順でできる。
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
@@ -53,29 +54,27 @@ fn wanted(name: &str) -> bool {
     ) || (name.starts_with("ggml-cpu-") && name.ends_with(".dll"))
 }
 
-/// モデル一式と、そのハッシュ (`build.py` の `SHA256SUMS` と同じ)。
-const MODEL_FILES: [(&str, &str); 4] = [
+/// モデルの置き場所 (Hugging Face のリポジトリ) と、その版。版を上げる
+/// ときは `MODEL_FILES` のハッシュと一緒に替える。
+const MODEL_REPOSITORY: &str = "togatogah/jinen-v2-xsmall.gguf";
+const MODEL_REVISION: &str = "3910fd01bf4ba86eca89617f18db9b0c1c5b2283";
+
+/// モデル一式。(置く名前, 取得元での名前, ハッシュ)。
+const MODEL_FILES: [(&str, &str, &str); 2] = [
     (
-        "model.gguf",
-        "a9cb8ae9e80ea2688009049ed01ee9b10ef1c1839a8d78d1e4680bb00ba59f06",
+        crystalskk_server::paths::RANKER_MODEL,
+        "jinen-v2-xsmall-Q8_0.gguf",
+        "bc75a02512bdbb2a4786fec281a57d4d58ac3c2f118c3a29c2a9b41f2a4898b7",
     ),
     (
+        crystalskk_server::paths::RANKER_TOKENIZER,
         "tokenizer.json",
-        "955dc1fa623fab38cc92a3f4ee172423ae6d73201c4207569bfdf5626bc733f0",
-    ),
-    (
-        "LICENSE",
-        "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-    ),
-    (
-        "NOTICE.md",
-        "0e23d469c2a9ee74d96e5b7b7e640298056c34275fe42af3817736643966fe06",
+        "477c91a788bf97e7ed993a4441cfb2c4d60033e505ade17d6c367bc09ed6e6ba",
     ),
 ];
 
-/// モデル一式を置いた Release のタグ。一式を作り直したら、新しいタグを
-/// 切って `MODEL_FILES` のハッシュと一緒に替える。
-const MODEL_TAG: &str = "ranker-model-1";
+/// 以前の一式 (llm-jp-3-150m) にだけあったファイル。導入のときに片付ける。
+const RETIRED_FILES: [&str; 2] = ["LICENSE", "NOTICE.md"];
 
 /// 版を書いておくファイル。同じ版なら取り直さない。
 const VERSION_FILE: &str = "VERSION";
@@ -88,42 +87,48 @@ pub fn install(ranker_dir: &Path, from: Option<&Path>, report: &Report) {
         Ok(false) => {}
         Err(e) => report.say(&format!("llama.cpp を置けません: {e}\n")),
     }
-    match from.map(Path::to_path_buf).or_else(default_model_source) {
+    for name in RETIRED_FILES {
+        let _ = std::fs::remove_file(ranker_dir.join(name));
+    }
+    let installed = match from {
         Some(from) => {
             let read = |name: &str| {
                 let path = from.join(name);
                 std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
             };
-            match install_model(read, ranker_dir) {
-                Ok(0) => {}
-                Ok(_) => report.say(&format!(
-                    "言語モデルを置きました (元: {})。
+            install_model(read, ranker_dir).map(|n| {
+                (
+                    n,
+                    format!(
+                        "言語モデルを置きました (元: {})。
 ",
-                    from.display()
-                )),
-                Err(e) => report.say(&format!(
-                    "言語モデルを置けません: {e}
-"
-                )),
-            }
+                        from.display()
+                    ),
+                )
+            })
         }
-        None => match install_model(download_model_file, ranker_dir) {
-            Ok(0) => {}
-            Ok(_) => report.say(&format!(
-                "言語モデルを取得して置きました ({MODEL_TAG})。
+        None => install_model(download_model_file, ranker_dir).map(|n| {
+            (
+                n,
+                "言語モデル (jinen) を取得して置きました。
 "
-            )),
-            Err(e) => {
-                report.say(&format!(
-                    "言語モデルを取得できません: {e}
+                .to_owned(),
+            )
+        }),
+    };
+    match installed {
+        Ok((0, _)) => {}
+        Ok((_, message)) => report.say(&message),
+        Err(e) => {
+            report.say(&format!(
+                "言語モデルを置けません: {e}
 "
-                ));
-                report.say(
-                    "候補の並べ替えは効きません。
+            ));
+            report.say(
+                "候補の並べ替えは効きません。
 ",
-                );
-            }
-        },
+            );
+        }
     }
 }
 
@@ -175,7 +180,7 @@ fn extract(zip: &[u8], directory: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// モデル一式を置く。`fetch` はファイルの名前から中身を得る。すでに
+/// モデル一式を置く。`fetch` は置く名前から中身を得る。すでに
 /// 同じものが置かれているファイルは取りに行かない。ハッシュが合わない
 /// ものが一つでもあれば何も置かない。置いた数を返す。
 fn install_model(
@@ -185,7 +190,7 @@ fn install_model(
     // 先に全部を揃えて確かめる。途中で違うものが見つかって、半端な一式が
     // 残るのを避ける。
     let mut fetched = Vec::new();
-    for (name, expected) in MODEL_FILES {
+    for (name, _, expected) in MODEL_FILES {
         if file_matches(&ranker_dir.join(name), expected) {
             continue;
         }
@@ -203,7 +208,7 @@ fn install_model(
     }
     std::fs::create_dir_all(ranker_dir).map_err(|e| format!("{}: {e}", ranker_dir.display()))?;
     crate::install::sweep_retired_where(ranker_dir, |base| {
-        MODEL_FILES.iter().any(|(name, _)| *name == base)
+        MODEL_FILES.iter().any(|(name, _, _)| *name == base)
     });
     for (name, bytes) in &fetched {
         let destination = ranker_dir.join(name);
@@ -213,34 +218,24 @@ fn install_model(
     Ok(fetched.len())
 }
 
-/// Release からモデル一式のファイルを一つ取得する。
+/// モデル一式のファイルを一つ取得する。`name` は置く名前。
 fn download_model_file(name: &str) -> Result<Vec<u8>, String> {
-    let url = model_url(name);
+    let url = model_url(name).ok_or_else(|| format!("{name} の取得元がありません"))?;
     match crystalskk_fetch::get(&url, None).map_err(|e| format!("{url}: {e}"))? {
         crystalskk_fetch::Fetched::Downloaded(downloaded) => Ok(downloaded.body),
         crystalskk_fetch::Fetched::NotModified => Err(format!("{url}: 中身が返りません")),
     }
 }
 
-fn model_url(name: &str) -> String {
-    format!("https://github.com/hisaknown/CrystalSKK/releases/download/{MODEL_TAG}/{name}")
+fn model_url(name: &str) -> Option<String> {
+    let (_, remote, _) = MODEL_FILES.iter().find(|(local, _, _)| *local == name)?;
+    Some(format!(
+        "https://huggingface.co/{MODEL_REPOSITORY}/resolve/{MODEL_REVISION}/{remote}"
+    ))
 }
 
 fn file_matches(path: &Path, expected: &str) -> bool {
     std::fs::read(path).is_ok_and(|bytes| sha256(&bytes) == expected)
-}
-
-/// `build.py` の出力。ビルド成果物と同じく、手元から探す。
-fn default_model_source() -> Option<PathBuf> {
-    let mut candidates = vec![PathBuf::from("target/ranker-model/out")];
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(target) = exe.parent().and_then(Path::parent)
-    {
-        candidates.push(target.join("ranker-model").join("out"));
-    }
-    candidates
-        .into_iter()
-        .find(|dir| dir.join(MODEL_FILES[0].0).is_file())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -273,7 +268,7 @@ mod tests {
         );
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    fn scratch(name: &str) -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("crystalskk-ranker-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -284,7 +279,7 @@ mod tests {
     #[test]
     fn a_model_that_is_not_the_known_one_is_refused() {
         let from = scratch("from");
-        for (name, _) in MODEL_FILES {
+        for (name, _, _) in MODEL_FILES {
             std::fs::write(from.join(name), b"something else").unwrap();
         }
         let to = scratch("to");
@@ -295,10 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn the_model_is_taken_from_this_repository() {
+    fn the_model_is_taken_from_a_fixed_revision() {
         assert_eq!(
-            model_url("model.gguf"),
-            "https://github.com/hisaknown/CrystalSKK/releases/download/ranker-model-1/model.gguf"
+            model_url("model.gguf").as_deref(),
+            Some(
+                "https://huggingface.co/togatogah/jinen-v2-xsmall.gguf/resolve/3910fd01bf4ba86eca89617f18db9b0c1c5b2283/jinen-v2-xsmall-Q8_0.gguf"
+            )
         );
+        assert_eq!(model_url("LICENSE"), None);
     }
 }

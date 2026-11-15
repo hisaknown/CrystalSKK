@@ -24,10 +24,10 @@ fn ranker() -> Option<LmRanker<LlamaScorer>> {
     Some(LmRanker::new(
         scorer,
         Policy {
-            weight: 1.0,
+            // 辞書の順を見ず、モデルの判断だけを確かめる。
+            weight: 0.0,
             deadline: Duration::from_secs(5),
-            before: 100,
-            after: 5,
+            before: 64,
             top: 7,
             min_context: 0,
         },

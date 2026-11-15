@@ -594,7 +594,8 @@ impl TextService {
             .settings
             .borrow()
             .as_ref()
-            .map(|s| (s.ranker.before, s.ranker.after))
+            // 後ろの文章は言語モデルが受け取らないので読まない (ADR-0043)。
+            .map(|s| (s.ranker.before, 0))
         else {
             return;
         };
@@ -1092,7 +1093,7 @@ impl TextService_Impl {
         }
         // 確定と改行を一度にするときは、確定を書いたうえで同じキーを送り
         // 直す。この打鍵は食べる。**食べなかったと答えるだけでは届かない
-        // アプリがある** (ADR-0039)。
+        // アプリがある** (ADR-0043)。
         if response.pass_through {
             log::trace("確定を書いたので、キーを送り直す");
             keys::resend(wparam);

@@ -78,11 +78,7 @@ cargo build -p crystalskk-tip --release --target i686-pc-windows-msvc
 cargo run -p crystalskk-setup --release -- install
 ```
 
-変換の候補を前後の文章から並べる言語モデル ([ADR-0030](adr/0030-rank-candidates-with-a-small-language-model-in-the-server.md)) も、導入のときに一緒に置かれる。モデル一式は、手元に無ければこのリポジトリの Release から取得する ([ADR-0036](adr/0036-publish-the-ranker-model-as-a-release-asset.md))。一式を作り直すときは `tools/ranker-model` で作る ([uv](https://docs.astral.sh/uv/) が要る)。作り直しても同じものになり、`target/ranker-model/out` にあれば導入はそちらを写す。どちらの場合もハッシュを確かめ、知らないものは置かない。llama.cpp の DLL は導入のときに公式のリリースから取得する ([ADR-0031](adr/0031-ship-the-ranker-model-with-the-program.md))。どちらも揃わなければ、並べ替えが効かないだけで変換はできる。使うかどうかは設定ファイルの `[ranker]` で決める。
-
-```bash
-cd tools/ranker-model && uv run build.py
-```
+変換の候補を前の文章から並べる言語モデル ([ADR-0030](adr/0030-rank-candidates-with-a-small-language-model-in-the-server.md)) も、導入のときに一緒に置かれる。モデルはかな漢字変換の jinen で、Hugging Face から版を固定して取得する ([ADR-0043](adr/0043-rank-with-jinen-a-kana-kanji-conversion-model.md))。ハッシュを確かめ、知らないものは置かない。取得できない環境では `--ranker-from <フォルダ>` で `model.gguf` と `tokenizer.json` のあるフォルダを渡す。llama.cpp の DLL は導入のときに公式のリリースから取得する ([ADR-0031](adr/0031-ship-the-ranker-model-with-the-program.md))。どちらも揃わなければ、並べ替えが効かないだけで変換はできる。使うかどうかは設定ファイルの `[ranker]` で決める。
 
 使う辞書は設定ファイルの `dictionaries.sources` に並べる (既定は L 辞書)。URL なら辞書サーバが裏で取得し、起動のたびに更新を確かめる。複数並べると、一つの辞書であるかのように並べた順で引く ([ADR-0022](adr/0022-read-the-listed-dictionaries-as-one.md))。いま取り直したいとき、何が起きたかを見たいときは次を打つ。権限は要らない。
 

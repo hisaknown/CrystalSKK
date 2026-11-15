@@ -117,11 +117,9 @@ pub struct Ranker {
     pub deadline_ms: u32,
     /// カーソルより前の文章を何文字見せるか。
     pub before: usize,
-    /// カーソルより後の文章を何文字見せるか。0 なら見せない。
-    pub after: usize,
     /// 辞書の順で上から何個までを並べ替えるか。
     pub top: usize,
-    /// 前後の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
+    /// 前の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
     pub min_context: usize,
     /// 採点に使うスレッドの数。
     pub threads: usize,
@@ -590,7 +588,6 @@ fn ranker(table: &Table) -> Result<Ranker, Error> {
         deadline_ms: u32::try_from(count(table, "ranker", "deadline_ms")?)
             .map_err(|_| Error::new("ranker.deadline_ms が大きすぎます"))?,
         before: count(table, "ranker", "before")?,
-        after: amount(table, "ranker", "after")?,
         top: count(table, "ranker", "top")?,
         min_context: amount(table, "ranker", "min_context")?,
         threads: count(table, "ranker", "threads")?,
@@ -1151,15 +1148,15 @@ mod tests {
     fn the_ranker_is_on_in_the_template() {
         let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
         assert!(ranker.enabled);
-        assert_eq!(ranker.weight, Weight(1.0));
-        assert_eq!((ranker.before, ranker.after), (100, 5));
+        assert_eq!(ranker.weight, Weight(2.0));
+        assert_eq!(ranker.before, 64);
     }
 
     #[test]
     fn a_whole_number_is_a_weight_too() {
-        let user = TEMPLATE.replace("weight = 1.0", "weight = 2");
+        let user = TEMPLATE.replace("weight = 2.0", "weight = 3");
         let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
-        assert_eq!(settings.ranker.weight, Weight(2.0));
+        assert_eq!(settings.ranker.weight, Weight(3.0));
     }
 
     #[test]
@@ -1182,8 +1179,7 @@ mod tests {
             ("min_length = 2", "min_length = 0", "1 以上"),
             ("dynamic = true", "dynamic = \"yes\"", "true か false"),
             ("until_list = 5", "until_list = 2.5", "整数"),
-            ("weight = 1.0", "weight = -1.0", "ranker.weight"),
-            ("after = 5", "after = -1", "0 以上の整数"),
+            ("weight = 2.0", "weight = -1.0", "ranker.weight"),
             ("threads = 4", "threads = \"four\"", "ranker.threads"),
             ("top = 7", "top = 0", "ranker.top"),
             ("min_context = 2", "min_context = -1", "ranker.min_context"),

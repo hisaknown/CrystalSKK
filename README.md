@@ -22,7 +22,7 @@ Windows 向けの SKK 風 IME です。
     - ライトテーマ/ダークテーマに対応しています。
     - Windows 11 の Acrylic を使った半透明のウィンドウ表示をします。
 - ちょっぴり賢い変換候補の提示
-    - 小さい言語モデルを同梱し、文脈に応じて変換候補を並べかえて提示します。
+    - かな漢字変換の小さな言語モデル ([jinen](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf)) を使い、文脈に応じて変換候補を並べかえて提示します。
     - 処理の重さが気になる場合は無効化することもできます。
 
 ## インストール
@@ -83,3 +83,6 @@ MIT License ([LICENSE](LICENSE))
 
 SKK 辞書は同梱していません。設定されたものを動作時に自動的にダウンロードします。  
 SKK 辞書はそれぞれのライセンス (SKK-JISYO.L は GPL 系) に従います。
+
+候補の並べ替えに使う言語モデルも同梱していません。導入のときに取得します。  
+言語モデル [jinen-v2-xsmall](https://huggingface.co/togatogah/jinen-v2-xsmall.gguf) (Hitoshi Togasaki 作、[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/deed.ja)) は、学習データの一部に国立国会図書館の「全国書誌データ」と「国立国会図書館サーチ」の書誌データを加工して用いています。国立国会図書館が作成・提供・保証するものではありません。

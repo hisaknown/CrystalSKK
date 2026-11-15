@@ -1,12 +1,17 @@
-//! 変換の候補を、小さな言語モデルで前後の文章から並べる (ADR-0030)。
+//! 変換の候補を、かな漢字変換の言語モデルで前の文章から並べる (ADR-0030, ADR-0043)。
 //!
 //! # 採点は生成ではない
 //!
-//! 「前の文章 + 候補 + 後ろの文章」を候補ごとにトークンに分け、その同時確率を
-//! 比べる。全候補で先頭から一致するトークンは一度だけ計算して共有し、残りを
-//! 一つのバッチで流す。前の文章の末尾と候補が一つのトークンにくっついても、
-//! そのトークンは共有から外れて採点に入るので、**トークンの切れ目と候補の
-//! 切れ目は揃っていなくてよい。**
+//! モデルは jinen (かな漢字変換のために学習した小さなモデル) で、次の形の
+//! 列を学んでいる。
+//!
+//! ```text
+//! U+EE02 前の文章 U+EE00 読み (カタカナ) U+EE01 変換結果 </s>
+//! ```
+//!
+//! `U+EE01` までを全候補で共有して一度だけ計算し、各候補の「変換結果 `</s>`」
+//! の確率を一つのバッチで求めて比べる。`</s>` まで含めるので、候補が
+//! 「そこで終わる」ことも確率に入る。後ろの文章はモデルが受け取らない。
 //!
 //! # 辞書の順も見る
 //!
@@ -18,8 +23,8 @@
 //!
 //! 並べ替えるのは辞書の上位だけである。`ln(順位)` は後ろのほうでほとんど
 //! 差がつかず、候補が多いほど、たまたま良い点を取る外れも出やすい。
-//! 前後の文章がほとんど無いときも並べない。採点が「文脈抜きで、ありふれた
-//! 短い文字列か」になり、辞書の順より当たらない。
+//! 前の文章がほとんど無いときも並べない。採点が「文脈抜きで、ありふれた
+//! 変換か」になり、辞書の順より当たらない。
 //!
 //! # 締め切りを守る
 //!
@@ -40,17 +45,18 @@ use tokenizers::Tokenizer;
 pub use llama::VERSION as LLAMA_VERSION;
 
 /// 前の文章として言語モデルに見せるトークンの上限。
-const MAX_PREFIX_TOKENS: usize = 384;
+const MAX_CONTEXT_TOKENS: usize = 256;
 
 /// 候補を採点するもの。
 pub trait Scorer {
-    /// 各 `texts` を `before` と `after` のあいだに置いたときの、文としての
-    /// 自然さ (対数確率)。大きいほど自然。締め切りに間に合わなければ `None`。
+    /// 前の文章 `before` に続けて読み `reading` を打ったとき、それが各
+    /// `texts` に変換される確率の対数。大きいほど自然。締め切りに間に合わ
+    /// なければ `None`。
     fn score(
         &mut self,
         before: &str,
+        reading: &str,
         texts: &[String],
-        after: &str,
         deadline: Instant,
     ) -> Option<Vec<f32>>;
 }
@@ -60,6 +66,16 @@ pub trait Scorer {
 pub struct LlamaScorer {
     model: llama::Model,
     tokenizer: Tokenizer,
+    marks: Marks,
+}
+
+/// プロンプトを組む特殊トークン。
+#[derive(Debug, Clone, Copy)]
+struct Marks {
+    context: i32,
+    input: i32,
+    output: i32,
+    end: i32,
 }
 
 impl LlamaScorer {
@@ -71,10 +87,37 @@ impl LlamaScorer {
         tokenizer: &Path,
         threads: usize,
     ) -> Result<Self, String> {
-        let tokenizer = Tokenizer::from_file(tokenizer)
-            .map_err(|e| format!("{} を語彙として読めません: {e}", tokenizer.display()))?;
+        let path = tokenizer;
+        let tokenizer = Tokenizer::from_file(path)
+            .map_err(|e| format!("{} を語彙として読めません: {e}", path.display()))?;
+        let id = |token: &str| {
+            tokenizer
+                .token_to_id(token)
+                .map(|id| id as i32)
+                .ok_or_else(|| format!("{} に {token:?} がありません", path.display()))
+        };
+        let marks = Marks {
+            context: id("\u{ee02}")?,
+            input: id("\u{ee00}")?,
+            output: id("\u{ee01}")?,
+            end: id("</s>")?,
+        };
         let model = llama::Model::load(runtime, model, threads)?;
-        Ok(Self { model, tokenizer })
+        Ok(Self {
+            model,
+            tokenizer,
+            marks,
+        })
+    }
+
+    /// 特殊トークンを付けずにトークンに分ける。NFKC への正規化は語彙が持って
+    /// いる。
+    fn encode(&self, text: &str) -> Option<Vec<i32>> {
+        if text.is_empty() {
+            return Some(Vec::new());
+        }
+        let encoding = self.tokenizer.encode(text, false).ok()?;
+        Some(encoding.get_ids().iter().map(|&id| id as i32).collect())
     }
 }
 
@@ -82,55 +125,59 @@ impl Scorer for LlamaScorer {
     fn score(
         &mut self,
         before: &str,
+        reading: &str,
         texts: &[String],
-        after: &str,
         deadline: Instant,
     ) -> Option<Vec<f32>> {
-        let sequences = texts
+        let Marks {
+            context,
+            input,
+            output,
+            end,
+        } = self.marks;
+        let mut prompt = Vec::new();
+        let before = self.encode(before)?;
+        if !before.is_empty() {
+            // 前の文章が長すぎれば、古いほうを落とす。
+            prompt.push(context);
+            prompt.extend_from_slice(&before[before.len().saturating_sub(MAX_CONTEXT_TOKENS)..]);
+        }
+        prompt.push(input);
+        prompt.extend(self.encode(&katakana(reading))?);
+        prompt.push(output);
+        let suffixes = texts
             .iter()
             .map(|text| {
-                let encoding = self
-                    .tokenizer
-                    .encode(format!("{before}{text}{after}"), true)
-                    .ok()?;
-                Some(
-                    encoding
-                        .get_ids()
-                        .iter()
-                        .map(|&id| id as i32)
-                        .collect::<Vec<_>>(),
-                )
+                let mut ids = self.encode(text)?;
+                ids.push(end);
+                Some(ids)
             })
             .collect::<Option<Vec<_>>>()?;
-        let (prefix, suffixes) = split(&sequences)?;
-        // 前の文章が長すぎれば、古いほうを落とす。先頭の特殊トークンは残す。
-        let prefix = if prefix.len() > MAX_PREFIX_TOKENS {
-            let mut kept = vec![prefix[0]];
-            kept.extend_from_slice(&prefix[prefix.len() - (MAX_PREFIX_TOKENS - 1)..]);
-            kept
-        } else {
-            prefix.to_vec()
-        };
-        self.model.score(&prefix, &suffixes, deadline)
+        self.model.score(&prompt, &suffixes, deadline)
     }
 }
 
-/// 全候補に共通する先頭と、候補ごとの残りに分ける。残りは空にしない。
-fn split(sequences: &[Vec<i32>]) -> Option<(&[i32], Vec<Vec<i32>>)> {
-    let first = sequences.first()?;
-    let shortest = sequences.iter().map(Vec::len).min()?;
-    let mut shared = (0..shortest)
-        .find(|&i| sequences.iter().any(|s| s[i] != first[i]))
-        .unwrap_or(shortest);
-    // 残りが空の候補があると採点できない。少なくとも一つは残す。
-    shared = shared.min(shortest.saturating_sub(1));
-    if shared == 0 {
-        return None;
+/// ひらがなをカタカナにする。モデルは読みをカタカナで学んでいる。
+fn katakana(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            'ぁ'..='ゖ' | 'ゝ' | 'ゞ' => char::from_u32(c as u32 + 0x60).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// 問い合わせの読み。送りありなら、見出しの末尾の子音を送り仮名に替える
+/// (`おくr` と `り` から `おくり`)。候補も送り仮名を付けて採点する。
+fn reading(query: &Query) -> String {
+    match &query.okuri {
+        Some(okuri) => {
+            let mut stem = query.key.clone();
+            stem.pop();
+            stem + okuri
+        }
+        None => query.key.clone(),
     }
-    Some((
-        &first[..shared],
-        sequences.iter().map(|s| s[shared..].to_vec()).collect(),
-    ))
 }
 
 /// 並べ方の決まり。
@@ -142,11 +189,9 @@ pub struct Policy {
     pub deadline: Duration,
     /// 前の文章を何文字見せるか。
     pub before: usize,
-    /// 後ろの文章を何文字見せるか。
-    pub after: usize,
     /// 辞書の順で上から何個までを並べ替えるか。
     pub top: usize,
-    /// 前後の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
+    /// 前の文章に、句読点や空白を除いて何文字あれば並べ替えるか。
     pub min_context: usize,
 }
 
@@ -173,38 +218,32 @@ impl<S: Scorer> Ranker for LmRanker<S> {
             return;
         }
         let before = context.text_before(self.policy.before);
-        let after = context.text_after(self.policy.after);
         // 手がかりがほとんど無ければ、辞書の順より良くなる見込みは薄い。
-        if before.is_empty() && after.is_empty() || clues(&before, &after) < self.policy.min_context
-        {
+        if before.is_empty() || clues(&before) < self.policy.min_context {
             return;
         }
         let mut rest = candidates.split_off(top);
-        self.rank_head(&before, &after, query, candidates);
+        self.rank_head(&before, query, candidates);
         candidates.append(&mut rest);
     }
 }
 
 /// 手がかりになる文字の数。句読点・記号・空白は数えない。
-fn clues(before: &str, after: &str) -> usize {
-    before
-        .chars()
-        .chain(after.chars())
-        .filter(|c| c.is_alphanumeric())
-        .count()
+fn clues(before: &str) -> usize {
+    before.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
 impl<S: Scorer> LmRanker<S> {
-    fn rank_head(&self, before: &str, after: &str, query: &Query, candidates: &mut Vec<Candidate>) {
+    fn rank_head(&self, before: &str, query: &Query, candidates: &mut Vec<Candidate>) {
         let texts: Vec<String> = candidates
             .iter()
             .map(|c| c.to_text(query.okuri.as_deref()))
             .collect();
         let deadline = Instant::now() + self.policy.deadline;
-        let Some(scores) = self
-            .scorer
-            .borrow_mut()
-            .score(before, &texts, after, deadline)
+        let Some(scores) =
+            self.scorer
+                .borrow_mut()
+                .score(before, &reading(query), &texts, deadline)
         else {
             return;
         };
@@ -231,10 +270,10 @@ fn order(candidates: &mut Vec<Candidate>, scores: &[f32], weight: f32) {
 mod tests {
     use super::*;
 
-    /// 決まった点を返す採点係。見せられた文章を覚えておく。
+    /// 決まった点を返す採点係。見せられた文章と読みを覚えておく。
     struct Fixed {
         scores: Vec<f32>,
-        seen: Vec<(String, Vec<String>, String)>,
+        seen: Vec<(String, String, Vec<String>)>,
         late: bool,
     }
 
@@ -242,12 +281,12 @@ mod tests {
         fn score(
             &mut self,
             before: &str,
+            reading: &str,
             texts: &[String],
-            after: &str,
             _: Instant,
         ) -> Option<Vec<f32>> {
             self.seen
-                .push((before.to_owned(), texts.to_vec(), after.to_owned()));
+                .push((before.to_owned(), reading.to_owned(), texts.to_vec()));
             (!self.late).then(|| self.scores.clone())
         }
     }
@@ -263,7 +302,6 @@ mod tests {
                 weight,
                 deadline: Duration::from_secs(1),
                 before: 3,
-                after: 2,
                 top: 3,
                 min_context: 1,
             },
@@ -274,10 +312,10 @@ mod tests {
         candidates.iter().map(|c| c.word.as_str()).collect()
     }
 
-    fn context(before: &str, after: &str) -> Context {
+    fn context(before: &str) -> Context {
         Context {
             preceding_text: Some(before.to_owned()),
-            following_text: Some(after.to_owned()),
+            following_text: Some("後ろの文章".to_owned()),
             ..Context::default()
         }
     }
@@ -290,7 +328,7 @@ mod tests {
     fn the_most_natural_candidate_comes_first() {
         let mut candidates = kanji();
         ranker(&[-9.0, -8.0, -1.0], 0.0).rank(
-            &context("会議の", ""),
+            &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
@@ -302,7 +340,7 @@ mod tests {
         // 採点の差が小さければ、辞書の順が勝つ。
         let mut candidates = kanji();
         ranker(&[-5.0, -4.8, -4.9], 1.0).rank(
-            &context("会議の", ""),
+            &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
@@ -310,11 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn the_model_sees_the_trimmed_surroundings_and_the_okuri() {
+    fn the_model_sees_the_trimmed_text_before_and_the_whole_reading() {
         let r = ranker(&[0.0, 0.0], 1.0);
         let mut candidates = ["送", "贈"].map(Candidate::new).to_vec();
         r.rank(
-            &context("昨日は荷物を", "ました。"),
+            &context("昨日は荷物を"),
             &Query::okuri_ari("おく", 'r', "り"),
             &mut candidates,
         );
@@ -322,34 +360,27 @@ mod tests {
             r.scorer.borrow().seen,
             [(
                 "荷物を".to_owned(),
+                "おくり".to_owned(),
                 vec!["送り".to_owned(), "贈り".to_owned()],
-                "まし".to_owned()
             )]
         );
     }
 
     #[test]
-    fn nothing_moves_without_surroundings() {
+    fn nothing_moves_without_text_before() {
         let r = ranker(&[-9.0, -8.0, -1.0], 0.0);
         let mut candidates = kanji();
-        r.rank(
-            &context("", ""),
-            &Query::okuri_nashi("かんじ"),
-            &mut candidates,
-        );
+        r.rank(&context(""), &Query::okuri_nashi("かんじ"), &mut candidates);
         assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
         assert!(r.scorer.borrow().seen.is_empty(), "採点もしない");
     }
 
     #[test]
-    fn nothing_moves_with_only_punctuation_around() {
+    fn nothing_moves_with_only_punctuation_before() {
         let r = ranker(&[-9.0, -8.0, -1.0], 0.0);
         let mut candidates = kanji();
         r.rank(
-            &context(
-                "。
-「", "",
-            ),
+            &context("。\n「"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
@@ -364,13 +395,13 @@ mod tests {
             .map(Candidate::new)
             .to_vec();
         r.rank(
-            &context("会議の", ""),
+            &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
         assert_eq!(words(&candidates), ["幹事", "感じ", "漢字", "監事", "寛治"]);
         assert_eq!(
-            r.scorer.borrow().seen[0].1,
+            r.scorer.borrow().seen[0].2,
             ["漢字", "感じ", "幹事"],
             "上位だけ採点する"
         );
@@ -382,7 +413,7 @@ mod tests {
         r.scorer.borrow_mut().late = true;
         let mut candidates = kanji();
         r.rank(
-            &context("会議の", ""),
+            &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
@@ -390,19 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_head_is_split_off() {
-        let sequences = vec![vec![1, 5, 6, 7], vec![1, 5, 8], vec![1, 5, 6, 9, 9]];
-        let (prefix, suffixes) = split(&sequences).unwrap();
-        assert_eq!(prefix, [1, 5]);
-        assert_eq!(suffixes, [vec![6, 7], vec![8], vec![6, 9, 9]]);
-    }
-
-    #[test]
-    fn every_candidate_keeps_at_least_one_token() {
-        // 一つの候補がもう一つの頭と同じでも、その候補の残りは空にしない。
-        let sequences = vec![vec![1, 5, 6], vec![1, 5, 6, 7]];
-        let (prefix, suffixes) = split(&sequences).unwrap();
-        assert_eq!(prefix, [1, 5]);
-        assert_eq!(suffixes, [vec![6], vec![6, 7]]);
+    fn the_reading_is_given_in_katakana() {
+        assert_eq!(katakana("おくり"), "オクリ");
+        assert_eq!(katakana("ゔぁいおりん"), "ヴァイオリン");
+        assert_eq!(katakana("すゝむ"), "スヽム");
+        assert_eq!(katakana("CPUー"), "CPUー");
     }
 }

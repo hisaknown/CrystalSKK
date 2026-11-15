@@ -179,12 +179,12 @@ impl SharedSource {
         self.0.notice()
     }
 
-    /// 並べ替えの設定を受け取る。変換のときに前後の文章を何文字送るかが
-    /// 決まる。
+    /// 並べ替えの設定を受け取る。変換のときに前の文章を何文字送るかが
+    /// 決まる。後ろの文章は言語モデルが受け取らないので送らない (ADR-0043)。
     pub fn set_ranking(&self, ranker: &crystalskk_settings::Ranker) {
         self.0
             .reach
-            .set(ranker.enabled.then_some((ranker.before, ranker.after)));
+            .set(ranker.enabled.then_some((ranker.before, 0)));
     }
 
     /// 前後の文章を読むべきか。サーバが並べ替えない設定なら読まない。

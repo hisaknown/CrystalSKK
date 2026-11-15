@@ -530,7 +530,8 @@ struct Parsed {
     no_elevate: bool,
     /// 伝えたいことを書き出す先。昇格した側に渡される。
     report: Option<PathBuf>,
-    /// 言語モデル一式 (`build.py` の出力) のあるフォルダ。
+    /// 言語モデル一式 (`model.gguf` と `tokenizer.json`) のあるフォルダ。
+    /// 無ければ取得する。
     ranker_from: Option<PathBuf>,
     /// 導入と削除のどの手順を行うか。
     part: Part,
@@ -647,7 +648,7 @@ crystalskk-setup - CrystalSKK をこの環境に導入する
 使い方:
   crystalskk-setup install [DLL]      導入する (DLL 省略時はビルド成果物を探す)
       --ranker-from <フォルダ>        候補を並べる言語モデル一式の場所
-                                      (省略時は target/ranker-model/out を探す)
+                                      (省略時は Hugging Face から取得する)
   crystalskk-setup uninstall          登録を解除する
   crystalskk-setup uninstall --purge  写した DLL も削除する
       --elevated-steps                管理者権限で行う手順だけを行う (インストーラ向け。

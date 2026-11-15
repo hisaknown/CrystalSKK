@@ -46,16 +46,17 @@ CrystalSKK の設計判断を記録する。PRD (`../PRD.md`) が「何を作る
 | [0027](0027-annotations-go-in-the-window-only.md) | 候補の注釈は窓にだけ出す | Accepted | ADR-0015, ADR-0020, ADR-0026, PRD F-13 |
 | [0028](0028-popups-follow-the-monitor-and-the-layout.md) | 小窓は出すモニターの拡大率で描き、入力先の組版の変化に付いていく | Accepted | ADR-0015, ADR-0025, ADR-0026 |
 | [0029](0029-a-missing-dictionary-is-told-not-guessed.md) | 欠けた辞書は知らせ、辞書登録には進ませない | Accepted | ADR-0016, ADR-0022 |
-| [0030](0030-rank-candidates-with-a-small-language-model-in-the-server.md) | 候補の並びを、サーバに常駐させた小さな言語モデルで文脈から決める | Accepted | ADR-0001, ADR-0016, ADR-0019, ADR-0020, PRD F-19 |
-| [0031](0031-ship-the-ranker-model-with-the-program.md) | 候補を並べる言語モデルはプログラムと一緒に配り、llama.cpp は公式から取得する | Accepted (一部を ADR-0036 で改めた) | ADR-0020, ADR-0030 |
+| [0030](0030-rank-candidates-with-a-small-language-model-in-the-server.md) | 候補の並びを、サーバに常駐させた小さな言語モデルで文脈から決める | Accepted (一部を ADR-0043 で改めた) | ADR-0001, ADR-0016, ADR-0019, ADR-0020, PRD F-19 |
+| [0031](0031-ship-the-ranker-model-with-the-program.md) | 候補を並べる言語モデルはプログラムと一緒に配り、llama.cpp は公式から取得する | Accepted (一部を ADR-0036、ADR-0043 で改めた) | ADR-0020, ADR-0030 |
 | [0032](0032-bound-every-wait-on-the-server.md) | 辞書サーバを待つ時間には、どこでも上限を設ける | Accepted | PRD §3, ADR-0016 |
 | [0033](0033-mark-an-empty-reading.md) | 読みが空になったら、変換開始の目印を出す | Accepted | ADR-0018, PRD Q-09 |
 | [0034](0034-backspace-while-selecting-commits.md) | ▼ での Backspace は確定してから一文字消す | Accepted | ADR-0018, ADR-0033 |
 | [0035](0035-show-the-keys-as-keycaps.md) | 小窓は押すキーを枠で囲んで見せ、Windows 11 の見た目に揃える | Accepted | ADR-0015, ADR-0019, ADR-0020, ADR-0024, ADR-0025, ADR-0026 |
-| [0036](0036-publish-the-ranker-model-as-a-release-asset.md) | 候補を並べる言語モデルは GitHub Release に置き、導入のときに取得する | Accepted | ADR-0030, ADR-0031 |
+| [0036](0036-publish-the-ranker-model-as-a-release-asset.md) | 候補を並べる言語モデルは GitHub Release に置き、導入のときに取得する | Superseded by ADR-0043 | ADR-0030, ADR-0031 |
 | [0037](0037-the-msi-stages-files-and-setup-does-the-rest.md) | MSI はファイルを置き場に置くだけにし、入れ替えと登録は crystalskk-setup が行う | Accepted | ADR-0007, ADR-0016, ADR-0031, ADR-0036 |
 | [0038](0038-bind-keys-to-named-commands.md) | キーは名前の付いた操作に割り当て、状態による意味の違いはエンジンが持つ | Accepted | PRD F-14, ADR-0020, ADR-0012 |
 | [0039](0039-confirm-then-let-the-key-through.md) | 確定と改行を一度にするときは、確定を書いてから同じキーを送り直す | Accepted | ADR-0038, ADR-0008 |
 | [0040](0040-tell-every-tip-when-the-settings-change.md) | 設定ファイルが変わったら、辞書サーバが全ウィンドウへ知らせる | Accepted | ADR-0020, ADR-0016, ADR-0038 |
 | [0041](0041-draw-the-popups-through-the-window-dc.md) | 小窓は窓の GDI の画面に Direct2D で描く | Accepted | ADR-0035, ADR-0014 |
 | [0042](0042-offer-web-candidates-when-the-dictionaries-run-out.md) | 辞書の候補が尽きたら、辞書サーバが裏で引いたネットの候補を出す | Accepted | PRD §3, ADR-0001, ADR-0004, ADR-0016, ADR-0025, ADR-0032 |
+| [0043](0043-rank-with-jinen-a-kana-kanji-conversion-model.md) | 候補はかな漢字変換のモデル jinen で、読みを条件に採点して並べる | Accepted | ADR-0030, ADR-0031, ADR-0036 |
