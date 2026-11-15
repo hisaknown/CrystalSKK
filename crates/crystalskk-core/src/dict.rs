@@ -41,6 +41,28 @@ impl Query {
     }
 }
 
+/// ランカーが辞書の順から持ち上げた候補に付ける印。注釈の頭に置く
+/// (`✦` だけ、または `✦ 元の注釈`)。注釈はユーザー辞書には入らない
+/// (学習で送るのは語だけ) ので、印も残らない。
+pub const RANKED_MARK: &str = "✦";
+
+impl Candidate {
+    /// ランカーの印を付ける。
+    pub fn mark_ranked(&mut self) {
+        self.annotation = Some(match self.annotation.take() {
+            Some(note) if !note.is_empty() => format!("{RANKED_MARK} {note}"),
+            _ => RANKED_MARK.to_owned(),
+        });
+    }
+
+    /// ランカーの印を除いた注釈。印しか無ければ `None`。
+    pub fn annotation_without_mark(&self) -> Option<&str> {
+        let note = self.annotation.as_deref()?;
+        let note = note.strip_prefix(RANKED_MARK).map_or(note, str::trim_start);
+        (!note.is_empty()).then_some(note)
+    }
+}
+
 /// 辞書が返す候補一件。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Candidate {
@@ -278,6 +300,19 @@ impl CandidateSource for ChainedSource {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn the_ranked_mark_goes_before_the_annotation_and_comes_off_again() {
+        let mut plain = Candidate::new("幹事");
+        plain.mark_ranked();
+        assert_eq!(plain.annotation.as_deref(), Some("✦"));
+        assert_eq!(plain.annotation_without_mark(), None);
+
+        let mut noted = Candidate::with_annotation("橋", "bridge");
+        noted.mark_ranked();
+        assert_eq!(noted.annotation.as_deref(), Some("✦ bridge"));
+        assert_eq!(noted.annotation_without_mark(), Some("bridge"));
+    }
 
     #[test]
     fn the_text_before_is_cut_from_its_end() {

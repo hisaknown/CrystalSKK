@@ -13,11 +13,14 @@
 //! の確率を一つのバッチで求めて比べる。`</s>` まで含めるので、候補が
 //! 「そこで終わる」ことも確率に入る。後ろの文章はモデルが受け取らない。
 //!
-//! # 辞書の順も見る
+//! # 自信があるときだけ、一つだけ持ち上げる
 //!
-//! 採点だけで並べると、辞書が元から当てていた候補を崩す。辞書の順は長年の
-//! 編集で整えられた頻度の順でもあるので、採点に `−weight·ln(順位)` を足して
-//! 並べる。
+//! 採点を候補のあいだで確率に直し (softmax)、一番の候補の確率が
+//! `confidence` 以上なら、それだけを先頭に出す。残りは辞書の順のままに
+//! する。2 位以下の採点はモデルにとって手がかりが無く、ほぼ雑音である。
+//! 採点と辞書の順を足し合わせると、その雑音が 2 位以下の並びに乗る
+//! (ADR-0044)。持ち上げた候補には印
+//! ([`crystalskk_core::dict::RANKED_MARK`]) を付ける。
 //!
 //! # 当てにならないときは並べない
 //!
@@ -183,8 +186,8 @@ fn reading(query: &Query) -> String {
 /// 並べ方の決まり。
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
-    /// 辞書の順の重み。
-    pub weight: f32,
+    /// 一番の候補を持ち上げるのに要る、候補のあいだでの確率。
+    pub confidence: f32,
     /// 並べ替えを待つ時間。
     pub deadline: Duration,
     /// 前の文章を何文字見せるか。
@@ -250,20 +253,26 @@ impl<S: Scorer> LmRanker<S> {
         if scores.len() != candidates.len() || Instant::now() > deadline {
             return;
         }
-        order(candidates, &scores, self.policy.weight);
+        promote(candidates, &scores, self.policy.confidence);
     }
 }
 
-/// 採点と辞書の順を合わせて並べる。同点なら辞書の順。
-fn order(candidates: &mut Vec<Candidate>, scores: &[f32], weight: f32) {
-    let mut keyed: Vec<(f32, Candidate)> = candidates
-        .drain(..)
-        .zip(scores)
-        .enumerate()
-        .map(|(i, (c, &s))| (s - weight * ((i + 1) as f32).ln(), c))
-        .collect();
-    keyed.sort_by(|a, b| b.0.total_cmp(&a.0));
-    candidates.extend(keyed.into_iter().map(|(_, c)| c));
+/// 一番の候補の、候補のあいだでの確率が `confidence` 以上なら、それを
+/// 先頭に出して印を付ける。残りは辞書の順のまま。
+fn promote(candidates: &mut Vec<Candidate>, scores: &[f32], confidence: f32) {
+    let Some((best, &top)) = scores.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
+        return;
+    };
+    if best == 0 || !top.is_finite() {
+        return;
+    }
+    let total: f32 = scores.iter().map(|s| (s - top).exp()).sum();
+    if 1.0 / total < confidence {
+        return;
+    }
+    let mut chosen = candidates.remove(best);
+    chosen.mark_ranked();
+    candidates.insert(0, chosen);
 }
 
 #[cfg(test)]
@@ -291,7 +300,7 @@ mod tests {
         }
     }
 
-    fn ranker(scores: &[f32], weight: f32) -> LmRanker<Fixed> {
+    fn ranker(scores: &[f32], confidence: f32) -> LmRanker<Fixed> {
         LmRanker::new(
             Fixed {
                 scores: scores.to_vec(),
@@ -299,7 +308,7 @@ mod tests {
                 late: false,
             },
             Policy {
-                weight,
+                confidence,
                 deadline: Duration::from_secs(1),
                 before: 3,
                 top: 3,
@@ -327,24 +336,46 @@ mod tests {
     #[test]
     fn the_most_natural_candidate_comes_first() {
         let mut candidates = kanji();
-        ranker(&[-9.0, -8.0, -1.0], 0.0).rank(
+        ranker(&[-9.0, -8.0, -1.0], 0.7).rank(
             &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
-        assert_eq!(words(&candidates), ["幹事", "感じ", "漢字"]);
+        assert_eq!(
+            words(&candidates),
+            ["幹事", "漢字", "感じ"],
+            "残りは辞書の順"
+        );
+        assert_eq!(candidates[0].annotation.as_deref(), Some("✦"), "印が付く");
+        assert_eq!(candidates[1].annotation, None);
     }
 
     #[test]
     fn the_dictionary_order_holds_unless_the_model_is_sure() {
-        // 採点の差が小さければ、辞書の順が勝つ。
+        // 一番でも、確率が足りなければ動かさない。
         let mut candidates = kanji();
-        ranker(&[-5.0, -4.8, -4.9], 1.0).rank(
+        ranker(&[-5.0, -4.8, -4.9], 0.7).rank(
             &context("会議の"),
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
         assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
+        assert!(
+            candidates.iter().all(|c| c.annotation.is_none()),
+            "印も付かない"
+        );
+    }
+
+    #[test]
+    fn the_first_stays_unmarked_when_the_model_agrees() {
+        let mut candidates = kanji();
+        ranker(&[-0.1, -8.0, -9.0], 0.7).rank(
+            &context("会議の"),
+            &Query::okuri_nashi("かんじ"),
+            &mut candidates,
+        );
+        assert_eq!(words(&candidates), ["漢字", "感じ", "幹事"]);
+        assert_eq!(candidates[0].annotation, None);
     }
 
     #[test]
@@ -399,7 +430,7 @@ mod tests {
             &Query::okuri_nashi("かんじ"),
             &mut candidates,
         );
-        assert_eq!(words(&candidates), ["幹事", "感じ", "漢字", "監事", "寛治"]);
+        assert_eq!(words(&candidates), ["幹事", "漢字", "感じ", "監事", "寛治"]);
         assert_eq!(
             r.scorer.borrow().seen[0].2,
             ["漢字", "感じ", "幹事"],

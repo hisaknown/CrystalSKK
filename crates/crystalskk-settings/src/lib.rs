@@ -111,8 +111,8 @@ pub struct Markers {
 pub struct Ranker {
     /// 並べ替えるか。
     pub enabled: bool,
-    /// 辞書の順の重み。
-    pub weight: Weight,
+    /// 一番の候補を持ち上げるのに要る、候補のあいだでの確率 (0〜1)。
+    pub confidence: Probability,
     /// 並べ替えを待つ時間 (ミリ秒)。
     pub deadline_ms: u32,
     /// カーソルより前の文章を何文字見せるか。
@@ -125,20 +125,20 @@ pub struct Ranker {
     pub threads: usize,
 }
 
-/// 0 以上の重み。
+/// 0 以上 1 以下の確率。
 ///
 /// 設定の一式を比べられるように (変わったときだけ作り直すために)、
 /// ビット列で比べる。
 #[derive(Debug, Clone, Copy)]
-pub struct Weight(pub f32);
+pub struct Probability(pub f32);
 
-impl PartialEq for Weight {
+impl PartialEq for Probability {
     fn eq(&self, other: &Self) -> bool {
         self.0.to_bits() == other.0.to_bits()
     }
 }
 
-impl Eq for Weight {}
+impl Eq for Probability {}
 
 /// 辞書の在りか。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,15 +576,15 @@ pub fn parse(text: &str, romaji: &str) -> Result<Settings, Error> {
 
 /// 並べ替えの節。
 fn ranker(table: &Table) -> Result<Ranker, Error> {
-    let weight = value(table, "ranker", "weight")?;
-    let weight = weight
+    let confidence = value(table, "ranker", "confidence")?;
+    let confidence = confidence
         .as_float()
-        .or_else(|| weight.as_integer().map(|n| n as f64))
-        .filter(|w| w.is_finite() && *w >= 0.0)
-        .ok_or_else(|| Error::new("ranker.weight は 0 以上の数で書いてください"))?;
+        .or_else(|| confidence.as_integer().map(|n| n as f64))
+        .filter(|p| (0.0..=1.0).contains(p))
+        .ok_or_else(|| Error::new("ranker.confidence は 0 以上 1 以下の数で書いてください"))?;
     Ok(Ranker {
         enabled: boolean(table, "ranker", "enabled")?,
-        weight: Weight(weight as f32),
+        confidence: Probability(confidence as f32),
         deadline_ms: u32::try_from(count(table, "ranker", "deadline_ms")?)
             .map_err(|_| Error::new("ranker.deadline_ms が大きすぎます"))?,
         before: count(table, "ranker", "before")?,
@@ -1148,15 +1148,15 @@ mod tests {
     fn the_ranker_is_on_in_the_template() {
         let ranker = parse(TEMPLATE, ROMAJI_TEMPLATE).unwrap().ranker;
         assert!(ranker.enabled);
-        assert_eq!(ranker.weight, Weight(2.0));
+        assert_eq!(ranker.confidence, Probability(0.7));
         assert_eq!(ranker.before, 64);
     }
 
     #[test]
-    fn a_whole_number_is_a_weight_too() {
-        let user = TEMPLATE.replace("weight = 2.0", "weight = 3");
+    fn a_whole_number_is_a_confidence_too() {
+        let user = TEMPLATE.replace("confidence = 0.7", "confidence = 1");
         let settings = parse(&user, ROMAJI_TEMPLATE).unwrap();
-        assert_eq!(settings.ranker.weight, Weight(3.0));
+        assert_eq!(settings.ranker.confidence, Probability(1.0));
     }
 
     #[test]
@@ -1179,7 +1179,7 @@ mod tests {
             ("min_length = 2", "min_length = 0", "1 以上"),
             ("dynamic = true", "dynamic = \"yes\"", "true か false"),
             ("until_list = 5", "until_list = 2.5", "整数"),
-            ("weight = 2.0", "weight = -1.0", "ranker.weight"),
+            ("confidence = 0.7", "confidence = 1.5", "ranker.confidence"),
             ("threads = 4", "threads = \"four\"", "ranker.threads"),
             ("top = 7", "top = 0", "ranker.top"),
             ("min_context = 2", "min_context = -1", "ranker.min_context"),

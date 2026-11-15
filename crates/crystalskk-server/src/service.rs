@@ -457,7 +457,7 @@ fn language_model(settings: &crystalskk_settings::Ranker, ranker_dir: &Path) -> 
         settings.threads,
     )?;
     let policy = crystalskk_lm::Policy {
-        weight: settings.weight.0,
+        confidence: settings.confidence.0,
         deadline: Duration::from_millis(u64::from(settings.deadline_ms)),
         before: settings.before,
         top: settings.top,
@@ -614,7 +614,7 @@ mod tests {
     fn ranker_settings(enabled: bool) -> crystalskk_settings::Ranker {
         crystalskk_settings::Ranker {
             enabled,
-            weight: crystalskk_settings::Weight(1.0),
+            confidence: crystalskk_settings::Probability(0.7),
             deadline_ms: 100,
             before: 100,
             top: 7,
