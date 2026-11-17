@@ -12,54 +12,10 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetPropW, RemovePropW, SPI_GETDROPSHADOW, SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SendMessageW, SetPropW, SystemParametersInfoW, WINDOWPOS, WM_NCACTIVATE,
+    SPI_GETDROPSHADOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SystemParametersInfoW,
+    WM_NCACTIVATE,
 };
-use windows::core::{BOOL, PCWSTR, w};
-
-/// 出してよいかを窓に覚えさせておく札の名前。
-const WANTED: PCWSTR = w!("CrystalSKK.Wanted");
-
-/// 窓を出したいか隠したいかを覚えさせる。`ShowWindow` の前に呼ぶ。
-///
-/// **小窓を出し入れしてよいのは自分だけ。** 持ち主 (入力先の窓) が最小化や
-/// 隠れから戻ると、Windows はそのとき隠した持ち物の窓を出し直す。そのあいだに
-/// こちらが隠していても出し直されることがあり、時計も中身も無いまま、透かした
-/// 地だけが残る。Electron のアプリは自分の窓を頻繁に隠しては出すので、よく起きる。
-/// これを `refuse_unwanted_show` で断る。
-pub fn want_shown(hwnd: HWND, shown: bool) {
-    // SAFETY: 自分の窓に札を付け外しするだけ。札の中身は指し先ではなく印。
-    unsafe {
-        if shown {
-            let _ = SetPropW(
-                hwnd,
-                WANTED,
-                Some(windows::Win32::Foundation::HANDLE(1 as _)),
-            );
-        } else {
-            let _ = RemovePropW(hwnd, WANTED);
-        }
-    }
-}
-
-/// 窓を壊す前に札を外す。
-pub fn forget(hwnd: HWND) {
-    want_shown(hwnd, false);
-}
-
-/// `WM_WINDOWPOSCHANGING` で呼ぶ。自分が出したがっていないのに出されようと
-/// していたら、出すのを取り消す。
-pub fn refuse_unwanted_show(hwnd: HWND, lparam: LPARAM) {
-    // SAFETY: `WM_WINDOWPOSCHANGING` の `lparam` は書き換えてよい `WINDOWPOS` を指す。
-    unsafe {
-        let Some(pos) = (lparam.0 as *mut WINDOWPOS).as_mut() else {
-            return;
-        };
-        if pos.flags.contains(SWP_SHOWWINDOW) && GetPropW(hwnd, WANTED).is_invalid() {
-            pos.flags &= !SWP_SHOWWINDOW;
-        }
-    }
-}
+use windows::core::BOOL;
 
 /// 窓の角を丸めるよう DWM に頼む。丸めてもらえたら `true`。
 ///

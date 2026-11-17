@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_HWNDPARENT, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
     RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_PAINT,
-    WM_WINDOWPOSCHANGING, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -379,7 +379,6 @@ impl CandidateWindow {
                 SWP_NOACTIVATE,
             );
             // 焦点は奪わない。打っている最中にカーソルが消えてはならない。
-            popup::want_shown(hwnd, true);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if backdrop {
                 popup::keep_lit(hwnd);
@@ -419,7 +418,6 @@ impl CandidateWindow {
         }
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
-            popup::want_shown(hwnd, false);
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
@@ -432,7 +430,6 @@ impl CandidateWindow {
         }
         // SAFETY: 窓は自分で作ったもの。預けた箱は `WM_DESTROY` で落ちる。
         unsafe {
-            popup::forget(hwnd);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -573,11 +570,6 @@ unsafe extern "system" fn window_proc(
                 }
                 Ok(())
             });
-            LRESULT(0)
-        }
-        // 自分で出したのでなければ出させない (`popup::want_shown`)。
-        WM_WINDOWPOSCHANGING => {
-            popup::refuse_unwanted_show(hwnd, lparam);
             LRESULT(0)
         }
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
