@@ -40,7 +40,7 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTS
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GWLP_HWNDPARENT, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
-    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
+    RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_PAINT,
     WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -416,10 +416,7 @@ impl CandidateWindow {
         if hwnd.is_invalid() {
             return;
         }
-        // SAFETY: 窓は自分で作ったもの。
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
+        popup::hide(hwnd);
     }
 
     /// 窓を壊す。無効化のときに呼ぶ。
@@ -573,10 +570,7 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
-        WM_NCACTIVATE => {
-            // SAFETY: 前面かどうかだけを差し替えて、既定の処理に委ねる。
-            unsafe { DefWindowProcW(hwnd, message, WPARAM(1), lparam) }
-        }
+        WM_NCACTIVATE => popup::nc_activate(hwnd, wparam, lparam),
         WM_DESTROY => {
             // SAFETY: 預けたのは自分の箱。二度落とさないよう 0 に戻す。
             unsafe {

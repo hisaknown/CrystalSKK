@@ -30,9 +30,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
     GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, IsWindowVisible, KillTimer, RegisterClassExW,
-    SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST,
-    WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -168,7 +168,7 @@ impl ModeWindow {
         // SAFETY: 窓は自分で作ったもの。
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER);
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            popup::hide(hwnd);
         }
     }
 
@@ -427,15 +427,12 @@ unsafe extern "system" fn window_proc(
         // クリックは下の窓へ通す。
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
-        WM_NCACTIVATE => {
-            // SAFETY: 前面かどうかだけを差し替えて、既定の処理に委ねる。
-            unsafe { DefWindowProcW(hwnd, message, WPARAM(1), lparam) }
-        }
+        WM_NCACTIVATE => popup::nc_activate(hwnd, wparam, lparam),
         WM_TIMER if wparam.0 == TIMER => {
             // SAFETY: 自分の窓の時計を止めて隠す。
             unsafe {
                 let _ = KillTimer(Some(hwnd), TIMER);
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                popup::hide(hwnd);
             }
             LRESULT(0)
         }

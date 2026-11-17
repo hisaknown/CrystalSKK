@@ -3,7 +3,7 @@
 //! Windows 11 のメニューや吹き出しに揃え、角を丸めて影を付ける。どちらも
 //! DWM に頼むので、自分では描かない。
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -12,7 +12,8 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SPI_GETDROPSHADOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SystemParametersInfoW,
+    DefWindowProcW, IsWindowVisible, SPI_GETDROPSHADOW, SW_HIDE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, ShowWindow, SystemParametersInfoW,
     WM_NCACTIVATE,
 };
 use windows::core::BOOL;
@@ -105,15 +106,43 @@ pub fn set_backdrop(hwnd: HWND, dark: bool) -> bool {
     }
 }
 
-/// 透かした地を保つ。
+/// 透かした地を保つ。窓を出したあとに呼ぶ。
 ///
 /// 透かした地は、窓が前面でないと単色に落ちる。小窓は焦点を奪えないので、
-/// 前面にいるものとして扱わせる。窓の手続きのほうでも、`WM_NCACTIVATE` を
-/// いつも前面として既定の処理に渡すこと。
+/// 前面にいるものとして扱わせる。窓の手続きでは `WM_NCACTIVATE` を
+/// `nc_activate` に渡すこと。
 pub fn keep_lit(hwnd: HWND) {
     // SAFETY: 自分の窓に知らせを送るだけ。
     unsafe {
         let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(1)), Some(LPARAM(0)));
+    }
+}
+
+/// 小窓を隠す。**隠したら、前面のふりも解く。**
+///
+/// 前面のふりをさせたまま隠すと、DWM は隠れた窓をまだ前面のものとして扱う。
+/// 持ち主の窓 (Slack のような Electron のアプリ) をタスクトレイから出し直すと、
+/// 隠れているはずの小窓の地が空白のまま元の場所に描かれ続けた。
+pub fn hide(hwnd: HWND) {
+    // SAFETY: 自分の窓を隠し、知らせを送るだけ。
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(0)), Some(LPARAM(0)));
+    }
+}
+
+/// 窓の手続きで `WM_NCACTIVATE` を受けたときに呼ぶ。
+///
+/// 出ているあいだは前面のふりをさせ、隠れているあいだは知らせのとおりにする。
+pub fn nc_activate(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: 尋ねて、既定の処理に委ねるだけ。
+    unsafe {
+        let active = if IsWindowVisible(hwnd).as_bool() {
+            WPARAM(1)
+        } else {
+            wparam
+        };
+        DefWindowProcW(hwnd, WM_NCACTIVATE, active, lparam)
     }
 }
 
