@@ -12,9 +12,9 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, IsWindowVisible, SPI_GETDROPSHADOW, SW_HIDE,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, ShowWindow, SystemParametersInfoW,
-    WM_NCACTIVATE,
+    DefWindowProcW, GWLP_HWNDPARENT, IsWindowVisible, SPI_GETDROPSHADOW, SW_HIDE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetWindowLongPtrW, ShowWindow,
+    SystemParametersInfoW, WM_NCACTIVATE, WM_SHOWWINDOW,
 };
 use windows::core::BOOL;
 
@@ -118,16 +118,37 @@ pub fn keep_lit(hwnd: HWND) {
     }
 }
 
-/// 小窓を隠す。**隠したら、前面のふりも解く。**
+/// 小窓を隠す。**隠したら、持ち主から外す。** 前面のふりは `show_window` が解く。
 ///
-/// 前面のふりをさせたまま隠すと、DWM は隠れた窓をまだ前面のものとして扱う。
-/// 持ち主の窓 (Slack のような Electron のアプリ) をタスクトレイから出し直すと、
-/// 隠れているはずの小窓の地が空白のまま元の場所に描かれ続けた。
+/// 持ち主は、出しているあいだアプリの上に居させるためのもの (ストアアプリでは、
+/// 持ち主の無い窓はアプリの描画面の下に潜る)。隠れているあいだまで持ち物で
+/// いると、持ち主の窓が隠れてまた出てくるとき (Claude Desktop の 1 行窓を
+/// 出し直す、Slack をタスクトレイから出し直す)、DWM が隠れた小窓の最後の絵を
+/// 持ち主と一緒に組み直し、空白の地が入力位置のそばに残る。出すときに、
+/// その時の入力先を持ち主に付け直す。
 pub fn hide(hwnd: HWND) {
-    // SAFETY: 自分の窓を隠し、知らせを送るだけ。
+    // SAFETY: 自分の窓を隠し、持ち主を外すだけ。
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
-        let _ = SendMessageW(hwnd, WM_NCACTIVATE, Some(WPARAM(0)), Some(LPARAM(0)));
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+    }
+}
+
+/// 窓の手続きで `WM_SHOWWINDOW` を受けたときに呼ぶ。**隠されるなら、前面のふりを解く。**
+///
+/// 前面のふりをさせたまま隠すと、DWM は隠れた窓をまだ前面のものとして扱い、
+/// 隠れているはずの小窓の地が空白のまま元の場所に描かれ続ける。Slack を
+/// タスクトレイから出し直したときに起きた。隠すのは自分 (`hide`) とは限らない。持ち主の窓が最小化されたり
+/// 隠されたりすると、Windows が持ち物の窓を隠す。どの場合もこの知らせは届くので、
+/// ここで解く。
+pub fn show_window(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: 既定の処理に委ねるだけ。この時点の窓はまだ出ているので、
+    // `nc_activate` を通さず、非前面を直に伝える。
+    unsafe {
+        if wparam.0 == 0 {
+            let _ = DefWindowProcW(hwnd, WM_NCACTIVATE, WPARAM(0), LPARAM(0));
+        }
+        DefWindowProcW(hwnd, WM_SHOWWINDOW, wparam, lparam)
     }
 }
 

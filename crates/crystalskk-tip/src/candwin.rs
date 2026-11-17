@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_HWNDPARENT, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible,
     RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_PAINT,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_SHOWWINDOW, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -571,6 +571,7 @@ unsafe extern "system" fn window_proc(
         }
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
         WM_NCACTIVATE => popup::nc_activate(hwnd, wparam, lparam),
+        WM_SHOWWINDOW => popup::show_window(hwnd, wparam, lparam),
         WM_DESTROY => {
             // SAFETY: 預けたのは自分の箱。二度落とさないよう 0 に戻す。
             unsafe {

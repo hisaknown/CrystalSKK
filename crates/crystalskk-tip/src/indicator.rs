@@ -31,8 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_HWNDPARENT, GWLP_USERDATA,
     GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, IsWindowVisible, KillTimer, RegisterClassExW,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    UnregisterClassW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCACTIVATE, WM_NCHITTEST, WM_PAINT,
+    WM_SHOWWINDOW, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -428,6 +429,7 @@ unsafe extern "system" fn window_proc(
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         // 透かした地を保つため、いつも前面にいるものとして扱わせる。
         WM_NCACTIVATE => popup::nc_activate(hwnd, wparam, lparam),
+        WM_SHOWWINDOW => popup::show_window(hwnd, wparam, lparam),
         WM_TIMER if wparam.0 == TIMER => {
             // SAFETY: 自分の窓の時計を止めて隠す。
             unsafe {
